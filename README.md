@@ -1,93 +1,156 @@
 # 113-pea-oms
 
+# OMS Connect: AI-Enhanced Complaint and Data Management System
+
+**Project Title:** โครงการวิเคราะห์และศึกษาการพัฒนาแพลตฟอร์มบริหารจัดการข้อมูลข้อร้องเรียนด้านไฟฟ้าขัดข้องด้วย AI กรณีนำร่องที่จังหวัดปทุมธานี (OMS AI-Enhanced Complaint and Data Management System) [cite: 9, 21, 22]  
+**Pilot Location:** Pathum Thani, Thailand [cite: 10]  
+**Owner:** Provincial Electricity Authority (PEA) [cite: 14]  
+**Developer:** Thammasat University Research and Consultancy Institute [cite: 13]
+
+---
+
+## 📖 Table of Contents
+- [Project Overview](#-project-overview)
+- [Key Features](#-key-features)
+- [System Architecture](#-system-architecture)
+- [Tech Stack](#-tech-stack)
+- [Research Methodology](#-research-methodology)
+- [Installation & Setup](#-installation--setup)
+- [Project Roadmap](#-project-roadmap)
+- [License & Intellectual Property](#-license--intellectual-property)
+
+---
+
+## 💡 Project Overview
+
+**OMS Connect** is a pilot initiative designed to transform how the Provincial Electricity Authority (PEA) handles power outage complaints. Currently, PEA faces challenges with scattered data across multiple channels (Line, Facebook, Web) and reactive responses[cite: 30, 31].
+
+This project aims to develop a centralized **Omnichannel Platform** powered by **AI Agents (LLMs)** and **Data Analytics** to:
+1.  Centralize complaint management[cite: 38].
+2.  Provide accurate **Estimated Time to Restoration (ETR)**[cite: 37].
+3.  Proactively identify outage risks using Graph Databases and Weather/Social data[cite: 46, 50].
+4.  Enhance customer experience with empathetic AI communication[cite: 37].
+
+---
+
+## ✨ Key Features
+
+### 1. Omnichannel Integration
+- **Centralized Hub:** Aggregates complaints from LINE, Facebook, and Web APIs into a single platform[cite: 45].
+- **Graph Database:** Maps relationships between users, assets, and service areas to perform Root Cause Analysis[cite: 46].
+- **External Data Injection:** Integrates weather data (15-min intervals), local news, and social media sentiment for context[cite: 50, 51, 52].
+
+### 2. Intelligent LLM Agents
+- **Automated Response:** Handles FAQs and routine inquiries[cite: 64].
+- **ETR Calculation:** Estimates restoration time based on asset status, field resource allocation, and weather conditions[cite: 231].
+- **Empathetic AI:** Trained to provide comforting and polite responses to reduce customer anxiety during outages[cite: 37].
+- **Contact Account (CA) Verification:** Verifies user identity against the customer database[cite: 65].
+
+### 3. Operational Dashboard & HIL
+- **Kanban Board:** Visualizes ticket status (e.g., "Pending", "In Progress", "Resolved")[cite: 68, 69].
+- **Human-in-the-Loop (HIL):** Allows human operators to review, approve, or reject AI-generated proactive alerts before they are sent[cite: 235].
+- **Geospatial Visualization:** Real-time heatmap of outages and complaints in Pathum Thani[cite: 47, 52].
+
+---
+
+## 🏗 System Architecture
+
+The system connects public-facing channels with PEA's internal Outage Management System (OMS).
 
 
-## Getting started
+**High-Level Flow:**
+1.  **User Input:** Complaints come via Line/Facebook[cite: 129].
+2.  **Omnichannel Layer:** Consolidates data[cite: 330].
+3.  **LLM Agent:**
+    - Verifies Identity (CA)[cite: 323].
+    - Queries Knowledge Hub & Graph DB[cite: 338].
+    - Generates response & ETR[cite: 231].
+4.  **Kanban/Dashboard:** Branch managers track status[cite: 325].
+5.  **PEA OMS Interface:** Field technicians receive work orders and report status back to the system[cite: 327].
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+---
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+## 🛠 Tech Stack
 
-## Add your files
+Based on the technical specifications[cite: 454, 456, 457]:
 
-* [Create](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#create-a-file) or [upload](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+| Component | Technology |
+| :--- | :--- |
+| **Frontend** | React.js, Tailwind CSS (implied by "Modern Framework") [cite: 73, 457] |
+| **Backend API** | Python, Django [cite: 457] |
+| **AI / LLM** | OpenAI GPT, Google Gemini, Hugging Face Transformers [cite: 454, 457] |
+| **Conversation Mgmt** | Chatwoot [cite: 457] |
+| **Data Pipelines** | Kedro, Apache Airflow [cite: 457] |
+| **Databases** | PostgreSQL (Relational), Redis (Cache), ClickHouse (Analytics), Minio (Storage) [cite: 456, 457] |
+| **Visualization** | Tableau or Superset [cite: 454] |
+| **Infrastructure** | Cloud-based with High Security [cite: 57] |
 
-```
-cd existing_repo
-git remote add origin https://gitlab.com/storemesh/project/pea/113-pea-oms.git
-git branch -M main
-git push -uf origin main
-```
+---
 
-## Integrate with your tools
+## 🔬 Research Methodology
 
-* [Set up project integrations](https://gitlab.com/storemesh/project/pea/113-pea-oms/-/settings/integrations)
+This project follows a **6-month Research & Development timeline** focusing on three key research questions[cite: 224, 229, 235]:
 
-## Collaborate with your team
+1.  **Data Integration:** How to structure multi-modal data (Social, Weather, Assets) into a Graph DB for proactive detection?
+2.  **LLM Architecture:** Testing architectures for accurate ETR estimation and empathetic "Comforting Agents."
+3.  **Human-in-the-Loop (HIL):** Designing dashboards that balance AI autonomy with human oversight for critical alerts.
 
-* [Invite team members and collaborators](https://docs.gitlab.com/ee/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/ee/user/project/merge_requests/creating_merge_requests.html)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/ee/user/project/issues/managing_issues.html#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/ee/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+---
 
-## Test and Deploy
+## ⚙️ Installation & Setup
 
-Use the built-in continuous integration in GitLab.
+*(Note: This section is a placeholder for the actual implementation details)*
 
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ee/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/ee/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/ee/topics/autodevops/requirements.html)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/ee/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ee/ci/environments/protected_environments.html)
+### Prerequisites
+- Python 3.9+
+- Node.js 16+
+- Docker & Docker Compose
+- PostgreSQL
 
-***
+### Local Development
 
-# Editing this README
+1.  **Clone the repository**
+    ```bash
+    git clone https://gitlab.com/storemesh/project/pea/113-pea-oms.git
+    cd 113-pea-oms.git
+    ```
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+2.  **Environment Variables**
+    Create a `.env` file based on `.env.example`:
+    ```bash
+    cp .env.example .env
+    # Configure LLM API Keys (OpenAI/Gemini), DB credentials, and PEA OMS Endpoints
+    ```
 
-## Suggestions for a good README
+3.  **Start Services (Docker)**
+    ```bash
+    docker-compose up -d --build
+    ```
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+4.  **Run Migrations**
+    ```bash
+    docker-compose exec backend python manage.py migrate
+    ```
 
-## Name
-Choose a self-explaining name for your project.
+---
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+## 📅 Project Roadmap
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+The project is executed over 6 months[cite: 173, 462]:
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+* **Month 1-2:** Requirement Gathering, System Design, Graph DB Setup[cite: 546].
+* **Month 3:** Prototype Development (Omnichannel & LLM Agent)[cite: 558].
+* **Month 4:** Pilot Launch in Pathum Thani & HIL Dashboard Implementation[cite: 571].
+* **Month 5:** Testing, Feedback Collection, and System Tuning[cite: 608].
+* **Month 6:** Final Evaluation, Knowledge Transfer (OJT), and Scaling Plan[cite: 433, 577].
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+---
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+## 📜 License & Intellectual Property
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+* **Ownership:** All Intellectual Property (IP), including the platform, software, and data models, belongs **100% to the Provincial Electricity Authority (PEA)**[cite: 484].
+* **Usage:** For research and internal PEA operations only.
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+---
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
-
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
-
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
-
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
-
-## License
-For open source projects, say how it is licensed.
-
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+*Generated based on the OMS Research Grant Form (2025-09-30).*
