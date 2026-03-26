@@ -101,3 +101,13 @@ CLAUDE.local.md
 .histoire
 .pnpm-store/*
 local/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+*.csv
+*.json
+*.sqlite
+*.parquet
