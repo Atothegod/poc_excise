@@ -111,3 +111,5 @@ __pycache__/
 *.json
 *.sqlite
 *.parquet
+
+.venv/
