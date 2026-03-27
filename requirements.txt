@@ -8,3 +8,4 @@ playwright
 pyarrow
 fastparquet
 chromium
+asyncio
