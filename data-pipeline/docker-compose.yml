@@ -1,0 +1,53 @@
+services:
+  # 1. Prefect Server (Orchestration UI and API)
+  prefect-server:
+    image: prefecthq/prefect:3-python3.11
+    container_name: ${PROJECT_NAME}_prefect-server
+    ports:
+      - "4200:4200"
+    command: prefect server start --host 0.0.0.0
+    volumes:
+      - prefect-data:/root/.prefect
+    environment:
+      - PREFECT_UI_API_URL=http://localhost:4200/api
+    restart: always
+
+  # 2. JupyterLab Environment
+  jupyter:
+    container_name: ${PROJECT_NAME}_jupyter-lab
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8888:8888"
+    volumes:
+      - .:/app
+    working_dir: /app
+    env_file:
+      - .env
+    command: jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root
+    environment:
+      - PREFECT_API_URL=http://prefect-server:4200/api
+    depends_on:
+      - prefect-server
+
+  # 3. Prefect Worker (Executes your deployments)
+  prefect-worker:
+    container_name: ${PROJECT_NAME}_prefect-worker
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - .:/app
+    working_dir: /app
+    env_file:
+      - .env
+    command: prefect worker start --pool "default-pool"
+    environment:
+      - PREFECT_API_URL=http://prefect-server:4200/api
+    depends_on:
+      - prefect-server
+    restart: on-failure
+
+volumes:
+  prefect-data:
