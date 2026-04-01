@@ -1,20 +1,52 @@
+# กำหนด Network แยกเฉพาะของโปรเจกต์นี้
+networks:
+  pea_network:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  minio-data:
+
 services:
-  # 1. Prefect Server (Orchestration UI and API)
+  # 1. Database (Postgres)
+  postgres:
+    image: postgres:15-alpine
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - pea_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging: &default-logging
+      driver: "json-file"
+      options:
+        max-size: "10m"   
+        max-file: "3"
+
+  # 2. Prefect Server
   prefect-server:
     image: prefecthq/prefect:3-python3.11
-    container_name: ${PROJECT_NAME}_prefect-server
+    command: prefect server start --host 0.0.0.0
     ports:
       - "4200:4200"
-    command: prefect server start --host 0.0.0.0
-    volumes:
-      - prefect-data:/root/.prefect
-    environment:
-      - PREFECT_UI_API_URL=http://localhost:4200/api
+    env_file:
+      - .env
+    networks:
+      - pea_network
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: always
+    logging: *default-logging
 
-  # 2. JupyterLab Environment
+  # 3. JupyterLab
   jupyter:
-    container_name: ${PROJECT_NAME}_jupyter-lab
     build: 
       context: .
       dockerfile: Dockerfile
@@ -22,18 +54,19 @@ services:
       - "8888:8888"
     volumes:
       - .:/app
-    working_dir: /app
+    working_dir: /app/notebooks
     env_file:
       - .env
-    command: jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root --ServerApp.token='' --ServerApp.password=''
-    environment:
-      - PREFECT_API_URL=http://prefect-server:4200/api
+    command: bash /app/scripts/start-jupyter.sh
+    networks:
+      - pea_network
     depends_on:
       - prefect-server
+    restart: always
+    logging: *default-logging
 
-  # 3. Prefect Worker (Executes your deployments)
+  # 4. Prefect Worker
   prefect-worker:
-    container_name: ${PROJECT_NAME}_prefect-worker
     build: 
       context: .
       dockerfile: Dockerfile
@@ -42,27 +75,26 @@ services:
     working_dir: /app
     env_file:
       - .env
-    command: prefect worker start --pool "default-pool"
-    environment:
-      - PREFECT_API_URL=http://prefect-server:4200/api
+    command: bash scripts/start-worker.sh
+    networks:
+      - pea_network
     depends_on:
       - prefect-server
-    restart: on-failure
+    restart: always
+    logging: *default-logging
   
+  # 5. MinIO
   minio:
-    image: minio/minio
-    container_name: ${PROJECT_NAME}_minio
+    image: minio/minio:RELEASE.2023-10-16T04-13-43Z
     ports:
       - "9000:9000"
       - "9001:9001"
-    environment:
-      - MINIO_ROOT_USER=${MINIO_USER}
-      - MINIO_ROOT_PASSWORD=${MINIO_PASSWORD}
+    env_file:
+      - .env
     command: server /data --console-address ":9001"
     volumes:
       - minio-data:/data
-    restart: unless-stopped
-
-volumes:
-  prefect-data:
-  minio-data:
+    networks:
+      - pea_network
+    restart: always
+    logging: *default-logging
