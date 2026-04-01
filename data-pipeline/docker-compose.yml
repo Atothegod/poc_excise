@@ -1,4 +1,3 @@
-# กำหนด Network แยกเฉพาะของโปรเจกต์นี้
 networks:
   pea_network:
     driver: bridge
