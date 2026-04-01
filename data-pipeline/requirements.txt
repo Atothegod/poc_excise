@@ -1,0 +1,13 @@
+pandas
+numpy
+duckdb
+python-dotenv
+s3fs
+requests
+prefect
+jupyterlab
+scikit-learn
+pycaret
+matplotlib
+seaborn
+playwright
