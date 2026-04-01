@@ -113,3 +113,4 @@ __pycache__/
 *.parquet
 
 .venv/
+.ipynb_checkpoints/
