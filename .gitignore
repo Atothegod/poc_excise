@@ -115,3 +115,4 @@ __pycache__/
 .venv/
 .ipynb_checkpoints/
 .pytest_
+.Trash-0/
