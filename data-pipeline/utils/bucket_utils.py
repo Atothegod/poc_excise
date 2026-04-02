@@ -1,59 +1,68 @@
 import os
 import duckdb
-import pandas as pd
 from dotenv import load_dotenv
 
 load_dotenv()
-key = os.environ.get("GCS_ACCESS_KEY")
-secret = os.environ.get("GCS_SECRET_KEY")
 
-def get_fs():
-    """
-    ฟังก์ชันสำหรับสร้าง DuckDB Connection ที่เชื่อมต่อกับ GCS 
-    ผ่าน S3 Compatibility Mode สำหรับให้ทีม Data Engineer ใช้งาน
-    """
-    # 1. โหลด Environment Variables
-    load_dotenv()
-    raw_endpoint = os.environ.get("GCS_ENDPOINT_URL", "")
+
+def _load_credentials() -> tuple[str, str, str]:
+    """โหลดและตรวจสอบ Credentials จาก Environment Variables"""
+    endpoint = os.environ.get("GCS_ENDPOINT_URL", "")
     key = os.environ.get("GCS_ACCESS_KEY")
     secret = os.environ.get("GCS_SECRET_KEY")
 
-    if not all([raw_endpoint, key, secret]):
+    if not all([endpoint, key, secret]):
         raise ValueError("❌ ข้อมูล Credentials ไม่ครบ กรุณาตรวจสอบไฟล์ .env")
 
-    # 2. ทำความสะอาด Endpoint (ตัด https:// ออก)
+    return endpoint, key, secret
+
+
+def get_fs() -> duckdb.DuckDBPyConnection:
+    """
+    สร้าง DuckDB Connection ที่เชื่อมต่อกับ GCS
+    ผ่าน S3 Compatibility Mode
+    """
+    raw_endpoint, key, secret = _load_credentials()
+
+    # ตัด https:// / http:// ออก เพราะ DuckDB ไม่ต้องการ scheme
     clean_endpoint = raw_endpoint.replace("https://", "").replace("http://", "").rstrip("/")
 
-    # 3. สร้าง Connection และโหลด Extension
     con = duckdb.connect()
     con.execute("INSTALL httpfs; LOAD httpfs;")
-
-    # 4. สร้าง Secret แบบ S3 (เพื่อให้ใช้ s3:// ได้)
     con.execute(f"""
         CREATE OR REPLACE SECRET shared_gcs_secret (
             TYPE S3,
             KEY_ID '{key}',
             SECRET '{secret}',
             ENDPOINT '{clean_endpoint}',
-            URL_STYLE 'path' 
+            URL_STYLE 'path'
         );
     """)
-    
-    return con
-def get_duck_con():
-    con = duckdb.connect()
-    
-    # 2. ติดตั้งและโหลด Extension สำหรับจัดการไฟล์ผ่านเน็ต (ทำแค่ครั้งแรก)
-    con.execute("INSTALL httpfs; LOAD httpfs;")
-    
-    # 3. สร้าง Secret บอก DuckDB ว่านี่คือ Google Cloud (TYPE GCS)
-    con.execute(f"""
-        CREATE OR REPLACE SECRET gcs_secret (
-            TYPE GCS,
-            KEY_ID '{key}',
-            SECRET '{secret}'
-        );
-    """)
+
     return con
 
-#con = fs()
+
+def get_duck_con() -> duckdb.DuckDBPyConnection:
+    """ 
+    สร้าง DuckDB Connection ที่เชื่อมต่อกับ GCS
+    ผ่าน Native GCS Secret (TYPE GCS)
+    """
+    _, key, secret = _load_credentials()
+
+    con = duckdb.connect()
+    con.execute("INSTALL httpfs; LOAD httpfs;")
+    
+    # ใช้ TYPE S3 อย่างเดียว ไม่ต้องมี TYPE GCS
+    con.execute(f"""
+        CREATE OR REPLACE SECRET gcs_secret (
+            TYPE S3,
+            KEY_ID '{key}',
+            SECRET '{secret}',
+            REGION 'auto',
+            ENDPOINT 'storage.googleapis.com',
+            URL_STYLE 'path',
+            USE_SSL true
+        );
+    """)
+
+    return con
