@@ -3,14 +3,9 @@ import duckdb
 import pandas as pd
 from dotenv import load_dotenv
 
-# 1. โหลด Environment Variables
 load_dotenv()
 key = os.environ.get("GCS_ACCESS_KEY")
 secret = os.environ.get("GCS_SECRET_KEY")
-# gcs_connection.py
-import os
-import duckdb
-from dotenv import load_dotenv
 
 def get_fs():
     """
