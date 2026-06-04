@@ -1,6 +1,6 @@
 # StoreMesh Data Pipeline POC
 
-A small end-to-end proof of concept for loading CSV files into PostgreSQL, validating and promoting them through `staging` and `production`, and querying the results with an LLM-powered chat assistant.
+An end-to-end proof of concept for loading CSV files into PostgreSQL, validating and promoting them through `staging` and `production`, and querying the results with an LLM-powered chat assistant.
 
 ## What is included
 
