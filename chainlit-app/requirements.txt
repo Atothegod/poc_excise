@@ -1,0 +1,12 @@
+chainlit
+llama-index
+llama-index-llms-litellm
+sqlalchemy
+psycopg2-binary
+pandas
+python-dotenv
+litellm
+python-docx
+reportlab
+matplotlib
+seaborn
