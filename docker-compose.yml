@@ -1,0 +1,61 @@
+version: "3.9"
+
+volumes:
+  db-vquery: {}
+
+services:
+
+  db:
+    container_name: ${PROJECT_NAME}-db
+    image: postgres:17.5-alpine
+    volumes:
+      - db-vquery:/var/lib/postgresql/data:rw
+    env_file:
+      - .env
+    ports:
+      - "5432:5432"
+
+  app:
+    build: ./chainlit-app
+    container_name: chainlit_app
+    ports:
+        - "8500:8000"
+    command: chainlit run app_04_gemini2.5.py --host 0.0.0.0 --port 8000
+    env_file:
+        - .env
+    depends_on:
+        - db
+    volumes:
+        - ./chainlit-app:/app
+        - ./data:/app/data
+        - ./shared:/app/shared
+
+
+  pipeline:
+    container_name: ${PROJECT_NAME}-pipeline
+    build:
+      context: .
+      dockerfile: pipeline/dockerfile
+    volumes:
+      - ./pipeline:/app/pipeline
+      - ./ad_hoc:/app/ad_hoc
+    working_dir: /app/pipeline
+    env_file:
+      - .env
+    depends_on:
+      - db
+
+  streamlit:
+    container_name: ${PROJECT_NAME}-streamlit
+    build:
+      context: ./streamlit-ui
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./ad_hoc:/app/ad_hoc
+      - ./pipeline:/app/pipeline
+      - ./shared:/app/shared
+    env_file:
+      - .env
+    depends_on:
+      - db
