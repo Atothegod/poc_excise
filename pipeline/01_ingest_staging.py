@@ -43,8 +43,18 @@ for file in csv_files:
 
     print(f"\n=== Ingesting {table_name} into STAGING ===")
 
-    df = pd.read_csv(file, encoding=ENCODING)
+    # 🔥 วิธีแก้ที่ยั่งยืน: รองรับไฟล์ผสมกันหลาย Encoding (UTF-8 และ CP874)
+    try:
+        # ลองอ่านด้วย utf-8-sig ก่อน (อ่านได้ทั้ง utf-8 ธรรมดา และ utf-8 แบบมี BOM ที่มาจาก Excel)
+        df = pd.read_csv(file, encoding="utf-8-sig")
+        print("  -> Encoding: utf-8-sig (Success)")
+    except UnicodeDecodeError:
+        # ถ้าพัง แสดงว่าเป็นไฟล์จากระบบเก่า/Excel เก่า ให้ Fallback กลับมาใช้ cp874 ตาม config
+        df = pd.read_csv(file, encoding=ENCODING) 
+        print(f"  -> Encoding: {ENCODING} (Fallback)")
+
     df = transform_thai_month(df)
+    
     df = normalize_dtypes(df)
 
     df.to_sql(

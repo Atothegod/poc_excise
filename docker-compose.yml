@@ -52,6 +52,7 @@ services:
     ports:
       - "8501:8501"
     volumes:
+      - ./streamlit-ui:/app
       - ./ad_hoc:/app/ad_hoc
       - ./pipeline:/app/pipeline
       - ./shared:/app/shared
