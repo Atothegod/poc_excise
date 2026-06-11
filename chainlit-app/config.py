@@ -27,78 +27,29 @@ SQL Query:
 """)
 
 
-PROMPT_PRODUCTION = PromptTemplate("""
-You are a PostgreSQL Production Expert.
 
-Generate a correct SQL query for schema `production`.
 
-# OUTPUT RULES
-- Return ONLY one of:
-  1. A valid SQL query (starting with SELECT or WITH)
-  2. EXACTLY this word: NO_DATA
-- No explanation
-- No markdown
-- No JOIN, no ON
+PROMPT_PRODUCTION = PromptTemplate("""You are a PostgreSQL expert. Generate queries for the `production` schema.
 
-# WHEN TO RETURN NO_DATA
+# RULES & OUTPUT
+- Output ONLY a valid SQL query OR exactly the word `NO_DATA`. No explanations, no markdown, no JOIN/ON.
+- Return `NO_DATA` if the query is vague, outside the excise domain, or lacks metadata/schema matches. DO NOT guess.
 
-Return NO_DATA if:
-- The question refers to a product, group, or entity that is NOT related to excise domain
-- The keyword does not match any BUSINESS METADATA or SCHEMA
-- The request cannot be mapped to any table or column
-- The keyword is too vague or unrelated (e.g., ข้าวสาร, รถยนต์ไฟฟ้า ถ้าไม่มีใน domain)
+# SQL CONSTRUCTION
+1. Tables: Select EXACTLY ONE semantically relevant table.
+2. Identifiers: Format tables as `production."TABLE_NAME"`. Double-quote all Thai or uppercase identifiers. Use only existing columns.
+3. Aggregation: Use SUM() for totals, GROUP BY for yearly trends.
+4. Text Search: Extract ONE core entity keyword (strip generic words like ยอด, จำนวน, ปี, รวม). Always use `ILIKE '%Keyword%'` (never `=`) to search relevant text columns (e.g., "GROUP_NAME", "DUTY_NAME").
 
-DO NOT guess.
-
-# TABLE SELECTION
-
-1. Choose exactly ONE table based on semantic meaning.
-   - Fine → fine table
-   - Tax → tax table
-   - Never choose unrelated category.
-
-2. Table must contain relevant columns.
-   Do not guess column names.
-
-3. Always prefix table with:
-   production."TABLE_NAME"
-
-4. Thai or uppercase identifiers must use double quotes.
-
-# KEYWORD EXTRACTION
-
-If question refers to product/item:
-
-1. Extract ONE keyword entity only.
-2. Remove generic words:
-   ยอด, จำนวน, รายงาน, ปี, รวม, ทั้งหมด, เท่าไหร่ ฯลฯ
-3. Use format:
-   '%Keyword%'
-
-Text search must use ILIKE only:
-
-(
- "GROUP_NAME" ILIKE '%Keyword%'
- OR "DUTY_NAME" ILIKE '%Keyword%'
- OR "PRODUCT_NAME" ILIKE '%Keyword%'
-)
-
-No '=' for text.
-
-# AGGREGATION
-
-If asking total → use SUM().
-If yearly → GROUP BY year column.
-
-# BUSINESS METADATA
+# METADATA
 {metadata}
 
 # SCHEMA
 {schema}
 
 # QUESTION
-{query_str}
-""")
+{query_str}""")
+
 
 SCHEMA_PROMPTS = {
     "public": TEXT2SQL_PROMPT,

@@ -70,9 +70,19 @@ def list_files(disabled=False):
 def preview_csv(file_name):
     file_path = os.path.join(UPLOAD_DIR, file_name)
 
-    try:
-        df = pd.read_csv(file_path, encoding=CSV_ENCODING)
+    # 🔥 ลองอ่านด้วย utf-8-sig ก่อน ถ้าพังค่อยถอยไปใช้ CSV_ENCODING (cp874)
+    encodings_to_try = ["utf-8-sig", CSV_ENCODING, "latin1"]
+    df = None
+
+    for enc in encodings_to_try:
+        try:
+            df = pd.read_csv(file_path, encoding=enc)
+            break  # ถ้าอ่านสำเร็จ ให้หยุดลูปทันที
+        except Exception:
+            continue  # ถ้าพัง ให้ลอง encoding ตัวถัดไป
+
+    if df is not None:
         st.dataframe(df, use_container_width=True)
         st.caption(f"Rows: {len(df)} | Columns: {len(df.columns)}")
-    except Exception as e:
-        st.error(f"Failed to read CSV: {e}")
+    else:
+        st.error("Failed to read CSV: ไม่สามารถอ่านไฟล์ได้ (unsupported encoding)")
