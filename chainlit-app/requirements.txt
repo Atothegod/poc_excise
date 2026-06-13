@@ -10,3 +10,6 @@ python-docx
 reportlab
 matplotlib
 seaborn
+dspy-ai
+aiosqlite
+SQLAlchemy
