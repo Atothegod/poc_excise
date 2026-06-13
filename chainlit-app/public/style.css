@@ -1,206 +1,217 @@
 /* =========================
-   GLOBAL UI
+   EXCISE DEPARTMENT - Custom Chainlit Theme
    ========================= */
 
-body {
-    background: #f9fafb;
+/* --- Google Font --- */
+@import url('https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap');
+
+/* --- Root Variables --- */
+:root {
+    --excise-blue: #1a4a7a;
+    --excise-blue-light: #2a6cb0;
+    --excise-gold: #f5a623;
+    --excise-bg: #f0f4f8;
+    --excise-card: #ffffff;
+    --excise-text: #2c3e50;
+    --excise-text-muted: #6b7c93;
+    --excise-border: #e2e8f0;
+    --excise-gradient: linear-gradient(135deg, #1a4a7a 0%, #2a6cb0 50%, #3a8cd0 100%);
 }
 
+/* --- Global Font --- */
+body, 
+* {
+    font-family: 'Sarabun', 'Segoe UI', Tahoma, sans-serif !important;
+}
 
 /* =========================
-   LOGO
+   HEADER LOGO - in the top nav bar
    ========================= */
-
 .logo {
-    width: 260px !important;
-    margin-top: -30px !important;
-    margin-bottom: 10px !important;
-
+    width: auto !important;
+    max-width: 220px !important;
+    max-height: 80px !important;
+    height: auto !important;
+    object-fit: contain !important;
     display: block;
     margin-left: auto;
     margin-right: auto;
-
-    filter: drop-shadow(0 8px 20px rgba(0,0,0,0.08));
+    filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.06));
 }
 
-/* subtitle ใต้ logo */
-
-header::after {
-    content: "POC AI Assistant";
-    display: block;
-    text-align: center;
-
-    font-size: 18px;
-    font-weight: 600;
-
-    margin-top: 4px;
-    color: #111827;
+/* Make the header nav tall enough to show the full logo */
+header, nav, [class*="navbar"], [class*="header"] {
+    min-height: 80px !important;
 }
-
-/* tagline */
-
-header::before {
-    content: "Query your production data with AI";
-    display: block;
-
-    text-align: center;
-    font-size: 13px;
-
-    color: #9ca3af;
-    margin-bottom: 6px;
-}
-
 
 /* =========================
-   CHAT AREA
+   MAIN CONTENT AREA - push input box down
    ========================= */
 
-main {
-    max-width: 900px;
-    margin: auto;
+/* Give the welcome / empty-state area enough vertical space
+   so the composer box doesn't hug the very top */
+#root > div > main,
+[class*="main-content"],
+[class*="chat-container"],
+[class*="cl-chat"],
+.cl-chat {
+    padding-top: 40px !important;
 }
 
+/* The starter-prompt + composer wrapper on the welcome screen */
+[class*="welcome"],
+[class*="starter"],
+[class*="empty"] {
+    padding-top: 60px !important;
+}
 
 /* =========================
-   MESSAGE COMPOSER BOX
+   WELCOME SCREEN (chainlit.md content)
    ========================= */
 
-#message-composer {
-    border-radius: 24px !important;
-    padding: 16px 20px !important;
-    min-height: 110px !important;
-
-    border: 1px solid #e5e7eb;
-
-    box-shadow: 0 8px 25px rgba(0,0,0,0.06);
-
-    background: #ffffff;
-
-    transition: all 0.2s ease;
+/* Make the welcome screen markdown content visible and well-styled */
+.markdown-body {
+    max-width: 700px !important;
+    margin: 0 auto !important;
+    padding: 20px !important;
 }
 
-
-/* hover effect */
-
-#message-composer:hover {
-    box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+.markdown-body img {
+    max-width: 220px !important;
+    height: auto !important;
+    display: block !important;
+    margin: 0 auto 16px auto !important;
+    filter: drop-shadow(0 4px 12px rgba(0, 0, 0, 0.08));
 }
 
-
-/* textarea ใหญ่ขึ้น */
-
-#chat-input {
-    font-size: 16px !important;
-    min-height: 60px !important;
-    line-height: 1.5;
+.markdown-body h2 {
+    color: var(--excise-blue) !important;
+    font-size: 1.5rem !important;
+    font-weight: 700 !important;
+    margin-bottom: 8px !important;
 }
 
-
-/* placeholder */
-
-#chat-input::placeholder {
-    color: #9ca3af;
+.markdown-body h3 {
+    color: var(--excise-text-muted) !important;
+    font-size: 1.1rem !important;
+    font-weight: 500 !important;
 }
 
+.markdown-body p {
+    color: var(--excise-text) !important;
+    font-size: 1rem !important;
+    line-height: 1.8 !important;
+}
+
+.markdown-body li {
+    color: var(--excise-text) !important;
+    font-size: 0.95rem !important;
+    padding: 6px 12px !important;
+    margin: 6px 0 !important;
+    background: var(--excise-bg) !important;
+    border-radius: 8px !important;
+    border-left: 3px solid var(--excise-blue-light) !important;
+    transition: transform 0.2s ease, box-shadow 0.2s ease !important;
+}
+
+.markdown-body li:hover {
+    transform: translateX(4px) !important;
+    box-shadow: 0 2px 8px rgba(26, 74, 122, 0.1) !important;
+}
 
 /* =========================
-   BUTTONS
+   CHAT STARTERS
    ========================= */
-
-/* send button */
-
-#chat-submit {
-    height: 42px !important;
-    width: 42px !important;
-
-    border-radius: 999px;
-
-    background: #2563eb !important;
+button[id^="starter-"] {
+    background: var(--excise-card) !important;
+    border: 1px solid var(--excise-border) !important;
+    border-radius: 12px !important;
+    padding: 16px !important;
+    transition: all 0.3s ease !important;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04) !important;
 }
 
-/* hover */
-
-#chat-submit:hover {
-    background: #1d4ed8 !important;
+button[id^="starter-"]:hover {
+    border-color: var(--excise-blue-light) !important;
+    box-shadow: 0 4px 16px rgba(26, 74, 122, 0.12) !important;
+    transform: translateY(-2px) !important;
 }
-
-
-/* upload button */
-
-#upload-button {
-    height: 38px !important;
-    width: 38px !important;
-}
-
-
-/* settings button */
-
-#chat-settings-open-modal {
-    height: 38px !important;
-    width: 38px !important;
-}
-
 
 /* =========================
-   BRANDING FOOTER
+   MESSAGE INPUT BOX
    ========================= */
 
-#message-composer::after {
-    content: "POC AI Assistant • Ask anything about your data";
-    display: block;
-
-    font-size: 12px;
-    color: #9ca3af;
-
-    margin-top: 6px;
-
-    text-align: center;
+/* Style the message composer area */
+.cl-chat-input textarea,
+.cl-input textarea,
+textarea[placeholder] {
+    font-size: 1rem !important;
+    border-radius: 12px !important;
+    border: 1.5px solid var(--excise-border) !important;
+    transition: border-color 0.3s ease, box-shadow 0.3s ease !important;
 }
 
+textarea[placeholder]:focus {
+    border-color: var(--excise-blue-light) !important;
+    box-shadow: 0 0 0 3px rgba(42, 108, 176, 0.1) !important;
+    outline: none !important;
+}
 
 /* =========================
-   MESSAGE BUBBLES
+   CHAT MESSAGES
    ========================= */
 
-.cl-message {
-    border-radius: 14px !important;
+/* Assistant messages */
+.cl-message-content {
+    line-height: 1.8 !important;
 }
 
-
-/* user message */
-
-.cl-message-user {
-    background: #2563eb !important;
-    color: white !important;
+/* Code blocks inside messages */
+.cl-message-content pre {
+    border-radius: 10px !important;
+    border: 1px solid var(--excise-border) !important;
 }
-
-
-/* assistant message */
-
-.cl-message-assistant {
-    background: #f3f4f6 !important;
-}
-
 
 /* =========================
-   DATAFRAME
+   SIDEBAR
    ========================= */
-
-table {
-    border-radius: 12px;
-    overflow: hidden;
+.cl-sidebar {
+    border-right: 1px solid var(--excise-border) !important;
 }
 
-
 /* =========================
-   SCROLLBAR
+   SCROLLBAR (for Webkit browsers)
    ========================= */
-
 ::-webkit-scrollbar {
     width: 6px;
 }
 
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
 ::-webkit-scrollbar-thumb {
-    background: #d1d5db;
-    border-radius: 6px;
+    background: rgba(26, 74, 122, 0.2);
+    border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: rgba(26, 74, 122, 0.35);
+}
+
+/* =========================
+   RESPONSIVE ADJUSTMENTS
+   ========================= */
+@media (max-width: 768px) {
+    .logo {
+        width: 150px !important;
+    }
+
+    .markdown-body img {
+        max-width: 160px !important;
+    }
+
+    .markdown-body h2 {
+        font-size: 1.2rem !important;
+    }
 }
