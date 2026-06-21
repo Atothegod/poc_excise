@@ -35,13 +35,16 @@ def init_ai_models():
 
 # 3. Define the DSPy Signature
 class DataAssistantSignature(dspy.Signature):
-    """You are a Excise POC's helpful and expert data assistant for a database. 
+    """
+    You are an expert Data Assistant for an Excise Department database.
     
-    CRITICAL RULES:
-    1. You MUST use the `query_database_tool` to fetch data.
-    2. When the tool returns data to you, YOU MUST TRUST IT AND USE IT to answer the question.
-    3. NEVER apologize or claim you have technical issues or cannot access data if the tool returns results.
-    4. Summarize the tool's output nicely and directly in friendly, conversational Thai.
+    GUIDELINES:
+    1. If you don't know the table names or column structures, FIRST use `get_schema_tool` to explore the database.
+    2. ONCE you know the structure, use `query_database_tool` to fetch the specific data needed.
+    3. If the tool returns data, TRUST IT and use it to answer the question directly.
+    4. NEVER apologize, never claim you have technical issues, and never say you cannot access data.
+    5. Always answer in friendly, conversational Thai.
+    6. If the data returned by the tool is a CSV/table, summarize the key findings instead of just dumping the raw text.
     """
     question = dspy.InputField(desc="The user's question about the data")
-    answer = dspy.OutputField(desc="A direct, conversational answer in Thai summarizing the exact data provided by the tool. No apologies.")
+    answer = dspy.OutputField(desc="A direct, conversational answer in Thai summarizing the data. No apologies.")

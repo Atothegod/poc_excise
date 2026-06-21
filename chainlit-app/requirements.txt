@@ -13,3 +13,6 @@ seaborn
 dspy-ai
 aiosqlite
 SQLAlchemy
+google-generativeai 
+gTTS
+edge-tts
