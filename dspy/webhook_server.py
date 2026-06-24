@@ -4,9 +4,8 @@ from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
 
-from agent import chatbot 
-
-
+# 1. Import the stateful 'chatbot' instance you created in agent.py
+from agent import chatbot
 
 app = FastAPI(title="DSPy Agent Webhook Server")
 
@@ -14,7 +13,7 @@ app = FastAPI(title="DSPy Agent Webhook Server")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -22,22 +21,39 @@ app.add_middleware(
 
 # -----------------------------------
 
+
 class QuestionRequest(BaseModel):
     question: str
     session_id: str
-    time_stamp: Optional[str] = None
+    time_stamp: Optional[str] = None  # Allows the field to be missing or null
+
 
 @app.post("/ask")
 async def ask_agent(data: QuestionRequest):
     try:
-        response = chatbot.chat(user_input=data.question, session_id=data.session_id, time_stamp=data.time_stamp)
-        
+        # 2. Check if time_stamp is null. If so, generate the real current system time.
+        if data.time_stamp is None:
+            # .astimezone() ensures the timezone offset (like +07:00) is included
+            final_time_stamp = datetime.now().astimezone().isoformat()
+        else:
+            final_time_stamp = data.time_stamp
+
+        # 3. Pass the resolved timestamp into your stateful MemoryAgent wrapper
+        response = chatbot.chat(
+            user_input=data.question,
+            session_id=data.session_id,
+            time_stamp=final_time_stamp,
+        )
+
+        # 4. Return the natural language answer AND the Pydantic state
         return {
-            "answer": getattr(response, 'answer', str(response)),
-            "state": getattr(response, 'current_state', None)
+            "answer": getattr(response, "answer", str(response)),
+            "state": getattr(response, "current_state", None),
+            "used_timestamp": final_time_stamp,  # Optional: helpful for debugging what time was actually used
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/health")
 def health_check():

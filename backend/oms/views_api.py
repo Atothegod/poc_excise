@@ -1,8 +1,43 @@
+import math
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
-from .models import CustomerReport, OutageCase
-from .serializers import AgentReportSerializer, ActionStatusRequestSerializer, ActionStatusResponseSerializer
 from django.utils import timezone
+from datetime import timedelta
+from .models import CustomerReport, OutageCase
+from .serializers import (
+    AgentReportSerializer,
+    ActionStatusRequestSerializer,
+    ActionStatusResponseSerializer,
+)
+
+
+# ---------------------------------------------------------
+# ฟังก์ชันคณิตศาสตร์สำหรับคำนวณระยะทางระหว่างพิกัด 2 จุด (กิโลเมตร)
+# ---------------------------------------------------------
+def calculate_distance(lat1, lon1, lat2, lon2):
+    if None in [lat1, lon1, lat2, lon2]:
+        return float("inf")
+
+    R = 6371.0  # รัศมีโลก (กิโลเมตร)
+    lat1_rad = math.radians(lat1)
+    lon1_rad = math.radians(lon1)
+    lat2_rad = math.radians(lat2)
+    lon2_rad = math.radians(lon2)
+
+    dlon = lon2_rad - lon1_rad
+    dlat = lat2_rad - lat1_rad
+
+    a = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(dlon / 2) ** 2
+    )
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+    return R * c  # ระยะทางเป็นกิโลเมตร
+
+
+# ---------------------------------------------------------
+
 
 @api_view(["POST"])
 def sync_agent_report(request):
@@ -12,54 +47,78 @@ def sync_agent_report(request):
         data = serializer.validated_data
         session_id = data.get("session_id")
         ca_number = data.get("ca_number")
-        tool_used = data.get("tool_used")
 
-        # 1. Upsert: ค้นหาจาก Session ID และ CA ที่ยังคุยไม่จบ (is_resolved=False)
-        # ถ้าไม่มีในระบบ (หรือเป็นเคสใหม่ที่เคสเก่าจบไปแล้ว) จะทำการสร้างบรรทัดใหม่
+        # ค้นหาหรือสร้าง Report ใหม่สำหรับ Session นี้
         report, created = CustomerReport.objects.get_or_create(
             session_id=session_id, ca_number=ca_number, is_resolved=False
         )
 
-        # 2. อัปเดตข้อมูลพิกัดและประวัติการสนทนา
+        # อัปเดตข้อมูลทั่วไป
         if data.get("latitude"):
             report.latitude = data.get("latitude")
         if data.get("longitude"):
             report.longitude = data.get("longitude")
         if data.get("chat_history"):
             report.chat_history = data.get("chat_history")
+        if data.get("time_stamp"):
+            report.time_stamp = data.get("time_stamp")
 
-        # 3. อัปเดต State ความต้องการ
-        if tool_used == "ETA":
-            report.needs_eta = True
-        elif tool_used == "ETR":
-            report.needs_etr = True
+        # ---------------------------------------------------------
+        # แกนหลักของการแยกสายปฏิบัติการ (Decision Branch)
+        # ---------------------------------------------------------
+        event_type = "new_event"  # สาย B (ตั้งเป็นค่าเริ่มต้น)
 
-        # 4. Mockup: จำลองการผูกเคส (ถ้ายังไม่มีเคสหลัก ให้สร้างขึ้นมาใหม่)
-        # ในอนาคตตรงนี้คือจุดที่เราจะเขียนโค้ดหาพิกัด 5km
-        if not report.related_case:
-            new_case = OutageCase.objects.create(
-                title=f"แจ้งไฟดับจาก CA {ca_number}",
-                latitude=report.latitude or 0.0,
-                longitude=report.longitude or 0.0,
-            )
-            report.related_case = new_case
+        if report.latitude and report.longitude and not report.related_case:
+            # 1. ค้นหาเคสไฟดับทั้งหมดในระบบที่ยังซ่อมไม่เสร็จ
+            active_cases = OutageCase.objects.exclude(status="restored")
+            nearest_case = None
+
+            for case in active_cases:
+                # คำนวณระยะทางจากบ้านลูกค้า ไปหาพิกัดศูนย์กลางของแต่ละเคส
+                distance = calculate_distance(
+                    report.latitude, report.longitude, case.latitude, case.longitude
+                )
+
+                # หากพบว่าอยู่ในรัศมี 5 กิโลเมตร ให้ถือว่าเป็น "ไฟดับบริเวณกว้าง/เหตุซ้ำซ้อน" (สาย A)
+                if distance <= 5.0:
+                    nearest_case = case
+                    event_type = "repeated_event"
+                    break  # เจอเคสแรกที่ใกล้ก็หยุดหาเลย
+
+            if nearest_case:
+                # สาย A: ผูกเข้ากับเคสเดิม (Mass Outage)
+                report.related_case = nearest_case
+            else:
+                # สาย B: ไม่พบเคสใกล้เคียงเลย สร้างเคสใหม่ (Normal Outage)
+                base_time = report.time_stamp if report.time_stamp else timezone.now()
+                mock_eta = base_time + timedelta(minutes=45)  # ตั้งเวลาช่างถึงหน้างาน 45 นาที
+
+                new_case = OutageCase.objects.create(
+                    title=f"แจ้งไฟดับจาก CA {ca_number}",
+                    latitude=report.latitude,
+                    longitude=report.longitude,
+                    eta_target_time=mock_eta,
+                )
+                report.related_case = new_case
 
         report.save()
 
-        return Response(
-            {
-                "status": "success",
-                "message": "Report synced successfully",
-                "is_new_report": created,
-                "report_id": report.id,
-                "case_id": report.related_case.case_id if report.related_case else None,
-            }
-        )
+        response_data = {
+            "status": "success",
+            "event_type": event_type, 
+            "report_id": report.id,
+            "case_id": report.related_case.case_id if report.related_case else None,
+            "eta_target_time": report.related_case.eta_target_time.isoformat()
+            if report.related_case and report.related_case.eta_target_time
+            else None,
+            "oms_etr": report.related_case.oms_etr.isoformat()
+            if report.related_case and report.related_case.oms_etr
+            else None,
+        }
+
+        return Response(response_data)
 
     return Response(serializer.errors, status=400)
-
-
-
 
 
 
@@ -68,7 +127,6 @@ def get_action_status(request):
     """
     API ตรวจสอบสถานะเหตุการณ์ไฟดับตามหมายเลข CA (GET)
     """
-    # 1. ตรวจสอบความถูกต้องของ query params (ca_number) ขาเข้า
     request_serializer = ActionStatusRequestSerializer(data=request.query_params)
     if not request_serializer.is_valid():
         return Response(request_serializer.errors, status=400)
@@ -80,7 +138,6 @@ def get_action_status(request):
             ca_number=ca_number, is_resolved=False
         ).last()
 
-        # ปั้นโครงสร้างข้อมูลเตรียมส่งออก
         response_data = {
             "status": "first_time",
             "case_id": None,
@@ -89,7 +146,6 @@ def get_action_status(request):
             "oms_etr": None,
         }
 
-        # ถ้าพบรายงานและผูกกับเคสหลักอยู่แล้ว
         if report and report.related_case:
             case = report.related_case
             response_data.update(
@@ -98,13 +154,10 @@ def get_action_status(request):
                     "case_id": case.case_id,
                     "case_status": case.status,
                     "case_status_display": case.get_status_display(),
-                    "oms_etr": case.oms_etr.strftime("%H:%M น.")
-                    if case.oms_etr
-                    else "ยังไม่มีกำหนดเวลาชัดเจน",
+                    "oms_etr": case.oms_etr if case.oms_etr else None,
                 }
             )
 
-        # 2. ใช้ Serializer จัดฟอร์แมตข้อมูลขากลับให้ได้มาตรฐานตามโครงสร้างที่ Agent รอรับ
         response_serializer = ActionStatusResponseSerializer(response_data)
         return Response(response_serializer.data)
 

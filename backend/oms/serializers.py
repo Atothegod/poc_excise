@@ -12,7 +12,7 @@ class AgentReportSerializer(serializers.Serializer):
         required=False, allow_blank=True, allow_null=True
     )
     tool_used = serializers.CharField(
-        max_length=10, required=False, allow_blank=True, allow_null=True
+        max_length=50, required=False, allow_blank=True, allow_null=True
     )
 
     # ใช้ DateTimeField เพื่อให้ DRF ตรวจสอบความถูกต้องของ ISO Format ทันที
@@ -22,7 +22,8 @@ class AgentReportSerializer(serializers.Serializer):
 class ActionStatusRequestSerializer(serializers.Serializer):
     """ใช้ตรวจพารามิเตอร์ขาเข้าตอน Agent ยิง GET มาถาม (?ca_number=xxxx)"""
 
-    ca_number = serializers.CharField(max_length=12, min_length=12)
+    # ปรับ min_length เป็น 9 เพื่อไม่ให้บล็อกหมายเลขผู้ใช้ไฟรุ่นเก่าขอรับ
+    ca_number = serializers.CharField(max_length=12, min_length=9)
 
 
 class ActionStatusResponseSerializer(serializers.Serializer):

@@ -4,25 +4,38 @@
     <meta charset="UTF-8">
     <title>PEA Assistant Chat</title>
 </head>
-<body>
+<body style="font-family: sans-serif;">
 
     <h2>PEA Assistant (DSPy ReAct Agent)</h2>
     <div style="margin-bottom: 10px; font-size: 12px; color: gray;">
         Session ID: <span id="displaySessionId">กำลังโหลด...</span>
     </div>
     
-    <div id="chatBox" style="height: 300px; overflow-y: auto; border: 1px solid #ccc; padding: 10px; margin-bottom: 10px;">
-        <div><b>Agent:</b> สวัสดีครับ! มีอะไรให้ผมช่วยเกี่ยวกับ PEA ไหมครับ?</div>
+    <div style="display: flex; gap: 15px; margin-bottom: 10px;">
+        
+        <div style="flex: 2;">
+            <div id="chatBox" style="height: 300px; overflow-y: auto; border: 1px solid #ccc; padding: 10px; margin-bottom: 10px;">
+                <div><b>Agent:</b> สวัสดีครับ! มีอะไรให้ผมช่วยเกี่ยวกับ PEA ไหมครับ?</div>
+            </div>
+
+            <input type="text" id="userInput" placeholder="พิมพ์ข้อความที่นี่..." onkeypress="handleKeyPress(event)" style="width: 80%; padding: 5px;">
+            <button id="sendBtn" onclick="sendMessage()" style="padding: 5px 10px;">ส่ง</button>
+        </div>
+
+        <div style="flex: 1; border: 1px solid #ccc; padding: 10px; background-color: #f9f9f9; height: 300px; overflow-y: auto;">
+            <b>Current State:</b>
+            <hr style="border: 0; border-top: 1px solid #ddd;">
+            <pre id="stateBox" style="font-size: 12px; margin: 0; white-space: pre-wrap; color: #333;">รอข้อมูล State...</pre>
+        </div>
+        
     </div>
 
-    <input type="text" id="userInput" placeholder="พิมพ์ข้อความที่นี่..." onkeypress="handleKeyPress(event)" style="width: 70%;">
-    <button id="sendBtn" onclick="sendMessage()">ส่ง</button>
-
 <script>
-    const API_URL = "http://localhost:8001/ask";
+    const API_URL = "http://192.168.28.11:8001/ask";
     const chatBox = document.getElementById("chatBox");
     const userInput = document.getElementById("userInput");
     const sendBtn = document.getElementById("sendBtn");
+    const stateBox = document.getElementById("stateBox"); // อ้างอิงกล่อง State
 
     // 1. ระบบจำ Session ID ประจำตัวผู้ใช้
     function getOrCreateSessionId() {
@@ -66,7 +79,7 @@
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ 
                     question: text,
-                    session_id: currentSessionId // ส่งตัวแปรนี้ไปด้วย!
+                    session_id: currentSessionId 
                 })
             });
 
@@ -74,7 +87,16 @@
             loadingDiv.remove();
 
             if (response.ok) {
+                // แสดงคำตอบในช่องแชท
                 appendMessage(data.answer, false);
+                
+                // ดึงข้อมูล State มาแสดงผล
+                if (data.state) {
+                    // JSON.stringify(ข้อมูล, null, 2) ช่วยจัดฟอร์แมตให้อ่านง่าย
+                    stateBox.innerText = JSON.stringify(data.state, null, 2);
+                } else {
+                    stateBox.innerText = "ไม่พบข้อมูล State จาก Agent";
+                }
             } else {
                 appendMessage("เกิดข้อผิดพลาด: " + (data.detail || "ไม่สามารถติดต่อระบบได้"), false);
             }

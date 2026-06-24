@@ -1,17 +1,20 @@
 # 1. IMPORT CONFIG FIRST SO THE LM IS LOADED ENTIRELY BEFORE BUILDING THE AGENT
-import config 
+import config
 import dspy
 
 # 2. Now import your components safely
 from signature import PEA_Assistant
-from tools import ETA_estimator, ETR_estimator
+
+# นำเข้าตัวแปรทะลุมิติมาด้วยขอรับ!
+from tools import Check_Outage_Tool, current_session_id, current_time_stamp
 
 # 3. Initialize your ReAct agent
 base_react_agent = dspy.ReAct(
     signature=PEA_Assistant,
-    tools=[ETA_estimator, ETR_estimator],
-    max_iters=5
+    tools=[Check_Outage_Tool],
+    max_iters=5,
 )
+
 
 class MemoryAgent:
     def __init__(self, agent_module):
@@ -23,8 +26,6 @@ class MemoryAgent:
             self.sessions[session_id] = []
         return self.sessions[session_id]
 
-
-
     def _format_history(self, history: list) -> str:
         if not history:
             return "No previous conversation."
@@ -33,22 +34,24 @@ class MemoryAgent:
             formatted.append(f"{msg['role']}: {msg['content']}")
         return "\n".join(formatted)
 
-
-
-
     def chat(self, user_input: str, session_id: str, time_stamp: str):
+        # 4. ยัดข้อมูลใส่กระเป๋าทะลุมิติก่อนเริ่มคุย!
+        current_session_id.set(session_id)
+        current_time_stamp.set(time_stamp)
+
         history_list = self._get_or_create_session(session_id)
         history_str = self._format_history(history_list)
-        
+
         response = self.agent(
-            chat_history=history_str, 
-            question=user_input,
-            time_stamp=time_stamp
+            chat_history=history_str, question=user_input, time_stamp=time_stamp
         )
-        
+
         history_list.append({"role": "User", "content": user_input})
-        history_list.append({"role": "Assistant", "content": getattr(response, 'answer', str(response))})
-        
+        history_list.append(
+            {"role": "Assistant", "content": getattr(response, "answer", str(response))}
+        )
+
         return response
+
 
 chatbot = MemoryAgent(base_react_agent)

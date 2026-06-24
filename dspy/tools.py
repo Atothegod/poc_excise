@@ -1,118 +1,99 @@
 import requests
 import os
 import json
+import contextvars
 
-#------------------------------------------------------------------------------------------------------------------------------------------#
+DJANGO_API_URL = os.getenv("DJANGO_API_URL", "http://backend:8000/api")
 
-DJANGO_API_URL = "http://backend:8000/api"
+# สร้างตัวแปรทะลุมิติสำหรับเก็บค่าชั่วคราว
+current_session_id = contextvars.ContextVar("current_session_id", default="unknown")
+current_time_stamp = contextvars.ContextVar("current_time_stamp", default=None)
 
-def save_report_to_db(ca_number: str, latitude: float, longitude: float, tool_used: str, session_id: str = "unknown", chat_history: list = None):
+
+def save_report_to_db(ca_number: str, latitude: float, longitude: float):
     """
-    ฟังก์ชันส่งข้อมูลไปบันทึก/อัปเดตที่ Django Backend ผ่าน REST API
+    ฟังก์ชันส่งข้อมูลไปบันทึกที่ Django และรับค่าการคำนวณ (ETA/ETR/Event Type) กลับมาในรวดเดียว
     """
     endpoint = f"{DJANGO_API_URL}/reports/sync/"
-    
-    # แปลง list เป็น JSON String ก่อนส่ง ถ้าไม่มีประวัติให้เป็นว่างๆไว้
-    chat_history_str = json.dumps(chat_history) if chat_history else "[]"
-    
+
+    # ดึงค่าจากตัวแปรทะลุมิติมาใช้งานตรงนี้เลย
+    session_id = current_session_id.get()
+    time_stamp = current_time_stamp.get()
+
     payload = {
         "session_id": session_id,
         "ca_number": ca_number,
         "latitude": latitude,
         "longitude": longitude,
-        "chat_history": chat_history_str,
-        "tool_used": tool_used
+        "chat_history": "[]",
+        "tool_used": "CHECK",
+        "time_stamp": time_stamp,
     }
-    
+
     try:
-        # ยิงไปที่ Backend (ใช้ timeout เพื่อไม่ให้ Agent ค้างนานถ้า Backend ปิดอยู่)
         response = requests.post(endpoint, json=payload, timeout=5)
         response.raise_for_status()
-        print(f"[API Sync] บันทึกข้อมูล CA {ca_number} สำเร็จ:", response.json())
         return response.json()
     except requests.exceptions.RequestException as e:
         print(f"[API Sync Error] ยิง API ไม่สำเร็จ: {e}")
-        # แม้ยิงไม่ผ่าน ก็แค่ปรินท์ error แจ้งเตือน Agent จะได้ทำงานต่อไม่ล่ม
         return None
 
 
-#------------------------------------------------------------------------------------------------------------------------------------------#
+# -------------------------------------------------------------------------#
 
+
+# import random  # <--- อย่าลืม import random เพิ่มไว้ด้านบนสุดของไฟล์ tools.py นะขอรับ
+
+
+# def check_CA_number(ca_number: str):
+#     """
+#     จำลองการหาพิกัดจาก CA Number
+#     สุ่มให้อยู่ในพื้นที่ จังหวัดปทุมธานี (Lat: 13.92 - 14.28, Lon: 100.37 - 100.93)
+#     """
+#     min_lat, max_lat = 13.92, 14.28
+#     min_lon, max_lon = 100.37, 100.93
+
+#     # สุ่มตัวเลขทศนิยม (Float) ให้อยู่ในขอบเขตที่กำหนด
+#     latitude = random.uniform(min_lat, max_lat)
+#     longitude = random.uniform(min_lon, max_lon)
+
+#     # ปัดเศษทศนิยมให้เหลือ 6 ตำแหน่ง (มาตรฐาน GPS ทั่วไป)
+#     return round(latitude, 6), round(longitude, 6)
 
 def check_CA_number(ca_number: str):
-    """
-    ตรวจสอบหมายเลขบัญชีผู้ใช้ (CA Number) เพื่อคืนค่าพิกัดละติจูดและลองจิจูด
-    """
-    latitude, longitude = 13.0, 104.0
+    """จำลองการหาพิกัดจาก CA Number"""
+    latitude, longitude = 14.2117, 100.926296
     return latitude, longitude
 
-
-def ETA_estimator(ca_number: str):
+def Check_Outage_Tool(ca_number: str):
     """
-    Use lat, lon to estimate the ETA of the technician's arrival at the destination via api
-    """
-    latitude, longitude = check_CA_number(ca_number)
-    save_report_to_db(ca_number, latitude, longitude, tool_used="ETA")
-    return "25 minutes"
-
-
-#------------------------------------------------------------------------------------------------------------------------------------------#
-
-
-def check_event(ca_number: str):
-    """
-    ยิงไปถาม Django ว่า CA นี้ ผูกกับ OutageCase ไหนอยู่ และสถานะเป็นอย่างไร
-    """
-    endpoint = f"{DJANGO_API_URL}/reports/status/"
-    try:
-        # ยิง GET พร้อมส่ง Query Parameters (?ca_number=xxxx)
-        response = requests.get(endpoint, params={"ca_number": ca_number}, timeout=5)
-        response.raise_for_status()
-        data = response.json()
-
-        # คืนค่าสถานะ และข้อมูลจากเคสหลักกลับไปให้ตัวประมาณการใช้งาน
-        return data.get("status"), data.get("case_status_display"), data.get("oms_etr")
-    except Exception as e:
-        print(f"[API Status Error] ไม่สามารถดึงสถานะได้: {e}")
-        return "first_time", None, None
-
-
-        #####
-        #####
-        #####
-        #####
-        #####
-    #############
-        ######
-          ##
-
-
-def ETR_estimator(ca_number: str):
-    """
-    ประเมินเวลาไฟมา (ETR) โดยตรวจสอบจากสถานะเคสที่ผูกไว้ในระบบ
+    ตรวจสอบข้อมูลไฟดับจากหมายเลขผู้ใช้ไฟ (CA Number)
+    เพื่อประเมินว่าเป็นเหตุขัดข้องใหม่ (Normal) หรือเหตุวงกว้าง (Mass Outage)
+    ระบบจะคืนค่าคำแนะนำให้ AI ตอบลูกค้าอย่างถูกต้องตามขั้นตอน
     """
     latitude, longitude = check_CA_number(ca_number)
 
-    # 1. บันทึก/อัปเดตการแจ้งเหตุก่อน (สร้างเคสจำลองเชื่อมโยงในระบบ)
-    save_report_to_db(ca_number, latitude, longitude, tool_used="ETR")
+    # ไม่ต้องส่ง session_id หรือ time_stamp แล้ว เพราะมันทะลุมิติไปรออยู่แล้ว!
+    db_response = save_report_to_db(ca_number, latitude, longitude)
 
-    # 2. เรียกเช็คสถานะเหตุการณ์ผ่าน API เส้น GET ตัวใหม่ (ค้นหาตาม case_id ของ CA นี้)
-    status, case_status_display, oms_etr = check_event(ca_number)
+    if db_response:
+        event_type = db_response.get("event_type")
+        eta = db_response.get("eta_target_time")
+        etr = db_response.get("oms_etr")
 
-    if status == "repeated_event":
-        # ดึงประโยคจากฐานข้อมูลไปให้ Gemini สรุปคำพูดตอบลูกค้า
-        return f"ตรวจพบเหตุการณ์ไฟดับในระบบพิกัดของคุณ ปัจจุบันสถานะคือ '{case_status_display}' คาดว่าจะจ่ายไฟคืนกระแสสำเร็จในเวลา {oms_etr}"
+        # สาย A: กรณีไฟดับบริเวณกว้าง (Mass Outage / Repeated Event)
+        if event_type == "repeated_event":
+            if etr:
+                return f"[เหตุวงกว้าง] พบเหตุขัดข้องในพื้นที่ แจ้งเวลาไฟมา (ETR) แก่ลูกค้าคือ: {etr} (ไม่ต้องแจ้งเวลาช่างถึง)"
+            else:
+                return "[เหตุวงกว้าง] พบเหตุขัดข้องในพื้นที่ แต่ช่างยังไม่ได้ประเมินเวลาไฟมา (ETR) โปรดแจ้งลูกค้าว่ารับทราบปัญหาและกำลังเร่งแก้ไข (ไม่ต้องแจ้งเวลาช่างถึง)"
 
-    # ถ้าเป็นเคสใหม่ (First time) ที่ไม่มีประวัติในรัศมี 5km (เดี๋ยวเราจะเขียนคณิตศาสตร์ค้นหาเพิ่มใน Django ทีหลัง)
-    print(
-        f"Fallback: Querying historical DB within 5km of ({latitude}, {longitude})..."
-    )
-    return "เพิ่งได้รับแจ้งเหตุครั้งแรกในบริเวณนี้ คาดว่าจะใช้เวลาแก้ไขประมาณ 45 นาที"
+        # สาย B: กรณีไฟดับปกติ (Normal / New Outage)
+        elif event_type == "new_event":
+            if etr:
+                return f"[เหตุปกติ] ระบบอัปเดตข้อมูลแล้ว แจ้งเวลาช่างถึงหน้างาน (ETA): {eta}"
+            else:
+                # ตรงตาม Flow: แจ้ง ETA ก่อนเสมอ และบอกว่า ETR ต้องรอประเมิน
+                return f"[เหตุแจ้งใหม่] ให้แจ้งเวลาช่างถึงหน้างาน (ETA) แก่ลูกค้าคือ: {eta} และแจ้งเพิ่มเติมว่า 'กำลังประสานงานเพื่อประเมินเวลาจ่ายไฟคืน (ETR)'"
 
-
-
-
-
-
-
-
+    return "ขัดข้อง: ไม่สามารถเชื่อมต่อกับระบบฐานข้อมูลได้ โปรดแจ้งลูกค้าว่ากำลังประสานงานรับเรื่องให้"
