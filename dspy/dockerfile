@@ -1,0 +1,15 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# 1. Copy ONLY requirements first
+COPY requirements.txt .
+
+# 2. Leverage build cache and pip caching for blazing-fast reinstalls
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements.txt
+
+# 3. Copy your actual code LAST (changes here won't trigger pip reinstall)
+COPY . .
+
+CMD ["uvicorn", "webhook_server:app", "--host", "0.0.0.0", "--port", "8000"]

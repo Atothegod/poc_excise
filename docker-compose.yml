@@ -1,0 +1,45 @@
+services:
+  db:
+    image: postgres:17
+    container_name: postgres
+    env_file:
+      - .env
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/
+    ports:
+      - "5432:5432"
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: dockerfile
+    env_file:
+      - .env
+    container_name: backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+    depends_on:
+    - db
+      # db:
+        # condition: service_healthy
+    command: >
+      sh -c "
+      python manage.py migrate &&
+      python manage.py runserver 0.0.0.0:8000
+      "
+
+  dspy-agent:
+    build: ./dspy
+    container_name: dspy-agent
+    ports:
+      - "8001:8000" 
+    volumes:               
+      - ./dspy:/app        
+    env_file:
+      - .env
+    restart: always
+
+volumes:
+  postgres_data:

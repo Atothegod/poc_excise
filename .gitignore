@@ -116,3 +116,5 @@ __pycache__/
 .ipynb_checkpoints/
 .pytest_
 .Trash-0/
+# Databases
+*.db
