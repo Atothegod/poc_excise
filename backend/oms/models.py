@@ -17,8 +17,10 @@ class OutageCase(models.Model):
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="reported")
     latitude = models.FloatField()
     longitude = models.FloatField()
+
+    # Django จะรับคืนและส่งออกเป็น ISO Format อัตโนมัติผ่าน Serializer
     oms_etr = models.DateTimeField(
-        null=True, blank=True, help_text="เวลาซ่อมเสร็จจาก OMS"
+        null=True, blank=True, help_text="เวลาซ่อมเสร็จจาก OMS (ISO Format)"
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -30,8 +32,6 @@ class OutageCase(models.Model):
 class CustomerReport(models.Model):
     """เก็บข้อมูลการแจ้งเรื่องของลูกค้าแต่ละรายตามหมายเลข CA และ Session"""
 
-    # --- Identifiers ---
-    # ให้ Django จัดการ ID อัตโนมัติเป็น Primary Key
     session_id = models.CharField(
         max_length=255, null=True, blank=True, help_text="รหัสผู้ใช้งานจากหน้าเว็บ"
     )
@@ -40,7 +40,6 @@ class CustomerReport(models.Model):
     )
     customer_name = models.CharField(max_length=255, null=True, blank=True)
 
-    # --- Location & Relation ---
     latitude = models.FloatField(null=True, blank=True)
     longitude = models.FloatField(null=True, blank=True)
     related_case = models.ForeignKey(
@@ -51,20 +50,22 @@ class CustomerReport(models.Model):
         related_name="affected_customers",
     )
 
-    # --- Chat & Intent ---
     chat_history = models.TextField(
         default="[]", help_text="เก็บประวัติสนทนาล่าสุดของ Session นี้"
     )
     needs_eta = models.BooleanField(default=False, help_text="ต้องการทราบเวลาช่างมาถึง")
     needs_etr = models.BooleanField(default=False, help_text="ต้องการทราบเวลาไฟมา")
 
-    # --- Status ---
     is_resolved = models.BooleanField(
         default=False, help_text="จบการสนทนาหรือไฟมาปกติแล้ว"
     )
 
     # --- Timestamps ---
-    created_at = models.DateTimeField(auto_now_add=True)  # เพิ่มไว้ดูว่าเริ่มแชทตอนไหน
+    # เพิ่ม time_stamp เพื่อรับค่า ISO จาก Webhook ของท่านโหว
+    time_stamp = models.DateTimeField(
+        null=True, blank=True, help_text="เวลาอ้างอิงที่ส่งมาจากระบบ Agent (ISO Format)"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
