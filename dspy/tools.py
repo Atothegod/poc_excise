@@ -31,8 +31,28 @@ def save_report_to_db(ca_number: str, latitude: float, longitude: float):
 
 
 def check_CA_number(ca_number: str):
-    latitude, longitude = 9.2117, 100.926296
-    return latitude, longitude
+    # Base coordinate: (9.2117, 100.926296)
+    positions = [
+        # --- WITHIN 5 KM (< 0.045 degrees difference) ---
+        (9.2217, 100.926296),  # Index 0: ~1.1 km North
+        (9.1917, 100.926296),  # Index 1: ~2.2 km South
+        (9.2117, 100.956296),  # Index 2: ~3.3 km East
+        (9.2317, 100.906296),  # Index 3: ~3.1 km Northwest
+        (9.1817, 100.936296),  # Index 4: ~3.5 km Southeast
+        # --- GREATER THAN 5 KM (> 0.045 degrees difference) ---
+        (9.2917, 100.926296),  # Index 5: ~8.8 km North
+        (9.1117, 100.926296),  # Index 6: ~11.1 km South
+        (9.2117, 101.076296),  # Index 7: ~16.5 km East
+        (9.3317, 100.806296),  # Index 8: ~18.8 km Northwest
+        (9.1517, 100.996296),  # Index 9: ~10.2 km Southeast
+    ]
+
+    try:
+        int_ca = int(ca_number)
+    except ValueError:  # Catching ValueError is safer than a bare Exception for casting
+        return positions[0]
+
+    return positions[int_ca % 10]
 
 
 def Check_Outage_Tool(ca_number: str):
@@ -58,12 +78,17 @@ def Check_Outage_Tool(ca_number: str):
             return "[เหตุวงกว้าง] กำลังเชื่อมต่อกับโมเดล ETR พี่ปลื้มครับ"
 
     # เคส 3: แจ้งครั้งแรก (New Event) หรือ เคสเดี่ยว -> บังคับแจ้ง ETA ตาม Rule 7
+    # และตรวจสอบ ETR เพิ่มเติม
     elif event_type == "new_event":
-        # ปรับแก้: ไม่ว่าจะส่ง ETR มาด้วยหรือไม่ หากเป็น new_event ตัว DSPy ต้องได้คำว่า [เหตุแจ้งใหม่] และค่า ETA
-        # เพื่อเอาไปตอบในสเต็ป "providing_eta_first"
-        return (
-            f"[เหตุแจ้งใหม่] ระบบได้เปิดใบงานใหม่แล้ว ให้แจ้งเวลาที่ช่างจะเดินทางไปถึง (ETA): {eta}"
-        )
+        if etr:
+            return (
+                f"[เหตุแจ้งใหม่] ระบบได้เปิดใบงานใหม่แล้ว ให้แจ้งเวลาที่ช่างจะเดินทางไปถึง (ETA): {eta} "
+                f"และแจ้งเวลาที่คาดว่าจะแก้ไขเสร็จ (ETR): {etr}"
+            )
+        else:
+            return (
+                f"[เหตุแจ้งใหม่] ระบบได้เปิดใบงานใหม่แล้ว ให้แจ้งเวลาที่ช่างจะเดินทางไปถึง (ETA): {eta}"
+            )
 
     return "ขัดข้อง ไม่สามารถระบุประเภทเหตุการณ์ได้"
 

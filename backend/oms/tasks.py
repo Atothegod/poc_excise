@@ -22,14 +22,12 @@ def check_eta_timeout(case_id, report_id):
         # หากสถานะยังเป็นแค่ 'reported' หรือ 'investigating' แสดงว่าช่างยังไม่แจ้งว่าถึงหน้างาน (Status != Arrived)
         if case.status in ["reported", "investigating"]:
             message = ""
-            now = timezone.now()
-
-            # Check ETR_Current Validity
-            if case.oms_etr and case.oms_etr > now:
-                # ETR ยังไม่หมดอายุ
-                message = "ขออภัยที่ช่างถึงหน้างานช้ากว่ากำหนด แต่ระบบจะยังคงเป้าหมายจ่ายไฟตามเวลา ETR เดิมที่คุณได้รับแจ้งครับ (กำลังเร่งดำเนินการ)"
+            if case.oms_etr:
+                message = (
+                    "ขออภัยที่ช่างถึงหน้างานช้ากว่ากำหนดครับ "
+                    f"เวลาที่คาดว่าจะแก้ไขเสร็จ (ETR): {case.oms_etr.isoformat()}"
+                )
             else:
-                # ETR หมดอายุ หรือ ยังไม่มี ETR (Fallback)
                 message = "ขออภัยที่ช่างถึงหน้างานช้ากว่ากำหนดครับ ขณะนี้ยังไม่มี ETR จาก OMS ระบบกำลังเชื่อมต่อกับโมเดล ETR พี่ปลื้มเพื่อประเมินเวลาไฟกลับมาใช้งานได้ครับ"
 
             # ยิง Webhook แจ้งเตือนผู้ใช้ไฟ (ผ่าน Agent)
