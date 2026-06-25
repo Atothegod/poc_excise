@@ -62,7 +62,7 @@ def save_report_to_db(ca_number: str, latitude: float, longitude: float):
 
 def check_CA_number(ca_number: str):
     """จำลองการหาพิกัดจาก CA Number"""
-    latitude, longitude = 14.2117, 100.926296
+    latitude, longitude = 9.2117, 100.926296
     return latitude, longitude
 
 def Check_Outage_Tool(ca_number: str):
@@ -91,9 +91,9 @@ def Check_Outage_Tool(ca_number: str):
         # สาย B: กรณีไฟดับปกติ (Normal / New Outage)
         elif event_type == "new_event":
             if etr:
-                return f"[เหตุปกติ] ระบบอัปเดตข้อมูลแล้ว แจ้งเวลาช่างถึงหน้างาน (ETA): {eta}"
+                return f"[เหตุปกติ] ระบบอัปเดตข้อมูลแล้ว แจ้งเวลาไฟมา (ETR): {etr}"
             else:
                 # ตรงตาม Flow: แจ้ง ETA ก่อนเสมอ และบอกว่า ETR ต้องรอประเมิน
-                return f"[เหตุแจ้งใหม่] ให้แจ้งเวลาช่างถึงหน้างาน (ETA) แก่ลูกค้าคือ: {eta} และแจ้งเพิ่มเติมว่า 'กำลังประสานงานเพื่อประเมินเวลาจ่ายไฟคืน (ETR)'"
+                return f"[เหตุแจ้งใหม่] ให้แจ้งเวลาช่างถึงหน้างาน (ETA) แก่ลูกค้าคือ: {eta}"
 
     return "ขัดข้อง: ไม่สามารถเชื่อมต่อกับระบบฐานข้อมูลได้ โปรดแจ้งลูกค้าว่ากำลังประสานงานรับเรื่องให้"
