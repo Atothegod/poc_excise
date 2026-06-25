@@ -1,99 +1,90 @@
 import requests
 import os
-import json
 import contextvars
 
 DJANGO_API_URL = os.getenv("DJANGO_API_URL", "http://backend:8000/api")
 
-# สร้างตัวแปรทะลุมิติสำหรับเก็บค่าชั่วคราว
 current_session_id = contextvars.ContextVar("current_session_id", default="unknown")
 current_time_stamp = contextvars.ContextVar("current_time_stamp", default=None)
 
 
 def save_report_to_db(ca_number: str, latitude: float, longitude: float):
-    """
-    ฟังก์ชันส่งข้อมูลไปบันทึกที่ Django และรับค่าการคำนวณ (ETA/ETR/Event Type) กลับมาในรวดเดียว
-    """
     endpoint = f"{DJANGO_API_URL}/reports/sync/"
-
-    # ดึงค่าจากตัวแปรทะลุมิติมาใช้งานตรงนี้เลย
-    session_id = current_session_id.get()
-    time_stamp = current_time_stamp.get()
-
     payload = {
-        "session_id": session_id,
+        "session_id": current_session_id.get(),
         "ca_number": ca_number,
         "latitude": latitude,
         "longitude": longitude,
-        "chat_history": "[]",
-        "tool_used": "CHECK",
-        "time_stamp": time_stamp,
+        "time_stamp": current_time_stamp.get(),
     }
+
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(endpoint, json=payload, timeout=5)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            if attempt == max_retries - 1:
+                return {"event_type": "api_error"}
+    return None
+
+
+def check_CA_number(ca_number: str):
+    latitude, longitude = 9.2117, 100.926296
+    return latitude, longitude
+
+
+def Check_Outage_Tool(ca_number: str):
+    latitude, longitude = check_CA_number(ca_number)
+    db_response = save_report_to_db(ca_number, latitude, longitude)
+
+    if not db_response:
+        return "ขัดข้อง ไม่สามารถเชื่อมต่อกับระบบได้"
+
+    event_type = db_response.get("event_type")
+    eta = db_response.get("eta_target_time")
+    etr = db_response.get("oms_etr")
+
+    # เคส 1: API ขัดข้องติดต่อกันจนครบกำหนด
+    if event_type == "api_error":
+        return "ขัดข้อง: API_Timeout เกิน 3 ครั้ง โปรดแจ้งลูกค้าว่าเปลี่ยนสถานะเป็นโอนสายให้ Human Agent"
+
+    # เคส 2: เกิดเหตุวงกว้าง (Mass Outage) -> บังคับแจ้ง ETR ตาม Rule 6
+    if event_type == "repeated_event":
+        if etr:
+            return f"[เหตุวงกว้าง] แจ้ง ETR แก่ลูกค้า: {etr}"
+        else:
+            return "[เหตุวงกว้าง] กำลังเชื่อมต่อกับโมเดล ETR พี่ปลื้มครับ"
+
+    # เคส 3: แจ้งครั้งแรก (New Event) หรือ เคสเดี่ยว -> บังคับแจ้ง ETA ตาม Rule 7
+    elif event_type == "new_event":
+        # ปรับแก้: ไม่ว่าจะส่ง ETR มาด้วยหรือไม่ หากเป็น new_event ตัว DSPy ต้องได้คำว่า [เหตุแจ้งใหม่] และค่า ETA
+        # เพื่อเอาไปตอบในสเต็ป "providing_eta_first"
+        return (
+            f"[เหตุแจ้งใหม่] ระบบได้เปิดใบงานใหม่แล้ว ให้แจ้งเวลาที่ช่างจะเดินทางไปถึง (ETA): {eta}"
+        )
+
+    return "ขัดข้อง ไม่สามารถระบุประเภทเหตุการณ์ได้"
+
+
+def Fast_Track_Tool(ca_number: str):
+    """
+    เครื่องมือสำหรับใช้สร้างตั๋ว Fast-track ด่วน
+    เมื่อลูกค้าบอกว่าไฟยังไม่มาและเช็คเบรกเกอร์แล้ว
+    """
+    endpoint = f"{DJANGO_API_URL}/reports/fast-track/"
+    payload = {"ca_number": ca_number}
 
     try:
         response = requests.post(endpoint, json=payload, timeout=5)
         response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        print(f"[API Sync Error] ยิง API ไม่สำเร็จ: {e}")
-        return None
+        data = response.json()
 
+        if data.get("event_type") == "fallback_to_human":
+            return "[FallBack] โควต้าแจ้งซ้ำหมดแล้ว ให้ตอบว่ากำลังโอนสายให้เจ้าหน้าที่ (Force Fallback)"
+        else:
+            return "[Success] สร้างตั๋ว Fast-track สำเร็จ ให้ตอบลูกค้าว่าประสานงานด่วนแล้ว"
 
-# -------------------------------------------------------------------------#
-
-
-# import random  # <--- อย่าลืม import random เพิ่มไว้ด้านบนสุดของไฟล์ tools.py นะขอรับ
-
-
-# def check_CA_number(ca_number: str):
-#     """
-#     จำลองการหาพิกัดจาก CA Number
-#     สุ่มให้อยู่ในพื้นที่ จังหวัดปทุมธานี (Lat: 13.92 - 14.28, Lon: 100.37 - 100.93)
-#     """
-#     min_lat, max_lat = 13.92, 14.28
-#     min_lon, max_lon = 100.37, 100.93
-
-#     # สุ่มตัวเลขทศนิยม (Float) ให้อยู่ในขอบเขตที่กำหนด
-#     latitude = random.uniform(min_lat, max_lat)
-#     longitude = random.uniform(min_lon, max_lon)
-
-#     # ปัดเศษทศนิยมให้เหลือ 6 ตำแหน่ง (มาตรฐาน GPS ทั่วไป)
-#     return round(latitude, 6), round(longitude, 6)
-
-def check_CA_number(ca_number: str):
-    """จำลองการหาพิกัดจาก CA Number"""
-    latitude, longitude = 9.2117, 100.926296
-    return latitude, longitude
-
-def Check_Outage_Tool(ca_number: str):
-    """
-    ตรวจสอบข้อมูลไฟดับจากหมายเลขผู้ใช้ไฟ (CA Number)
-    เพื่อประเมินว่าเป็นเหตุขัดข้องใหม่ (Normal) หรือเหตุวงกว้าง (Mass Outage)
-    ระบบจะคืนค่าคำแนะนำให้ AI ตอบลูกค้าอย่างถูกต้องตามขั้นตอน
-    """
-    latitude, longitude = check_CA_number(ca_number)
-
-    # ไม่ต้องส่ง session_id หรือ time_stamp แล้ว เพราะมันทะลุมิติไปรออยู่แล้ว!
-    db_response = save_report_to_db(ca_number, latitude, longitude)
-
-    if db_response:
-        event_type = db_response.get("event_type")
-        eta = db_response.get("eta_target_time")
-        etr = db_response.get("oms_etr")
-
-        # สาย A: กรณีไฟดับบริเวณกว้าง (Mass Outage / Repeated Event)
-        if event_type == "repeated_event":
-            if etr:
-                return f"[เหตุวงกว้าง] พบเหตุขัดข้องในพื้นที่ แจ้งเวลาไฟมา (ETR) แก่ลูกค้าคือ: {etr} (ไม่ต้องแจ้งเวลาช่างถึง)"
-            else:
-                return "[เหตุวงกว้าง] พบเหตุขัดข้องในพื้นที่ แต่ช่างยังไม่ได้ประเมินเวลาไฟมา (ETR) โปรดแจ้งลูกค้าว่ารับทราบปัญหาและกำลังเร่งแก้ไข (ไม่ต้องแจ้งเวลาช่างถึง)"
-
-        # สาย B: กรณีไฟดับปกติ (Normal / New Outage)
-        elif event_type == "new_event":
-            if etr:
-                return f"[เหตุปกติ] ระบบอัปเดตข้อมูลแล้ว แจ้งเวลาไฟมา (ETR): {etr}"
-            else:
-                # ตรงตาม Flow: แจ้ง ETA ก่อนเสมอ และบอกว่า ETR ต้องรอประเมิน
-                return f"[เหตุแจ้งใหม่] ให้แจ้งเวลาช่างถึงหน้างาน (ETA) แก่ลูกค้าคือ: {eta}"
-
-    return "ขัดข้อง: ไม่สามารถเชื่อมต่อกับระบบฐานข้อมูลได้ โปรดแจ้งลูกค้าว่ากำลังประสานงานรับเรื่องให้"
+    except Exception as e:
+        return "[FallBack] ระบบขัดข้อง ให้ตอบว่ากำลังโอนสายให้เจ้าหน้าที่ (Force Fallback)"

@@ -3,8 +3,6 @@ import uuid
 
 
 class OutageCase(models.Model):
-    """เก็บข้อมูลเหตุการณ์ไฟดับหลัก (1 เคสใหญ่ สามารถมีผู้ได้รับผลกระทบหลาย CA)"""
-
     STATUS_CHOICES = [
         ("reported", "ได้รับแจ้งเหตุ"),
         ("investigating", "กำลังดำเนินการตรวจสอบ"),
@@ -18,15 +16,27 @@ class OutageCase(models.Model):
     latitude = models.FloatField()
     longitude = models.FloatField()
 
-    # --- เพิ่มฟิลด์สำหรับเก็บเป้าหมายเวลาช่างถึงหน้างาน (ETA) ---
     eta_target_time = models.DateTimeField(
         null=True, blank=True, help_text="เวลาเป้าหมายที่ช่างจะไปถึงหน้างาน (ETA)"
     )
-
-    # Django จะรับคืนและส่งออกเป็น ISO Format อัตโนมัติผ่าน Serializer
     oms_etr = models.DateTimeField(
         null=True, blank=True, help_text="เวลาซ่อมเสร็จจาก OMS (ISO Format)"
     )
+
+    # --- เพิ่มฟิลด์สำหรับเก็บ Task ID ของ Celery ---
+    celery_eta_task_id = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        help_text="ID ของ Celery Task สำหรับนับเวลา ETA",
+    )
+    celery_etr_task_id = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        help_text="ID ของ Celery Task สำหรับนับเวลา ETR",
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -35,8 +45,6 @@ class OutageCase(models.Model):
 
 
 class CustomerReport(models.Model):
-    """เก็บข้อมูลการแจ้งเรื่องของลูกค้าแต่ละรายตามหมายเลข CA และ Session"""
-
     session_id = models.CharField(
         max_length=255, null=True, blank=True, help_text="รหัสผู้ใช้งานจากหน้าเว็บ"
     )
@@ -44,8 +52,6 @@ class CustomerReport(models.Model):
         max_length=12, help_text="หมายเลขผู้ใช้ไฟ (หลาย Session สามารถแจ้ง CA เดียวกันได้)"
     )
     customer_name = models.CharField(max_length=255, null=True, blank=True)
-
-    # เก็บพิกัดไว้ที่นี่เพื่อประโยชน์ในการหา CA ที่อยู่ใกล้เคียงกัน (รัศมี 5km)
     latitude = models.FloatField(null=True, blank=True)
     longitude = models.FloatField(null=True, blank=True)
     related_case = models.ForeignKey(
@@ -61,9 +67,13 @@ class CustomerReport(models.Model):
     )
     needs_eta = models.BooleanField(default=False, help_text="ต้องการทราบเวลาช่างมาถึง")
     needs_etr = models.BooleanField(default=False, help_text="ต้องการทราบเวลาไฟมา")
-
     is_resolved = models.BooleanField(
         default=False, help_text="จบการสนทนาหรือไฟมาปกติแล้ว"
+    )
+
+    # --- เพิ่มฟิลด์สำหรับระบบ Anti-Loop ---
+    fast_track_quota = models.IntegerField(
+        default=1, help_text="โควต้าการแจ้งไฟดับซ้ำซ้อน (1 ครั้ง/เคส)"
     )
 
     time_stamp = models.DateTimeField(

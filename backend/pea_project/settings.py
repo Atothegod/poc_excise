@@ -117,3 +117,9 @@ STATIC_URL = "static/"
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+# --- เพิ่มการตั้งค่า Celery ต่อท้ายไฟล์ ---
+# ใน Docker ชื่อ Host คือชื่อ Service (redis)
+CELERY_BROKER_URL = "redis://redis:6379/0"
+CELERY_ACCEPT_CONTENT = ["json"]
+CELERY_TASK_SERIALIZER = "json"

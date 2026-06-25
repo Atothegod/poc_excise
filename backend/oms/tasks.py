@@ -1,0 +1,68 @@
+from celery import shared_task
+from django.utils import timezone
+from .models import OutageCase, CustomerReport
+import requests
+import os
+
+AGENT_WEBHOOK_URL = os.getenv(
+    "AGENT_WEBHOOK_URL", "http://dspy-agent:8000/webhook/notify"
+)
+
+
+@shared_task
+def check_eta_timeout(case_id, report_id):
+    """
+    Timer_ETA: ทริกเกอร์เมื่อเวลาผ่านไปจนถึง ETA
+    เพื่อตรวจสอบว่าช่างถึงหน้างานหรือยัง
+    """
+    try:
+        case = OutageCase.objects.get(case_id=case_id)
+        report = CustomerReport.objects.get(id=report_id)
+
+        # หากสถานะยังเป็นแค่ 'reported' หรือ 'investigating' แสดงว่าช่างยังไม่แจ้งว่าถึงหน้างาน (Status != Arrived)
+        if case.status in ["reported", "investigating"]:
+            message = ""
+            now = timezone.now()
+
+            # Check ETR_Current Validity
+            if case.oms_etr and case.oms_etr > now:
+                # ETR ยังไม่หมดอายุ
+                message = "ขออภัยที่ช่างถึงหน้างานช้ากว่ากำหนด แต่ระบบจะยังคงเป้าหมายจ่ายไฟตามเวลา ETR เดิมที่คุณได้รับแจ้งครับ (กำลังเร่งดำเนินการ)"
+            else:
+                # ETR หมดอายุ หรือ ยังไม่มี ETR (Fallback)
+                message = "ขออภัยที่ช่างถึงหน้างานช้ากว่ากำหนดครับ ขณะนี้ยังไม่มี ETR จาก OMS ระบบกำลังเชื่อมต่อกับโมเดล ETR พี่ปลื้มเพื่อประเมินเวลาไฟกลับมาใช้งานได้ครับ"
+
+            # ยิง Webhook แจ้งเตือนผู้ใช้ไฟ (ผ่าน Agent)
+            payload = {
+                "session_id": report.session_id,
+                "ca_number": report.ca_number,
+                "message": message,
+                "event_type": "eta_timeout",
+            }
+
+            try:
+                requests.post(AGENT_WEBHOOK_URL, json=payload, timeout=5)
+                print(f"[Timer_ETA] ยิง Webhook แจ้งเตือน CA: {report.ca_number} สำเร็จ")
+            except requests.exceptions.RequestException as e:
+                print(f"[Timer_ETA] ยิง Webhook ล้มเหลว: {e}")
+
+    except (OutageCase.DoesNotExist, CustomerReport.DoesNotExist):
+        print("[Timer_ETA] ไม่พบข้อมูล Case หรือ Report (อาจถูกลบไปแล้ว)")
+
+
+@shared_task
+def send_proactive_alert(report_id, message, event_type):
+    """
+    ฟังก์ชันกลางสำหรับส่งแจ้งเตือนเชิงรุก (เช่น ช่างปิดงานไฟมาแล้ว, หรือส่ง ETR ครั้งที่ 2)
+    """
+    try:
+        report = CustomerReport.objects.get(id=report_id)
+        payload = {
+            "session_id": report.session_id,
+            "ca_number": report.ca_number,
+            "message": message,
+            "event_type": event_type,
+        }
+        requests.post(AGENT_WEBHOOK_URL, json=payload, timeout=5)
+    except CustomerReport.DoesNotExist:
+        pass

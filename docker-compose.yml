@@ -9,10 +9,18 @@ services:
     ports:
       - "5432:5432"
 
+  # 1. เพิ่ม Redis Service (Message Broker สำหรับ Celery)
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    restart: always
+
   backend:
     build:
       context: ./backend
-      dockerfile: dockerfile
+      dockerfile: dockerfile # ตัวพิมพ์เล็กตามที่คุณเขียนไว้
     env_file:
       - .env
     container_name: backend
@@ -21,14 +29,30 @@ services:
     volumes:
       - ./backend:/app
     depends_on:
-    - db
-      # db:
-        # condition: service_healthy
+      - db
+      - redis # แจ้งให้รอ Redis สตาร์ทก่อน
     command: >
       sh -c "
       python manage.py migrate &&
       python manage.py runserver 0.0.0.0:8000
       "
+
+  # 2. เพิ่ม Celery Worker Service (ใช้ Image เดียวกับ Backend)
+  celery_worker:
+    build:
+      context: ./backend
+      dockerfile: dockerfile
+    container_name: celery_worker
+    volumes:
+      - ./backend:/app
+    env_file:
+      - .env
+    depends_on:
+      - db
+      - redis
+      - backend
+    # รันคำสั่ง celery แทนการรันเซิร์ฟเวอร์ django
+    command: celery -A pea_project worker -l info
 
   dspy-agent:
     build: ./dspy
@@ -41,5 +65,18 @@ services:
       - .env
     restart: always
 
+
+  flower:
+      image: mher/flower
+      container_name: celery_flower
+      ports:
+        - "5555:5555"
+      environment:
+        - CELERY_BROKER_URL=redis://redis:6379/0
+      depends_on:
+        - redis
+        - celery_worker
+
 volumes:
   postgres_data:
+   

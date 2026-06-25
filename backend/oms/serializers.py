@@ -29,7 +29,7 @@ class ActionStatusRequestSerializer(serializers.Serializer):
 class ActionStatusResponseSerializer(serializers.Serializer):
     """ใช้ควบคุมหน้าตาข้อมูลขากลับส่งไปให้ Agent"""
 
-    status = serializers.CharField()  # 'first_time' หรือ 'repeated_event'
+    status = serializers.CharField()  # 'first_time' หรือ 'active_case_exists'
     case_id = serializers.UUIDField(allow_null=True)
     case_status = serializers.CharField(allow_null=True)
     case_status_display = serializers.CharField(allow_null=True)

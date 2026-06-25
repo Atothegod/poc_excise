@@ -47,7 +47,8 @@
 </div>
 
 <script>
-    const API_URL = "http://192.168.28.11:8001/ask";
+    const API_URL = "http://192.168.28.47:8001/ask";
+    const NOTIFICATIONS_URL = "http://192.168.28.47:8001/notifications";
     const chatBox = document.getElementById("chatBox");
     const userInput = document.getElementById("userInput");
     const sendBtn = document.getElementById("sendBtn");
@@ -65,6 +66,22 @@
 
     const currentSessionId = getOrCreateSessionId();
     document.getElementById("displaySessionId").innerText = currentSessionId;
+
+    async function pollNotifications() {
+        try {
+            const response = await fetch(`${NOTIFICATIONS_URL}/${currentSessionId}`);
+            const data = await response.json();
+            if (response.ok && data.notifications) {
+                data.notifications.forEach((notification) => {
+                    appendMessage(notification.message, false);
+                });
+            }
+        } catch (error) {
+            console.error(error);
+        }
+    }
+
+    setInterval(pollNotifications, 2000);
 
     // ปุ่ม Reset
     function resetSession() {

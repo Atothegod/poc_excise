@@ -6,12 +6,17 @@ import dspy
 from signature import PEA_Assistant
 
 # นำเข้าตัวแปรทะลุมิติมาด้วยขอรับ!
-from tools import Check_Outage_Tool, current_session_id, current_time_stamp
+from tools import (
+    Check_Outage_Tool,
+    Fast_Track_Tool,
+    current_session_id,
+    current_time_stamp,
+)
 
 # 3. Initialize your ReAct agent
 base_react_agent = dspy.ReAct(
     signature=PEA_Assistant,
-    tools=[Check_Outage_Tool],
+    tools=[Check_Outage_Tool, Fast_Track_Tool],
     max_iters=5,
 )
 
