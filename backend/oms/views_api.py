@@ -50,6 +50,10 @@ def sync_agent_report(request):
             report.longitude = data.get("longitude")
         if data.get("time_stamp"):
             report.time_stamp = data.get("time_stamp")
+        if data.get("pdpa_consent"):
+            report.pdpa_consent = True
+            if not report.pdpa_consent_at:
+                report.pdpa_consent_at = timezone.now()
 
         event_type = "new_event"
 

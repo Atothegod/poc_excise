@@ -1,4 +1,5 @@
 from celery import shared_task
+from django.utils import timezone
 from .models import OutageCase, CustomerReport
 import requests
 import os
@@ -21,9 +22,10 @@ def check_eta_timeout(case_id, report_id):
         if case.status in ["reported", "investigating"]:
             message = ""
             if case.oms_etr:
+                etr_label = timezone.localtime(case.oms_etr).strftime("%H:%M น.")
                 message = (
                     "ขออภัยที่ช่างถึงหน้างานช้ากว่ากำหนดครับ "
-                    f"เวลาที่คาดว่าจะแก้ไขเสร็จ (ETR): {case.oms_etr.isoformat()}"
+                    f"เวลาที่คาดว่าจะแก้ไขเสร็จและจ่ายไฟคืนคือประมาณ {etr_label} ครับ"
                 )
             else:
                 message = "ขออภัยที่ช่างถึงหน้างานช้ากว่ากำหนดครับ ขณะนี้ยังไม่มี ETR จาก OMS ระบบกำลังเชื่อมต่อกับโมเดล ETR พี่ปลื้มเพื่อประเมินเวลาไฟกลับมาใช้งานได้ครับ"

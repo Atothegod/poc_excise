@@ -67,6 +67,12 @@ class CustomerReport(models.Model):
     )
     needs_eta = models.BooleanField(default=False, help_text="ต้องการทราบเวลาช่างมาถึง")
     needs_etr = models.BooleanField(default=False, help_text="ต้องการทราบเวลาไฟมา")
+    pdpa_consent = models.BooleanField(
+        default=False, help_text="ลูกค้าให้ความยินยอมให้ตรวจสอบข้อมูลด้วยหมายเลข CA"
+    )
+    pdpa_consent_at = models.DateTimeField(
+        null=True, blank=True, help_text="เวลาที่ลูกค้าให้ PDPA consent"
+    )
     is_resolved = models.BooleanField(
         default=False, help_text="จบการสนทนาหรือไฟมาปกติแล้ว"
     )

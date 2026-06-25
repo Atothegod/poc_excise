@@ -1,5 +1,6 @@
 from django.db.models.signals import pre_save, post_save
 from django.dispatch import receiver
+from django.utils import timezone
 from .models import OutageCase, CustomerReport
 from .tasks import check_eta_timeout, send_proactive_alert
 from pea_project.celery import app as celery_app
@@ -32,6 +33,10 @@ def track_eta_changes(sender, instance, **kwargs):
         if old_instance.status != "restored" and instance.status == "restored":
             instance._is_just_restored = True
 
+        # 3. เช็คว่า OMS เพิ่งส่ง/แก้ ETR มาไหม เพื่อแจ้งลูกค้าอัตโนมัติ
+        if old_instance.oms_etr != instance.oms_etr and instance.oms_etr:
+            instance._has_new_oms_etr = True
+
     except OutageCase.DoesNotExist:
         pass
 
@@ -52,6 +57,28 @@ def process_outage_case_updates(sender, instance, created, **kwargs):
             # อัปเดต Task ID ใหม่ลงไปแบบไม่ trigger signal ซ้ำ
             OutageCase.objects.filter(pk=instance.pk).update(celery_eta_task_id=task.id)
         instance._needs_new_eta_task = False
+
+    # --- กรณี OMS/Admin เติมหรือแก้ ETR ---
+    if getattr(instance, "_has_new_oms_etr", False):
+        etr_label = timezone.localtime(instance.oms_etr).strftime("%H:%M น.")
+        message = (
+            "ระบบได้รับข้อมูล ETR ล่าสุดจาก OMS แล้วครับ "
+            f"เวลาที่คาดว่าจะแก้ไขเสร็จและจ่ายไฟคืนคือประมาณ {etr_label} ครับ"
+        )
+        sent_session_ids = set()
+        affected_customers = CustomerReport.objects.filter(
+            related_case=instance, is_resolved=False
+        ).exclude(session_id__isnull=True).exclude(session_id="")
+
+        for report in affected_customers:
+            if report.session_id in sent_session_ids:
+                continue
+            sent_session_ids.add(report.session_id)
+            send_proactive_alert.delay(
+                report_id=report.id, message=message, event_type="etr_update"
+            )
+
+        instance._has_new_oms_etr = False
 
     # --- กรณีการปิดเคส (Closed-Loop & State Cleansing) ---
     if getattr(instance, "_is_just_restored", False):

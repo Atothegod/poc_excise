@@ -2,22 +2,47 @@ import requests
 import os
 import contextvars
 import re
+from datetime import datetime
 
 DJANGO_API_URL = os.getenv("DJANGO_API_URL", "http://backend:8000/api")
 CA_NUMBER_PATTERN = re.compile(r"^\d{12}$")
+latest_outage_by_session = {}
 
 current_session_id = contextvars.ContextVar("current_session_id", default="unknown")
 current_time_stamp = contextvars.ContextVar("current_time_stamp", default=None)
-current_check_outage_consent = contextvars.ContextVar(
-    "current_check_outage_consent", default=False
-)
 
 
 def is_valid_ca_number(ca_number: str) -> bool:
     return bool(CA_NUMBER_PATTERN.fullmatch(str(ca_number).strip()))
 
 
-def save_report_to_db(ca_number: str, latitude: float, longitude: float):
+def parse_iso_datetime(value):
+    if not value:
+        return None
+    return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+
+
+def remember_latest_outage(db_response):
+    session_id = current_session_id.get()
+    if not session_id or session_id == "unknown":
+        return
+
+    latest_outage_by_session[session_id] = {
+        "event_type": db_response.get("event_type"),
+        "case_id": db_response.get("case_id"),
+        "report_id": db_response.get("report_id"),
+        "eta_target_time": db_response.get("eta_target_time"),
+        "oms_etr": db_response.get("oms_etr"),
+    }
+
+
+def get_latest_outage(session_id: str):
+    return latest_outage_by_session.get(session_id)
+
+
+def save_report_to_db(
+    ca_number: str, latitude: float, longitude: float, pdpa_consent: bool
+):
     endpoint = f"{DJANGO_API_URL}/reports/sync/"
     payload = {
         "session_id": current_session_id.get(),
@@ -25,6 +50,7 @@ def save_report_to_db(ca_number: str, latitude: float, longitude: float):
         "latitude": latitude,
         "longitude": longitude,
         "time_stamp": current_time_stamp.get(),
+        "pdpa_consent": pdpa_consent,
     }
 
     max_retries = 3
@@ -64,17 +90,17 @@ def check_CA_number(ca_number: str):
     return positions[int_ca % 10]
 
 
-def Check_Outage_Tool(ca_number: str):
+def Check_Outage_Tool(ca_number: str, pdpa_consent: bool = False):
     ca_number = str(ca_number).strip()
 
     if not is_valid_ca_number(ca_number):
         return "[CA_INVALID] หมายเลขผู้ใช้ไฟต้องเป็นตัวเลข 12 หลักเท่านั้น ห้ามมีตัวอักษรหรืออักขระอื่นปน"
 
-    if not current_check_outage_consent.get():
+    if not pdpa_consent:
         return "[CONSENT_REQUIRED] ต้องขออนุญาตลูกค้าก่อนใช้ Check_Outage_Tool เพื่อตรวจสอบข้อมูลไฟดับจากหมายเลขผู้ใช้ไฟ"
 
     latitude, longitude = check_CA_number(ca_number)
-    db_response = save_report_to_db(ca_number, latitude, longitude)
+    db_response = save_report_to_db(ca_number, latitude, longitude, pdpa_consent)
 
     if not db_response:
         return "ขัดข้อง ไม่สามารถเชื่อมต่อกับระบบได้"
@@ -82,6 +108,7 @@ def Check_Outage_Tool(ca_number: str):
     event_type = db_response.get("event_type")
     eta = db_response.get("eta_target_time")
     etr = db_response.get("oms_etr")
+    remember_latest_outage(db_response)
 
     # เคส 1: API ขัดข้องติดต่อกันจนครบกำหนด
     if event_type == "api_error":

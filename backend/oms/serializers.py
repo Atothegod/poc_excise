@@ -28,6 +28,7 @@ class AgentReportSerializer(serializers.Serializer):
     tool_used = serializers.CharField(
         max_length=50, required=False, allow_blank=True, allow_null=True
     )
+    pdpa_consent = serializers.BooleanField(required=False, default=False)
 
     # ใช้ DateTimeField เพื่อให้ DRF ตรวจสอบความถูกต้องของ ISO Format ทันที
     time_stamp = serializers.DateTimeField(required=False, allow_null=True)

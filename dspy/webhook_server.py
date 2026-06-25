@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from collections import defaultdict
 
 # 1. Import the stateful 'chatbot' instance you created in agent.py
@@ -39,10 +40,9 @@ class NotificationWebhook(BaseModel):
 @app.post("/ask")
 async def ask_agent(data: QuestionRequest):
     try:
-        if data.time_stamp is None:
-            final_time_stamp = datetime.now().astimezone().isoformat()
-        else:
-            final_time_stamp = data.time_stamp
+        # Use server-side Thailand time as the single source of truth.
+        # Client-provided timestamps can be spoofed or simply wrong.
+        final_time_stamp = datetime.now(ZoneInfo("Asia/Bangkok")).isoformat()
 
         response = chatbot.chat(
             user_input=data.question,

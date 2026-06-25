@@ -1,0 +1,739 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PEA Assistant Chat</title>
+    <style>
+        :root {
+            color-scheme: dark;
+            --bg: #101114;
+            --surface: rgba(27, 29, 34, 0.92);
+            --surface-strong: #20232a;
+            --surface-soft: #292d35;
+            --line: rgba(224, 230, 238, 0.13);
+            --line-strong: rgba(224, 230, 238, 0.22);
+            --text: #f5f7fa;
+            --muted: #aeb8c5;
+            --dim: #6f7c8b;
+            --mint: #56f0bd;
+            --cyan: #52d7ff;
+            --amber: #ffbf66;
+            --magenta: #e76bf3;
+            --danger: #ff6b6b;
+            --agent: #242a31;
+            --user: #17382f;
+            --shadow: 0 28px 80px rgba(0, 0, 0, 0.45);
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        html,
+        body {
+            min-height: 100%;
+        }
+
+        body {
+            margin: 0;
+            background:
+                linear-gradient(120deg, rgba(86, 240, 189, 0.08), transparent 30%),
+                linear-gradient(240deg, rgba(255, 191, 102, 0.08), transparent 34%),
+                var(--bg);
+            color: var(--text);
+            font-family: Inter, "Segoe UI", Tahoma, sans-serif;
+        }
+
+        body::before {
+            position: fixed;
+            inset: 0;
+            z-index: -1;
+            content: "";
+            background-image:
+                linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
+            background-size: 44px 44px;
+            mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.95), transparent 86%);
+        }
+
+        button,
+        input {
+            font: inherit;
+        }
+
+        .shell {
+            width: min(1240px, calc(100% - 32px));
+            min-height: calc(100vh - 32px);
+            margin: 16px auto;
+            display: grid;
+            grid-template-rows: auto 1fr;
+            overflow: hidden;
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: var(--surface);
+            box-shadow: var(--shadow);
+            backdrop-filter: blur(18px);
+        }
+
+        .topbar {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            gap: 18px;
+            align-items: center;
+            padding: 18px 20px;
+            border-bottom: 1px solid var(--line);
+            background: linear-gradient(90deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.02));
+        }
+
+        .brand {
+            display: flex;
+            gap: 14px;
+            align-items: center;
+            min-width: 0;
+        }
+
+        .brand-mark {
+            width: 46px;
+            height: 46px;
+            display: grid;
+            place-items: center;
+            flex: 0 0 auto;
+            border: 1px solid rgba(86, 240, 189, 0.42);
+            border-radius: 8px;
+            color: var(--mint);
+            background: linear-gradient(145deg, rgba(86, 240, 189, 0.18), rgba(82, 215, 255, 0.08));
+            font-weight: 800;
+        }
+
+        .title {
+            min-width: 0;
+        }
+
+        h1 {
+            margin: 0;
+            font-size: 20px;
+            line-height: 1.25;
+        }
+
+        .subtitle {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            align-items: center;
+            margin-top: 6px;
+            color: var(--muted);
+            font-size: 13px;
+        }
+
+        .session {
+            max-width: 100%;
+            overflow-wrap: anywhere;
+        }
+
+        .status-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            min-height: 24px;
+            padding: 0 10px;
+            border: 1px solid rgba(86, 240, 189, 0.32);
+            border-radius: 999px;
+            color: var(--mint);
+            background: rgba(86, 240, 189, 0.08);
+            font-size: 12px;
+            font-weight: 700;
+        }
+
+        .status-chip::before {
+            width: 7px;
+            height: 7px;
+            border-radius: 999px;
+            background: currentColor;
+            content: "";
+        }
+
+        .top-actions {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .ghost-btn,
+        .reset-btn,
+        .send-btn {
+            min-height: 42px;
+            border: 1px solid var(--line-strong);
+            border-radius: 8px;
+            color: var(--text);
+            cursor: pointer;
+            font-weight: 700;
+            transition: transform 160ms ease, border-color 160ms ease, background 160ms ease;
+        }
+
+        .ghost-btn {
+            min-width: 104px;
+            padding: 0 14px;
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        .reset-btn {
+            padding: 0 14px;
+            border-color: rgba(255, 107, 107, 0.38);
+            background: rgba(255, 107, 107, 0.12);
+            white-space: nowrap;
+        }
+
+        .send-btn {
+            min-width: 90px;
+            padding: 0 18px;
+            border-color: rgba(86, 240, 189, 0.45);
+            background: linear-gradient(135deg, rgba(86, 240, 189, 0.92), rgba(82, 215, 255, 0.78));
+            color: #07120f;
+        }
+
+        .ghost-btn:hover,
+        .reset-btn:hover,
+        .send-btn:hover {
+            transform: translateY(-1px);
+        }
+
+        .ghost-btn:hover {
+            border-color: rgba(82, 215, 255, 0.42);
+            background: rgba(82, 215, 255, 0.10);
+        }
+
+        .layout {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) minmax(320px, 380px);
+            min-height: 0;
+            transition: grid-template-columns 220ms ease;
+        }
+
+        body.state-hidden .layout {
+            grid-template-columns: minmax(0, 1fr) 0;
+        }
+
+        .chat-panel,
+        .state-panel {
+            min-height: 0;
+        }
+
+        .chat-panel {
+            display: grid;
+            grid-template-rows: auto minmax(0, 1fr) auto;
+            padding: 18px;
+        }
+
+        .stream-header {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 14px;
+        }
+
+        .stream-title {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            color: var(--muted);
+            font-size: 13px;
+            font-weight: 700;
+            text-transform: uppercase;
+        }
+
+        .stream-title::before {
+            width: 28px;
+            height: 2px;
+            background: linear-gradient(90deg, var(--mint), var(--amber));
+            content: "";
+        }
+
+        .endpoint {
+            max-width: min(460px, 100%);
+            overflow: hidden;
+            color: var(--dim);
+            font-family: "SFMono-Regular", Consolas, monospace;
+            font-size: 12px;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .chat-box {
+            min-height: 460px;
+            overflow-y: auto;
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            padding: 16px;
+            background:
+                linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.015)),
+                #15171b;
+        }
+
+        .chat-box::-webkit-scrollbar,
+        .state-box::-webkit-scrollbar {
+            width: 10px;
+        }
+
+        .chat-box::-webkit-scrollbar-thumb,
+        .state-box::-webkit-scrollbar-thumb {
+            border: 3px solid transparent;
+            border-radius: 999px;
+            background: rgba(174, 184, 197, 0.36);
+            background-clip: padding-box;
+        }
+
+        .message {
+            display: grid;
+            gap: 6px;
+            width: fit-content;
+            max-width: 78%;
+            margin-bottom: 14px;
+            padding: 12px 14px;
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            box-shadow: 0 12px 26px rgba(0, 0, 0, 0.18);
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+        }
+
+        .message strong {
+            color: var(--muted);
+            font-size: 11px;
+            letter-spacing: 0;
+            text-transform: uppercase;
+        }
+
+        .message span {
+            line-height: 1.65;
+        }
+
+        .message.agent {
+            background: linear-gradient(145deg, rgba(41, 45, 53, 0.98), rgba(31, 35, 42, 0.98));
+        }
+
+        .message.agent strong {
+            color: var(--cyan);
+        }
+
+        .message.user {
+            margin-left: auto;
+            border-color: rgba(86, 240, 189, 0.24);
+            background: linear-gradient(145deg, rgba(23, 56, 47, 0.98), rgba(20, 44, 39, 0.98));
+        }
+
+        .message.user strong {
+            color: var(--mint);
+        }
+
+        .message.loading {
+            min-width: 190px;
+        }
+
+        .thinking-row {
+            display: inline-flex;
+            gap: 10px;
+            align-items: center;
+            color: var(--muted);
+        }
+
+        .spinner {
+            width: 18px;
+            height: 18px;
+            flex: 0 0 auto;
+            border: 2px solid rgba(82, 215, 255, 0.18);
+            border-top-color: var(--cyan);
+            border-right-color: var(--mint);
+            border-radius: 50%;
+            animation: spin 820ms linear infinite;
+            box-shadow: 0 0 16px rgba(82, 215, 255, 0.18);
+        }
+
+        .thinking-text::after {
+            display: inline-block;
+            width: 24px;
+            content: "";
+            animation: dots 1.15s steps(4, end) infinite;
+        }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        @keyframes dots {
+            0% {
+                content: "";
+            }
+            25% {
+                content: ".";
+            }
+            50% {
+                content: "..";
+            }
+            75%,
+            100% {
+                content: "...";
+            }
+        }
+
+        .composer {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            gap: 10px;
+            margin-top: 14px;
+            padding: 10px;
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        .input {
+            width: 100%;
+            min-width: 0;
+            min-height: 42px;
+            border: 0;
+            border-radius: 6px;
+            outline: 0;
+            padding: 0 12px;
+            background: rgba(255, 255, 255, 0.08);
+            color: var(--text);
+            font-size: 15px;
+        }
+
+        .input::placeholder {
+            color: var(--dim);
+        }
+
+        .input:focus {
+            box-shadow: inset 0 0 0 1px rgba(86, 240, 189, 0.52);
+        }
+
+        .state-panel {
+            display: grid;
+            grid-template-rows: auto minmax(0, 1fr);
+            overflow: hidden;
+            border-left: 1px solid var(--line);
+            background:
+                linear-gradient(180deg, rgba(231, 107, 243, 0.07), transparent 36%),
+                rgba(255, 255, 255, 0.035);
+            opacity: 1;
+            transition: opacity 180ms ease;
+        }
+
+        body.state-hidden .state-panel {
+            pointer-events: none;
+            opacity: 0;
+        }
+
+        .state-head {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            justify-content: space-between;
+            padding: 18px;
+            border-bottom: 1px solid var(--line);
+        }
+
+        .state-title {
+            margin: 0;
+            color: var(--text);
+            font-size: 14px;
+        }
+
+        .state-meta {
+            margin-top: 4px;
+            color: var(--dim);
+            font-size: 12px;
+        }
+
+        .state-box {
+            min-height: 0;
+            margin: 18px;
+            overflow: auto;
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: #111316;
+            padding: 14px;
+            color: #dce6f1;
+            font-family: "SFMono-Regular", Consolas, monospace;
+            font-size: 12px;
+            line-height: 1.6;
+            white-space: pre-wrap;
+        }
+
+        @media (max-width: 900px) {
+            .shell {
+                width: 100%;
+                min-height: 100vh;
+                margin: 0;
+                border: 0;
+                border-radius: 0;
+            }
+
+            .topbar {
+                grid-template-columns: 1fr;
+            }
+
+            .top-actions {
+                width: 100%;
+            }
+
+            .ghost-btn,
+            .reset-btn {
+                flex: 1;
+            }
+
+            .layout,
+            body.state-hidden .layout {
+                grid-template-columns: 1fr;
+            }
+
+            .state-panel {
+                border-left: 0;
+                border-top: 1px solid var(--line);
+            }
+
+            body.state-hidden .state-panel {
+                display: none;
+            }
+
+            .chat-panel {
+                padding: 14px;
+            }
+
+            .chat-box {
+                min-height: 58vh;
+            }
+
+            .message {
+                max-width: 100%;
+            }
+
+            .composer {
+                grid-template-columns: 1fr;
+            }
+
+            .send-btn {
+                width: 100%;
+            }
+        }
+    </style>
+</head>
+<body>
+    <main class="shell">
+        <header class="topbar">
+            <div class="brand">
+                <div class="brand-mark">PEA</div>
+                <div class="title">
+                    <h1>PEA Assistant Command Center</h1>
+                    <div class="subtitle">
+                        <span class="status-chip">Online</span>
+                        <span class="session">Session: <strong id="displaySessionId">กำลังโหลด...</strong></span>
+                    </div>
+                </div>
+            </div>
+            <div class="top-actions">
+                <button id="stateToggle" class="ghost-btn" type="button" onclick="toggleStatePanel()" aria-expanded="true">Hide state</button>
+                <button class="reset-btn" type="button" onclick="resetSession()">เริ่มแชทใหม่</button>
+            </div>
+        </header>
+
+        <section class="layout">
+            <div class="chat-panel">
+                <div class="stream-header">
+                    <div class="stream-title">Live conversation</div>
+                    <div id="endpointLabel" class="endpoint"></div>
+                </div>
+
+                <div id="chatBox" class="chat-box" aria-live="polite"></div>
+
+                <div class="composer">
+                    <input
+                        id="userInput"
+                        class="input"
+                        type="text"
+                        placeholder="พิมพ์ข้อความหรือหมายเลข CA 12 หลัก..."
+                        autocomplete="off"
+                        onkeypress="handleKeyPress(event)"
+                    >
+                    <button id="sendBtn" class="send-btn" type="button" onclick="sendMessage()">ส่ง</button>
+                </div>
+            </div>
+
+            <aside id="statePanel" class="state-panel">
+                <div class="state-head">
+                    <div>
+                        <h2 class="state-title">AI State</h2>
+                        <div class="state-meta">Runtime memory and flow step</div>
+                    </div>
+                </div>
+                <pre id="stateBox" class="state-box">รอข้อมูล State...</pre>
+            </aside>
+        </section>
+    </main>
+
+    <script>
+        const configuredAgentBaseUrl = "{{ agent_base_url|escapejs }}";
+        const agentBaseUrl = configuredAgentBaseUrl || `${window.location.protocol}//${window.location.hostname}:8001`;
+        const API_URL = `${agentBaseUrl}/ask`;
+        const NOTIFICATIONS_URL = `${agentBaseUrl}/notifications`;
+
+        const chatBox = document.getElementById("chatBox");
+        const userInput = document.getElementById("userInput");
+        const sendBtn = document.getElementById("sendBtn");
+        const stateBox = document.getElementById("stateBox");
+        const stateToggle = document.getElementById("stateToggle");
+        const endpointLabel = document.getElementById("endpointLabel");
+
+        endpointLabel.textContent = agentBaseUrl;
+
+        function getOrCreateSessionId() {
+            let sessionId = localStorage.getItem("pea_chat_session_id");
+            if (!sessionId) {
+                sessionId = "user_" + Math.random().toString(36).slice(2, 11);
+                localStorage.setItem("pea_chat_session_id", sessionId);
+            }
+            return sessionId;
+        }
+
+        function applyStatePanelPreference() {
+            const hidden = localStorage.getItem("pea_chat_state_hidden") === "true";
+            document.body.classList.toggle("state-hidden", hidden);
+            stateToggle.textContent = hidden ? "Show state" : "Hide state";
+            stateToggle.setAttribute("aria-expanded", String(!hidden));
+        }
+
+        function toggleStatePanel() {
+            const nextHidden = !document.body.classList.contains("state-hidden");
+            localStorage.setItem("pea_chat_state_hidden", String(nextHidden));
+            applyStatePanelPreference();
+        }
+
+        const currentSessionId = getOrCreateSessionId();
+        document.getElementById("displaySessionId").textContent = currentSessionId;
+        applyStatePanelPreference();
+        appendMessage("สวัสดีครับ มีอะไรให้ผมช่วยเกี่ยวกับ PEA ไหมครับ", false);
+
+        async function pollNotifications() {
+            try {
+                const response = await fetch(`${NOTIFICATIONS_URL}/${currentSessionId}`);
+                const data = await response.json();
+                if (response.ok && data.notifications) {
+                    data.notifications.forEach((notification) => {
+                        appendMessage(notification.message, false);
+                    });
+                }
+            } catch (error) {
+                console.error(error);
+            }
+        }
+
+        setInterval(pollNotifications, 2000);
+
+        function resetSession() {
+            localStorage.removeItem("pea_chat_session_id");
+            location.reload();
+        }
+
+        function appendMessage(text, isUser) {
+            const msgDiv = document.createElement("div");
+            msgDiv.className = `message ${isUser ? "user" : "agent"}`;
+
+            const label = document.createElement("strong");
+            label.textContent = isUser ? "You" : "Agent";
+
+            const body = document.createElement("span");
+            body.textContent = text;
+
+            msgDiv.appendChild(label);
+            msgDiv.appendChild(body);
+            chatBox.appendChild(msgDiv);
+            chatBox.scrollTop = chatBox.scrollHeight;
+        }
+
+        function appendLoadingMessage() {
+            const msgDiv = document.createElement("div");
+            msgDiv.className = "message agent loading";
+            msgDiv.setAttribute("aria-label", "Agent is preparing a response");
+
+            const label = document.createElement("strong");
+            label.textContent = "Agent";
+
+            const row = document.createElement("span");
+            row.className = "thinking-row";
+
+            const spinner = document.createElement("span");
+            spinner.className = "spinner";
+            spinner.setAttribute("aria-hidden", "true");
+
+            const text = document.createElement("span");
+            text.className = "thinking-text";
+            text.textContent = "กำลังประมวลผล";
+
+            row.appendChild(spinner);
+            row.appendChild(text);
+            msgDiv.appendChild(label);
+            msgDiv.appendChild(row);
+            chatBox.appendChild(msgDiv);
+            chatBox.scrollTop = chatBox.scrollHeight;
+
+            return msgDiv;
+        }
+
+        function removeLoadingMessage(loadingMessage) {
+            if (loadingMessage && loadingMessage.parentNode) {
+                loadingMessage.parentNode.removeChild(loadingMessage);
+            }
+        }
+
+        async function sendMessage() {
+            const text = userInput.value.trim();
+            if (!text) return;
+
+            appendMessage(text, true);
+            const loadingMessage = appendLoadingMessage();
+            userInput.value = "";
+            userInput.disabled = true;
+            sendBtn.disabled = true;
+
+            try {
+                const response = await fetch(API_URL, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        question: text,
+                        session_id: currentSessionId
+                    })
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    removeLoadingMessage(loadingMessage);
+                    appendMessage(data.answer, false);
+                    stateBox.textContent = data.state ? JSON.stringify(data.state, null, 2) : "ไม่พบข้อมูล State";
+                } else {
+                    removeLoadingMessage(loadingMessage);
+                    appendMessage(`Error: ${data.detail || "ไม่สามารถติดต่อระบบได้"}`, false);
+                }
+            } catch (error) {
+                removeLoadingMessage(loadingMessage);
+                appendMessage("เกิดข้อผิดพลาดในการเชื่อมต่อ", false);
+            } finally {
+                removeLoadingMessage(loadingMessage);
+                userInput.disabled = false;
+                sendBtn.disabled = false;
+                userInput.focus();
+            }
+        }
+
+        function handleKeyPress(event) {
+            if (event.key === "Enter") sendMessage();
+        }
+    </script>
+</body>
+</html>

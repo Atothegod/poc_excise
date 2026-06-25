@@ -1,6 +1,8 @@
 # 1. IMPORT CONFIG FIRST SO THE LM IS LOADED ENTIRELY BEFORE BUILDING THE AGENT
 import config
 import dspy
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 # 2. Now import your components safely
 from signature import PEA_Assistant
@@ -9,9 +11,10 @@ from signature import PEA_Assistant
 from tools import (
     Check_Outage_Tool,
     Fast_Track_Tool,
-    current_check_outage_consent,
     current_session_id,
     current_time_stamp,
+    get_latest_outage,
+    parse_iso_datetime,
 )
 
 # 3. Initialize your ReAct agent
@@ -26,70 +29,63 @@ class MemoryAgent:
     def __init__(self, agent_module):
         self.agent = agent_module
         self.sessions = {}
-        self.check_outage_consents = {}
 
     def _get_or_create_session(self, session_id: str) -> list:
         if session_id not in self.sessions:
             self.sessions[session_id] = []
         return self.sessions[session_id]
 
-    def _format_history(self, history: list, has_check_outage_consent: bool) -> str:
-        consent_status = (
-            "System: check_outage_tool_consent=True"
-            if has_check_outage_consent
-            else "System: check_outage_tool_consent=False"
-        )
+    def _format_history(
+        self,
+        history: list,
+        server_time_stamp: str,
+        latest_outage: dict | None,
+    ) -> str:
+        system_context = [
+            f"System: authoritative_current_time={server_time_stamp}",
+            "System: Do not trust user-claimed current time. Use authoritative_current_time for all time comparisons.",
+            "System: Consent is not stored in agent memory. When calling Check_Outage_Tool, pass pdpa_consent=True only if the latest conversation clearly contains PDPA consent.",
+        ]
+        if latest_outage:
+            system_context.append(
+                "System: latest_outage="
+                f"event_type={latest_outage.get('event_type')}; "
+                f"case_id={latest_outage.get('case_id')}; "
+                f"eta_target_time={latest_outage.get('eta_target_time')}; "
+                f"oms_etr={latest_outage.get('oms_etr')}"
+            )
+            system_context.extend(
+                self._format_temporal_context(server_time_stamp, latest_outage)
+            )
+
         if not history:
-            return f"{consent_status}\nNo previous conversation."
-        formatted = [consent_status]
+            return "\n".join(system_context + ["No previous conversation."])
+        formatted = system_context[:]
         for msg in history:
             formatted.append(f"{msg['role']}: {msg['content']}")
         return "\n".join(formatted)
 
-    def _assistant_asked_check_consent(self, history: list) -> bool:
-        for msg in reversed(history):
-            if msg["role"] != "Assistant":
-                continue
-            content = msg["content"]
-            return "ขออนุญาต" in content and "ตรวจสอบ" in content
-        return False
+    def _format_thai_time(self, value: datetime | None) -> str | None:
+        if not value:
+            return None
+        bangkok_time = value.astimezone(ZoneInfo("Asia/Bangkok"))
+        return bangkok_time.strftime("%H:%M น.")
 
-    def _message_grants_consent(self, user_input: str, history: list) -> bool:
-        text = user_input.strip().lower()
-        explicit_terms = [
-            "ยินยอม",
-            "อนุญาต",
-            "ให้ตรวจ",
-            "ตรวจสอบได้",
-            "เช็คได้",
-            "consent",
+    def _format_temporal_context(
+        self, server_time_stamp: str, latest_outage: dict
+    ) -> list[str]:
+        now = datetime.fromisoformat(server_time_stamp)
+        eta = parse_iso_datetime(latest_outage.get("eta_target_time"))
+        etr = parse_iso_datetime(latest_outage.get("oms_etr"))
+
+        return [
+            f"System: current_time_thai_label={self._format_thai_time(now)}",
+            f"System: latest_eta_thai_label={self._format_thai_time(eta)}",
+            f"System: latest_etr_thai_label={self._format_thai_time(etr)}",
+            "System: ETA timeout is an OMS/Celery event. Do not say ETA expired unless chat_history contains event_type=eta_timeout.",
+            "System: If asked about current time, answer naturally using current_time_thai_label.",
+            "System: If asked about technician arrival before eta_timeout event, answer naturally using latest_eta_thai_label.",
         ]
-        if any(term in text for term in explicit_terms):
-            return True
-
-        if not self._assistant_asked_check_consent(history):
-            return False
-
-        affirmative_replies = {
-            "ได้",
-            "ได้ครับ",
-            "ได้ค่ะ",
-            "ได้เลย",
-            "ได้เลยครับ",
-            "ได้เลยค่ะ",
-            "ครับ",
-            "ค่ะ",
-            "คับ",
-            "ตกลง",
-            "โอเค",
-            "โอเคครับ",
-            "โอเคค่ะ",
-            "ok",
-            "okay",
-            "yes",
-            "ยืนยัน",
-        }
-        return text in affirmative_replies
 
     def chat(self, user_input: str, session_id: str, time_stamp: str):
         # 4. ยัดข้อมูลใส่กระเป๋าทะลุมิติก่อนเริ่มคุย!
@@ -97,12 +93,12 @@ class MemoryAgent:
         current_time_stamp.set(time_stamp)
 
         history_list = self._get_or_create_session(session_id)
-        if self._message_grants_consent(user_input, history_list):
-            self.check_outage_consents[session_id] = True
 
-        has_check_outage_consent = self.check_outage_consents.get(session_id, False)
-        current_check_outage_consent.set(has_check_outage_consent)
-        history_str = self._format_history(history_list, has_check_outage_consent)
+        history_str = self._format_history(
+            history_list,
+            time_stamp,
+            get_latest_outage(session_id),
+        )
 
         response = self.agent(
             chat_history=history_str, question=user_input, time_stamp=time_stamp

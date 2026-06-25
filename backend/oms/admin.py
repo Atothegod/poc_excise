@@ -88,5 +88,12 @@ class OutageCaseAdmin(admin.ModelAdmin):
 
 @admin.register(CustomerReport)
 class CustomerReportAdmin(admin.ModelAdmin):
-    list_display = ("ca_number", "customer_name", "related_case", "updated_at")
+    list_display = (
+        "ca_number",
+        "customer_name",
+        "pdpa_consent",
+        "pdpa_consent_at",
+        "related_case",
+        "updated_at",
+    )
     search_fields = ("ca_number", "customer_name")
