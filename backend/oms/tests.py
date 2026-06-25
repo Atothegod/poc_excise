@@ -23,7 +23,7 @@ class SyncAgentReportTests(TestCase):
             "/api/reports/sync/",
             {
                 "session_id": "session-new-event",
-                "ca_number": "123456789",
+                "ca_number": "123456789012",
                 "latitude": 9.2917,
                 "longitude": 100.926296,
                 "time_stamp": base_time.isoformat(),
@@ -51,7 +51,7 @@ class SyncAgentReportTests(TestCase):
             "/api/reports/sync/",
             {
                 "session_id": "session-new-event",
-                "ca_number": "123456789",
+                "ca_number": "123456789012",
                 "latitude": 9.2917,
                 "longitude": 100.926296,
                 "time_stamp": base_time.isoformat(),
@@ -61,6 +61,20 @@ class SyncAgentReportTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(parse_datetime(response.data["oms_etr"]), admin_etr)
+
+    def test_sync_report_rejects_invalid_ca_number(self):
+        response = self.client.post(
+            "/api/reports/sync/",
+            {
+                "session_id": "session-invalid-ca",
+                "ca_number": "12345abc9012",
+                "latitude": 9.2917,
+                "longitude": 100.926296,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
 
 
 class CheckEtaTimeoutTests(TestCase):
@@ -76,7 +90,7 @@ class CheckEtaTimeoutTests(TestCase):
         )
         report = CustomerReport.objects.create(
             session_id="session-timeout-with-etr",
-            ca_number="123456789",
+            ca_number="123456789012",
             related_case=case,
         )
 
@@ -97,7 +111,7 @@ class CheckEtaTimeoutTests(TestCase):
         )
         report = CustomerReport.objects.create(
             session_id="session-timeout-without-etr",
-            ca_number="123456789",
+            ca_number="123456789012",
             related_case=case,
         )
 
@@ -106,3 +120,42 @@ class CheckEtaTimeoutTests(TestCase):
         payload = mock_post.call_args.kwargs["json"]
         self.assertEqual(payload["event_type"], "eta_timeout")
         self.assertIn("พี่ปลื้ม", payload["message"])
+
+    @patch("oms.tasks.requests.post")
+    def test_eta_timeout_notifies_all_active_sessions_for_case(self, mock_post):
+        case = OutageCase.objects.create(
+            title="ETA timeout broadcast",
+            latitude=9.2917,
+            longitude=100.926296,
+            eta_target_time=timezone.now() - timedelta(minutes=1),
+        )
+        first_report = CustomerReport.objects.create(
+            session_id="session-a",
+            ca_number="123456789012",
+            related_case=case,
+        )
+        CustomerReport.objects.create(
+            session_id="session-b",
+            ca_number="123456789013",
+            related_case=case,
+        )
+        CustomerReport.objects.create(
+            session_id="session-a",
+            ca_number="123456789014",
+            related_case=case,
+        )
+        CustomerReport.objects.create(
+            session_id="session-resolved",
+            ca_number="123456789015",
+            related_case=case,
+            is_resolved=True,
+        )
+
+        check_eta_timeout(case.case_id, first_report.id)
+
+        payloads = [call.kwargs["json"] for call in mock_post.call_args_list]
+        self.assertEqual(
+            {payload["session_id"] for payload in payloads},
+            {"session-a", "session-b"},
+        )
+        self.assertEqual(mock_post.call_count, 2)

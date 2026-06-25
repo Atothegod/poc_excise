@@ -1,4 +1,5 @@
 import math
+from rest_framework import serializers
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from django.utils import timezone
@@ -8,6 +9,7 @@ from .serializers import (
     AgentReportSerializer,
     ActionStatusRequestSerializer,
     ActionStatusResponseSerializer,
+    validate_ca_number_format,
 )
 from .tasks import check_eta_timeout
 
@@ -143,8 +145,10 @@ def fast_track_report(request):
     รับคำสั่งจากการยืนยันสวิตช์เบรกเกอร์ของลูกค้า
     """
     ca_number = request.data.get("ca_number")
-    if not ca_number:
-        return Response({"error": "CA number required"}, status=400)
+    try:
+        ca_number = validate_ca_number_format(ca_number)
+    except serializers.ValidationError as e:
+        return Response({"error": str(e)}, status=400)
 
     # ดึงประวัติลูกค้าล่าสุดที่เคสเพิ่งถูกปิดไป (is_resolved=True ล่าสุด) หรือเคสเดิม
     report = (

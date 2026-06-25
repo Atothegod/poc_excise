@@ -1,11 +1,20 @@
 import requests
 import os
 import contextvars
+import re
 
 DJANGO_API_URL = os.getenv("DJANGO_API_URL", "http://backend:8000/api")
+CA_NUMBER_PATTERN = re.compile(r"^\d{12}$")
 
 current_session_id = contextvars.ContextVar("current_session_id", default="unknown")
 current_time_stamp = contextvars.ContextVar("current_time_stamp", default=None)
+current_check_outage_consent = contextvars.ContextVar(
+    "current_check_outage_consent", default=False
+)
+
+
+def is_valid_ca_number(ca_number: str) -> bool:
+    return bool(CA_NUMBER_PATTERN.fullmatch(str(ca_number).strip()))
 
 
 def save_report_to_db(ca_number: str, latitude: float, longitude: float):
@@ -56,6 +65,14 @@ def check_CA_number(ca_number: str):
 
 
 def Check_Outage_Tool(ca_number: str):
+    ca_number = str(ca_number).strip()
+
+    if not is_valid_ca_number(ca_number):
+        return "[CA_INVALID] หมายเลขผู้ใช้ไฟต้องเป็นตัวเลข 12 หลักเท่านั้น ห้ามมีตัวอักษรหรืออักขระอื่นปน"
+
+    if not current_check_outage_consent.get():
+        return "[CONSENT_REQUIRED] ต้องขออนุญาตลูกค้าก่อนใช้ Check_Outage_Tool เพื่อตรวจสอบข้อมูลไฟดับจากหมายเลขผู้ใช้ไฟ"
+
     latitude, longitude = check_CA_number(ca_number)
     db_response = save_report_to_db(ca_number, latitude, longitude)
 
@@ -98,6 +115,10 @@ def Fast_Track_Tool(ca_number: str):
     เครื่องมือสำหรับใช้สร้างตั๋ว Fast-track ด่วน
     เมื่อลูกค้าบอกว่าไฟยังไม่มาและเช็คเบรกเกอร์แล้ว
     """
+    ca_number = str(ca_number).strip()
+    if not is_valid_ca_number(ca_number):
+        return "[CA_INVALID] หมายเลขผู้ใช้ไฟต้องเป็นตัวเลข 12 หลักเท่านั้น ห้ามมีตัวอักษรหรืออักขระอื่นปน"
+
     endpoint = f"{DJANGO_API_URL}/reports/fast-track/"
     payload = {"ca_number": ca_number}
 
