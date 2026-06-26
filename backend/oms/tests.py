@@ -1,3 +1,4 @@
+import math
 from datetime import timedelta
 from unittest.mock import patch
 
@@ -8,6 +9,7 @@ from rest_framework.test import APIClient
 
 from .models import CustomerLocation, CustomerReport, OutageCase, OutageRestorationLog
 from .tasks import check_eta_timeout
+from .views_api import calculate_distance
 
 
 class SyncAgentReportTests(TestCase):
@@ -509,3 +511,89 @@ class OutageCaseSignalTests(TestCase):
         self.assertEqual(log.etr_source, "oms")
         self.assertIsNotNone(log.restored_at)
         self.assertIsNotNone(log.etr_delta_minutes)
+
+
+class OpsWebhookConsoleTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+
+    def test_ops_webhook_page_renders(self):
+        response = self.client.get("/ops/webhook/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "OMS Webhook Console")
+
+    @patch("oms.signals.send_proactive_alert.delay")
+    def test_ops_action_sets_etr_for_selected_cases(self, mock_send_alert):
+        selected_case = OutageCase.objects.create(
+            title="Selected ETR case",
+            latitude=9.2917,
+            longitude=100.926296,
+        )
+        untouched_case = OutageCase.objects.create(
+            title="Untouched ETR case",
+            latitude=9.2918,
+            longitude=100.926396,
+        )
+        CustomerReport.objects.create(
+            session_id="session-ops-etr",
+            ca_number="123456789012",
+            related_case=selected_case,
+        )
+
+        response = self.client.post(
+            "/ops/cases/action/",
+            {
+                "action": "set_etr",
+                "target_mode": "selected",
+                "case_ids": [str(selected_case.case_id)],
+                "etr_minutes": 30,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["updated_count"], 1)
+        selected_case.refresh_from_db()
+        untouched_case.refresh_from_db()
+        self.assertIsNotNone(selected_case.oms_etr)
+        self.assertIsNone(untouched_case.oms_etr)
+        mock_send_alert.assert_called_once()
+
+    def test_ops_action_restores_all_active_cases(self):
+        active_case = OutageCase.objects.create(
+            title="Active restore case",
+            latitude=9.2917,
+            longitude=100.926296,
+        )
+        already_restored_case = OutageCase.objects.create(
+            title="Already restored case",
+            status="restored",
+            latitude=9.2918,
+            longitude=100.926396,
+        )
+
+        response = self.client.post(
+            "/ops/cases/action/",
+            {"action": "restore", "target_mode": "all_active"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["updated_count"], 1)
+        active_case.refresh_from_db()
+        already_restored_case.refresh_from_db()
+        self.assertEqual(active_case.status, "restored")
+        self.assertEqual(already_restored_case.status, "restored")
+
+
+class DistanceLinkingTests(TestCase):
+    def test_calculate_distance_returns_infinite_outside_tiny_link_radius(self):
+        distance = calculate_distance(14.0626077, 100.6109053, 14.0627077, 100.6109053)
+
+        self.assertTrue(math.isinf(distance))
+
+    def test_calculate_distance_allows_effectively_same_coordinates(self):
+        distance = calculate_distance(14.0626077, 100.6109053, 14.0626077, 100.6109053)
+
+        self.assertEqual(distance, 0)

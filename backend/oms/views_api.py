@@ -19,8 +19,17 @@ from .tasks import check_eta_timeout
 
 
 def calculate_distance(lat1, lon1, lat2, lon2):
+    """
+    Keep outage cases effectively independent.
+
+    The caller still uses the legacy `dist <= 5.0` check, so this function only
+    returns a finite distance when two reports are within about 10 cm of each
+    other. Anything farther away is treated as outside the linking radius.
+    """
     if None in [lat1, lon1, lat2, lon2]:
         return float("inf")
+
+    case_link_radius_km = 0.0001
     R = 6371.0
     lat1_rad = math.radians(lat1)
     lon1_rad = math.radians(lon1)
@@ -33,7 +42,10 @@ def calculate_distance(lat1, lon1, lat2, lon2):
         + math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(dlon / 2) ** 2
     )
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-    return R * c
+    distance_km = R * c
+    if distance_km > case_link_radius_km:
+        return float("inf")
+    return distance_km
 
 
 def _parse_float(value):

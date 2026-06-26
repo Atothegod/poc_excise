@@ -1,0 +1,951 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OMS Webhook Console</title>
+    <style>
+        :root {
+            color-scheme: light;
+            --ink: #17202f;
+            --muted: #667085;
+            --line: #d7dde7;
+            --panel: #ffffff;
+            --panel-soft: #f6f8fb;
+            --purple: #733190;
+            --purple-dark: #54206c;
+            --green: #15803d;
+            --red: #b42318;
+            --amber: #b54708;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            background: #edf1f6;
+            color: var(--ink);
+            font-family: Inter, "Segoe UI", Tahoma, sans-serif;
+        }
+
+        button,
+        input,
+        select {
+            font: inherit;
+        }
+
+        button {
+            cursor: pointer;
+        }
+
+        button:disabled {
+            cursor: not-allowed;
+            opacity: 0.52;
+        }
+
+        .shell {
+            min-height: 100dvh;
+            display: grid;
+            grid-template-rows: auto auto minmax(0, 1fr);
+        }
+
+        .topbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+            padding: 16px 22px;
+            background: var(--purple);
+            color: #fff;
+        }
+
+        .brand {
+            min-width: 0;
+        }
+
+        .brand h1 {
+            margin: 0;
+            font-size: 18px;
+            line-height: 1.2;
+            letter-spacing: 0;
+        }
+
+        .brand p {
+            margin: 3px 0 0;
+            color: rgba(255, 255, 255, 0.78);
+            font-size: 12px;
+        }
+
+        .top-actions {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            flex-wrap: wrap;
+            justify-content: flex-end;
+        }
+
+        .toolbar {
+            display: grid;
+            grid-template-columns: minmax(220px, 1fr) 170px auto auto;
+            gap: 10px;
+            align-items: center;
+            padding: 14px 22px;
+            border-bottom: 1px solid var(--line);
+            background: var(--panel);
+        }
+
+        .workspace {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) 360px;
+            min-height: 0;
+        }
+
+        .case-area {
+            min-width: 0;
+            min-height: 0;
+            display: grid;
+            grid-template-rows: auto minmax(0, 1fr);
+            border-right: 1px solid var(--line);
+            background: var(--panel);
+        }
+
+        .summary-strip {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 12px 22px;
+            border-bottom: 1px solid var(--line);
+            background: var(--panel-soft);
+            color: var(--muted);
+            font-size: 13px;
+        }
+
+        .bulk-buttons {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .table-wrap {
+            min-height: 0;
+            overflow: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            min-width: 940px;
+            table-layout: fixed;
+        }
+
+        th,
+        td {
+            border-bottom: 1px solid var(--line);
+            padding: 10px 12px;
+            text-align: left;
+            vertical-align: middle;
+            font-size: 13px;
+        }
+
+        th {
+            position: sticky;
+            top: 0;
+            z-index: 2;
+            background: #f9fafc;
+            color: #344054;
+            font-size: 12px;
+            font-weight: 700;
+        }
+
+        tbody tr:hover {
+            background: #f5f7fb;
+        }
+
+        .check-cell {
+            width: 44px;
+            text-align: center;
+        }
+
+        .lv-cell {
+            width: 82px;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .status-cell {
+            width: 156px;
+        }
+
+        .ca-cell {
+            width: 210px;
+        }
+
+        .time-cell {
+            width: 178px;
+            color: #344054;
+        }
+
+        .case-title {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .case-id {
+            margin-top: 3px;
+            color: var(--muted);
+            font-family: "SFMono-Regular", Consolas, monospace;
+            font-size: 11px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .side-panel {
+            min-height: 0;
+            overflow: auto;
+            background: #fbfcfe;
+            padding: 18px;
+        }
+
+        .tool-panel {
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: var(--panel);
+            padding: 16px;
+            margin-bottom: 14px;
+        }
+
+        .tool-panel h2 {
+            margin: 0 0 12px;
+            font-size: 15px;
+            line-height: 1.25;
+        }
+
+        .field {
+            display: grid;
+            gap: 6px;
+            margin-bottom: 12px;
+        }
+
+        .field label,
+        .field-title {
+            color: #344054;
+            font-size: 12px;
+            font-weight: 700;
+        }
+
+        .input,
+        .select {
+            width: 100%;
+            min-height: 38px;
+            border: 1px solid #cbd3df;
+            border-radius: 6px;
+            background: #fff;
+            color: var(--ink);
+            padding: 8px 10px;
+            outline: none;
+        }
+
+        .input:focus,
+        .select:focus {
+            border-color: var(--purple);
+            box-shadow: 0 0 0 3px rgba(115, 49, 144, 0.12);
+        }
+
+        .segmented {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 6px;
+        }
+
+        .segmented.three {
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+
+        .segment {
+            position: relative;
+        }
+
+        .segment input {
+            position: absolute;
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        .segment span {
+            display: flex;
+            min-height: 36px;
+            align-items: center;
+            justify-content: center;
+            border: 1px solid #cbd3df;
+            border-radius: 6px;
+            background: #fff;
+            color: #344054;
+            font-size: 12px;
+            font-weight: 700;
+            text-align: center;
+            padding: 8px;
+        }
+
+        .segment input:checked + span {
+            border-color: var(--purple);
+            background: rgba(115, 49, 144, 0.1);
+            color: var(--purple-dark);
+        }
+
+        .btn {
+            display: inline-flex;
+            min-height: 38px;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            border: 1px solid transparent;
+            border-radius: 6px;
+            padding: 8px 12px;
+            background: #fff;
+            color: var(--ink);
+            font-size: 13px;
+            font-weight: 700;
+            text-decoration: none;
+        }
+
+        .btn svg {
+            width: 16px;
+            height: 16px;
+            flex: 0 0 auto;
+        }
+
+        .btn.primary {
+            background: var(--purple);
+            color: #fff;
+        }
+
+        .btn.primary:hover {
+            background: var(--purple-dark);
+        }
+
+        .btn.secondary {
+            border-color: #cbd3df;
+            color: #344054;
+        }
+
+        .btn.secondary:hover {
+            background: #f3f5f9;
+        }
+
+        .btn.success {
+            background: var(--green);
+            color: #fff;
+        }
+
+        .btn.danger {
+            background: var(--red);
+            color: #fff;
+        }
+
+        .btn.full {
+            width: 100%;
+        }
+
+        .status-pill {
+            display: inline-flex;
+            min-height: 26px;
+            align-items: center;
+            border-radius: 999px;
+            padding: 4px 9px;
+            font-size: 12px;
+            font-weight: 700;
+        }
+
+        .status-reported {
+            background: #eef4ff;
+            color: #3538cd;
+        }
+
+        .status-investigating {
+            background: #fff7e6;
+            color: var(--amber);
+        }
+
+        .status-repairing {
+            background: #f4ebff;
+            color: #6941c6;
+        }
+
+        .status-restored {
+            background: #e7f7ed;
+            color: var(--green);
+        }
+
+        .result-box {
+            min-height: 160px;
+            overflow: auto;
+            border: 1px solid var(--line);
+            border-radius: 6px;
+            background: #0f172a;
+            color: #e5e7eb;
+            padding: 12px;
+            white-space: pre-wrap;
+            font-family: "SFMono-Regular", Consolas, monospace;
+            font-size: 12px;
+            line-height: 1.55;
+        }
+
+        .muted {
+            color: var(--muted);
+        }
+
+        .empty {
+            padding: 28px;
+            color: var(--muted);
+            text-align: center;
+        }
+
+        .hidden {
+            display: none;
+        }
+
+        @media (max-width: 980px) {
+            .toolbar {
+                grid-template-columns: 1fr 1fr;
+            }
+
+            .workspace {
+                grid-template-columns: 1fr;
+            }
+
+            .case-area {
+                border-right: 0;
+            }
+
+            .side-panel {
+                border-top: 1px solid var(--line);
+            }
+        }
+
+        @media (max-width: 620px) {
+            .topbar,
+            .toolbar,
+            .summary-strip {
+                padding-right: 14px;
+                padding-left: 14px;
+            }
+
+            .toolbar {
+                grid-template-columns: 1fr;
+            }
+
+            .topbar {
+                align-items: flex-start;
+                flex-direction: column;
+            }
+
+            .top-actions {
+                justify-content: flex-start;
+            }
+
+            .side-panel {
+                padding: 14px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="shell">
+        <header class="topbar">
+            <div class="brand">
+                <h1>OMS Webhook Console</h1>
+                <p>ETR และสถานะจ่ายไฟคืน</p>
+            </div>
+            <div class="top-actions">
+                <a class="btn secondary" href="/chat/">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/>
+                    </svg>
+                    Chat
+                </a>
+                <button class="btn secondary" type="button" id="reloadBtn">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 12a9 9 0 1 1-3-6.7"/>
+                        <path d="M21 3v6h-6"/>
+                    </svg>
+                    Reload
+                </button>
+            </div>
+        </header>
+
+        <section class="toolbar">
+            <input id="searchInput" class="input" type="search" placeholder="ค้นหา LV, Case ID, CA, title">
+            <select id="statusFilter" class="select">
+                <option value="active">Active</option>
+                <option value="reported">ได้รับแจ้งเหตุ</option>
+                <option value="investigating">กำลังตรวจสอบ</option>
+                <option value="repairing">กำลังซ่อม</option>
+                <option value="restored">จ่ายไฟคืนสำเร็จ</option>
+                <option value="all">ทั้งหมด</option>
+            </select>
+            <label class="segment">
+                <input id="includeRestored" type="checkbox">
+                <span>รวม restored</span>
+            </label>
+            <button class="btn secondary" type="button" id="clearFilterBtn">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M18 6 6 18"/>
+                    <path d="m6 6 12 12"/>
+                </svg>
+                Clear
+            </button>
+        </section>
+
+        <main class="workspace">
+            <section class="case-area">
+                <div class="summary-strip">
+                    <div>
+                        <strong id="visibleCount">0</strong>
+                        <span>visible</span>
+                        <span class="muted">/</span>
+                        <strong id="selectedCount">0</strong>
+                        <span>selected</span>
+                    </div>
+                    <div class="bulk-buttons">
+                        <button class="btn secondary" type="button" id="selectFilteredBtn">Select filtered</button>
+                        <button class="btn secondary" type="button" id="clearSelectedBtn">Clear selected</button>
+                    </div>
+                </div>
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th class="check-cell">
+                                    <input id="selectVisibleToggle" type="checkbox" aria-label="Select visible cases">
+                                </th>
+                                <th class="lv-cell">LV</th>
+                                <th>Case</th>
+                                <th class="status-cell">Status</th>
+                                <th class="ca-cell">Affected CA</th>
+                                <th class="time-cell">ETR</th>
+                                <th class="time-cell">Created</th>
+                            </tr>
+                        </thead>
+                        <tbody id="caseTableBody">
+                            <tr>
+                                <td colspan="7" class="empty">Loading...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <aside class="side-panel">
+                <form class="hidden">{% csrf_token %}</form>
+
+                <section class="tool-panel">
+                    <h2>Target</h2>
+                    <div class="field">
+                        <div class="field-title">Scope</div>
+                        <div class="segmented three">
+                            <label class="segment">
+                                <input type="radio" name="scopeMode" value="selected" checked>
+                                <span>ที่เลือก</span>
+                            </label>
+                            <label class="segment">
+                                <input type="radio" name="scopeMode" value="filtered">
+                                <span>ที่ filter</span>
+                            </label>
+                            <label class="segment">
+                                <input type="radio" name="scopeMode" value="all_active">
+                                <span>Active ทั้งหมด</span>
+                            </label>
+                        </div>
+                    </div>
+                    <div class="muted" id="targetPreview">0 cases</div>
+                </section>
+
+                <section class="tool-panel">
+                    <h2>ส่ง ETR</h2>
+                    <div class="field">
+                        <div class="field-title">ETR mode</div>
+                        <div class="segmented">
+                            <label class="segment">
+                                <input type="radio" name="etrMode" value="minutes" checked>
+                                <span>อีกกี่นาที</span>
+                            </label>
+                            <label class="segment">
+                                <input type="radio" name="etrMode" value="datetime">
+                                <span>เวลาเจาะจง</span>
+                            </label>
+                        </div>
+                    </div>
+                    <div class="field" id="etrMinutesField">
+                        <label for="etrMinutes">ETR minutes</label>
+                        <input id="etrMinutes" class="input" type="number" min="1" step="1" value="60">
+                    </div>
+                    <div class="field hidden" id="etrDateTimeField">
+                        <label for="etrAt">ETR datetime</label>
+                        <input id="etrAt" class="input" type="datetime-local">
+                    </div>
+                    <button class="btn primary full" type="button" id="sendEtrBtn">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M22 2 11 13"/>
+                            <path d="m22 2-7 20-4-9-9-4 20-7z"/>
+                        </svg>
+                        ส่ง ETR
+                    </button>
+                </section>
+
+                <section class="tool-panel">
+                    <h2>จ่ายไฟคืน</h2>
+                    <button class="btn success full" type="button" id="restoreBtn">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M20 6 9 17l-5-5"/>
+                        </svg>
+                        เปลี่ยนเป็นจ่ายไฟคืนสำเร็จ
+                    </button>
+                </section>
+
+                <section class="tool-panel">
+                    <h2>Result</h2>
+                    <pre class="result-box" id="resultBox">Ready</pre>
+                </section>
+            </aside>
+        </main>
+    </div>
+
+    <script>
+        const casesUrl = "{{ cases_url|escapejs }}";
+        const actionUrl = "{{ action_url|escapejs }}";
+
+        const state = {
+            cases: [],
+            filteredCases: [],
+            selectedIds: new Set(),
+            loading: false,
+        };
+
+        const els = {
+            searchInput: document.getElementById("searchInput"),
+            statusFilter: document.getElementById("statusFilter"),
+            includeRestored: document.getElementById("includeRestored"),
+            clearFilterBtn: document.getElementById("clearFilterBtn"),
+            reloadBtn: document.getElementById("reloadBtn"),
+            selectFilteredBtn: document.getElementById("selectFilteredBtn"),
+            clearSelectedBtn: document.getElementById("clearSelectedBtn"),
+            selectVisibleToggle: document.getElementById("selectVisibleToggle"),
+            caseTableBody: document.getElementById("caseTableBody"),
+            visibleCount: document.getElementById("visibleCount"),
+            selectedCount: document.getElementById("selectedCount"),
+            targetPreview: document.getElementById("targetPreview"),
+            etrMinutesField: document.getElementById("etrMinutesField"),
+            etrDateTimeField: document.getElementById("etrDateTimeField"),
+            etrMinutes: document.getElementById("etrMinutes"),
+            etrAt: document.getElementById("etrAt"),
+            sendEtrBtn: document.getElementById("sendEtrBtn"),
+            restoreBtn: document.getElementById("restoreBtn"),
+            resultBox: document.getElementById("resultBox"),
+        };
+
+        function getCsrfToken() {
+            const tokenInput = document.querySelector("[name=csrfmiddlewaretoken]");
+            return tokenInput ? tokenInput.value : "";
+        }
+
+        function escapeHtml(value) {
+            return String(value ?? "")
+                .replaceAll("&", "&amp;")
+                .replaceAll("<", "&lt;")
+                .replaceAll(">", "&gt;")
+                .replaceAll('"', "&quot;")
+                .replaceAll("'", "&#039;");
+        }
+
+        function statusClass(status) {
+            return `status-pill status-${status || "reported"}`;
+        }
+
+        function formatDateTime(value) {
+            if (!value) {
+                return "-";
+            }
+            const date = new Date(value);
+            if (Number.isNaN(date.getTime())) {
+                return "-";
+            }
+            return date.toLocaleString("th-TH", {
+                dateStyle: "short",
+                timeStyle: "short",
+            });
+        }
+
+        function formatCaList(caseItem) {
+            const caNumbers = caseItem.affected_ca_numbers || [];
+            if (!caNumbers.length) {
+                return "-";
+            }
+            const preview = caNumbers.slice(0, 3).join(", ");
+            return caNumbers.length > 3 ? `${preview}, ... (${caNumbers.length})` : preview;
+        }
+
+        function setResult(payload) {
+            els.resultBox.textContent = typeof payload === "string"
+                ? payload
+                : JSON.stringify(payload, null, 2);
+        }
+
+        function getScopeMode() {
+            return document.querySelector("input[name=scopeMode]:checked").value;
+        }
+
+        function getEtrMode() {
+            return document.querySelector("input[name=etrMode]:checked").value;
+        }
+
+        function caseMatchesSearch(caseItem, searchTerm) {
+            if (!searchTerm) {
+                return true;
+            }
+            const haystack = [
+                caseItem.lv_group_id,
+                caseItem.case_id,
+                caseItem.title,
+                caseItem.status_display,
+                ...(caseItem.affected_ca_numbers || []),
+            ].join(" ").toLowerCase();
+            return haystack.includes(searchTerm);
+        }
+
+        function filterCases() {
+            const searchTerm = els.searchInput.value.trim().toLowerCase();
+            const status = els.statusFilter.value;
+
+            state.filteredCases = state.cases.filter((caseItem) => {
+                const statusMatch = status === "all"
+                    || (status === "active" && caseItem.status !== "restored")
+                    || caseItem.status === status;
+                return statusMatch && caseMatchesSearch(caseItem, searchTerm);
+            });
+        }
+
+        function targetCases() {
+            const scopeMode = getScopeMode();
+            if (scopeMode === "all_active") {
+                return state.cases.filter((caseItem) => caseItem.status !== "restored");
+            }
+            if (scopeMode === "filtered") {
+                return state.filteredCases;
+            }
+            return state.cases.filter((caseItem) => state.selectedIds.has(caseItem.case_id));
+        }
+
+        function updateSummary() {
+            const visibleIds = new Set(state.filteredCases.map((caseItem) => caseItem.case_id));
+            const selectedVisibleCount = [...state.selectedIds].filter((caseId) => visibleIds.has(caseId)).length;
+            const allVisibleSelected = state.filteredCases.length > 0
+                && selectedVisibleCount === state.filteredCases.length;
+
+            els.visibleCount.textContent = state.filteredCases.length;
+            els.selectedCount.textContent = state.selectedIds.size;
+            els.selectVisibleToggle.checked = allVisibleSelected;
+            els.selectVisibleToggle.indeterminate = selectedVisibleCount > 0 && !allVisibleSelected;
+
+            const targetCount = targetCases().length;
+            els.targetPreview.textContent = `${targetCount} cases`;
+            els.sendEtrBtn.disabled = targetCount === 0 || state.loading;
+            els.restoreBtn.disabled = targetCount === 0 || state.loading;
+        }
+
+        function renderCases() {
+            filterCases();
+
+            if (!state.filteredCases.length) {
+                els.caseTableBody.innerHTML = '<tr><td colspan="7" class="empty">No matching cases</td></tr>';
+                updateSummary();
+                return;
+            }
+
+            els.caseTableBody.innerHTML = state.filteredCases.map((caseItem) => {
+                const checked = state.selectedIds.has(caseItem.case_id) ? "checked" : "";
+                return `
+                    <tr>
+                        <td class="check-cell">
+                            <input type="checkbox" data-case-id="${escapeHtml(caseItem.case_id)}" ${checked} aria-label="Select case ${escapeHtml(caseItem.lv_group_id || caseItem.case_id)}">
+                        </td>
+                        <td class="lv-cell">${escapeHtml(caseItem.lv_group_id || "-")}</td>
+                        <td>
+                            <div class="case-title">${escapeHtml(caseItem.title || "-")}</div>
+                            <div class="case-id">${escapeHtml(caseItem.case_id)}</div>
+                        </td>
+                        <td class="status-cell">
+                            <span class="${statusClass(caseItem.status)}">${escapeHtml(caseItem.status_display)}</span>
+                        </td>
+                        <td class="ca-cell">${escapeHtml(formatCaList(caseItem))}</td>
+                        <td class="time-cell">${escapeHtml(formatDateTime(caseItem.effective_etr_time))}</td>
+                        <td class="time-cell">${escapeHtml(formatDateTime(caseItem.created_at))}</td>
+                    </tr>
+                `;
+            }).join("");
+
+            updateSummary();
+        }
+
+        async function loadCases(options = {}) {
+            const quiet = options.quiet === true;
+            state.loading = true;
+            updateSummary();
+            if (!quiet) {
+                setResult("Loading cases...");
+            }
+
+            try {
+                const url = `${casesUrl}?include_restored=${els.includeRestored.checked ? "true" : "false"}`;
+                const response = await fetch(url, { headers: { "Accept": "application/json" } });
+                const payload = await response.json();
+                if (!response.ok) {
+                    throw new Error(payload.message || response.statusText);
+                }
+                state.cases = payload.cases || [];
+                const validIds = new Set(state.cases.map((caseItem) => caseItem.case_id));
+                state.selectedIds = new Set([...state.selectedIds].filter((caseId) => validIds.has(caseId)));
+                renderCases();
+                if (!quiet) {
+                    setResult({ status: "loaded", count: state.cases.length });
+                }
+            } catch (error) {
+                setResult({ status: "error", message: error.message });
+            } finally {
+                state.loading = false;
+                updateSummary();
+            }
+        }
+
+        function buildActionPayload(action) {
+            const scopeMode = getScopeMode();
+            const payload = {
+                action,
+                target_mode: scopeMode === "all_active" ? "all_active" : "selected",
+                case_ids: scopeMode === "all_active" ? [] : targetCases().map((caseItem) => caseItem.case_id),
+            };
+
+            if (action === "set_etr") {
+                const etrMode = getEtrMode();
+                payload.etr_mode = etrMode;
+                if (etrMode === "datetime") {
+                    payload.etr_at = els.etrAt.value;
+                } else {
+                    payload.etr_minutes = els.etrMinutes.value;
+                }
+            }
+            return payload;
+        }
+
+        async function runAction(action) {
+            const targetCount = targetCases().length;
+            if (!targetCount) {
+                setResult({ status: "error", message: "No target cases" });
+                return;
+            }
+
+            if (action === "restore") {
+                const ok = window.confirm(`เปลี่ยนสถานะ ${targetCount} เคสเป็นจ่ายไฟคืนสำเร็จ?`);
+                if (!ok) {
+                    return;
+                }
+            }
+
+            state.loading = true;
+            updateSummary();
+            setResult("Sending...");
+
+            try {
+                const response = await fetch(actionUrl, {
+                    method: "POST",
+                    headers: {
+                        "Accept": "application/json",
+                        "Content-Type": "application/json",
+                        "X-CSRFToken": getCsrfToken(),
+                    },
+                    body: JSON.stringify(buildActionPayload(action)),
+                });
+                const payload = await response.json();
+                if (!response.ok) {
+                    throw new Error(payload.message || response.statusText);
+                }
+                setResult(payload);
+                await loadCases({ quiet: true });
+            } catch (error) {
+                setResult({ status: "error", message: error.message });
+            } finally {
+                state.loading = false;
+                updateSummary();
+            }
+        }
+
+        function setDefaultDatetime() {
+            const date = new Date(Date.now() + 60 * 60 * 1000);
+            const pad = (value) => String(value).padStart(2, "0");
+            const localValue = [
+                date.getFullYear(),
+                pad(date.getMonth() + 1),
+                pad(date.getDate()),
+            ].join("-") + `T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+            els.etrAt.value = localValue;
+        }
+
+        els.caseTableBody.addEventListener("change", (event) => {
+            const checkbox = event.target.closest("input[type=checkbox][data-case-id]");
+            if (!checkbox) {
+                return;
+            }
+            if (checkbox.checked) {
+                state.selectedIds.add(checkbox.dataset.caseId);
+            } else {
+                state.selectedIds.delete(checkbox.dataset.caseId);
+            }
+            updateSummary();
+        });
+
+        els.searchInput.addEventListener("input", renderCases);
+        els.statusFilter.addEventListener("change", renderCases);
+        els.includeRestored.addEventListener("change", loadCases);
+        els.reloadBtn.addEventListener("click", loadCases);
+        els.clearFilterBtn.addEventListener("click", () => {
+            els.searchInput.value = "";
+            els.statusFilter.value = "active";
+            renderCases();
+        });
+        els.selectFilteredBtn.addEventListener("click", () => {
+            state.filteredCases.forEach((caseItem) => state.selectedIds.add(caseItem.case_id));
+            renderCases();
+        });
+        els.clearSelectedBtn.addEventListener("click", () => {
+            state.selectedIds.clear();
+            renderCases();
+        });
+        els.selectVisibleToggle.addEventListener("change", () => {
+            if (els.selectVisibleToggle.checked) {
+                state.filteredCases.forEach((caseItem) => state.selectedIds.add(caseItem.case_id));
+            } else {
+                state.filteredCases.forEach((caseItem) => state.selectedIds.delete(caseItem.case_id));
+            }
+            renderCases();
+        });
+        document.querySelectorAll("input[name=scopeMode]").forEach((input) => {
+            input.addEventListener("change", updateSummary);
+        });
+        document.querySelectorAll("input[name=etrMode]").forEach((input) => {
+            input.addEventListener("change", () => {
+                const mode = getEtrMode();
+                els.etrMinutesField.classList.toggle("hidden", mode !== "minutes");
+                els.etrDateTimeField.classList.toggle("hidden", mode !== "datetime");
+            });
+        });
+        els.sendEtrBtn.addEventListener("click", () => runAction("set_etr"));
+        els.restoreBtn.addEventListener("click", () => runAction("restore"));
+
+        setDefaultDatetime();
+        loadCases();
+    </script>
+</body>
+</html>
