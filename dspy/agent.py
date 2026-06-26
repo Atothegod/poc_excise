@@ -52,6 +52,10 @@ class MemoryAgent:
                 f"event_type={latest_outage.get('event_type')}; "
                 f"case_id={latest_outage.get('case_id')}; "
                 f"eta_target_time={latest_outage.get('eta_target_time')}; "
+                f"eta_formatted={latest_outage.get('eta_formatted')}; "
+                f"fastest_branch={latest_outage.get('fastest_branch')}; "
+                f"etr_target_time={latest_outage.get('etr_target_time')}; "
+                f"etr_source={latest_outage.get('etr_source')}; "
                 f"oms_etr={latest_outage.get('oms_etr')}"
             )
             system_context.extend(
@@ -76,12 +80,18 @@ class MemoryAgent:
     ) -> list[str]:
         now = datetime.fromisoformat(server_time_stamp)
         eta = parse_iso_datetime(latest_outage.get("eta_target_time"))
-        etr = parse_iso_datetime(latest_outage.get("oms_etr"))
+        etr = parse_iso_datetime(
+            latest_outage.get("etr_target_time") or latest_outage.get("oms_etr")
+        )
+        etr_source = latest_outage.get("etr_source")
+        etr_source_label = "OMS" if etr_source == "oms" else "โมเดลพี่ปลื้ม"
 
         return [
             f"System: current_time_thai_label={self._format_thai_time(now)}",
             f"System: latest_eta_thai_label={self._format_thai_time(eta)}",
+            f"System: latest_eta_duration_label={latest_outage.get('eta_formatted')}",
             f"System: latest_etr_thai_label={self._format_thai_time(etr)}",
+            f"System: latest_etr_source_label={etr_source_label if etr_source else None}",
             "System: ETA timeout is an OMS/Celery event. Do not say ETA expired unless chat_history contains event_type=eta_timeout.",
             "System: If asked about current time, answer naturally using current_time_thai_label.",
             "System: If asked about technician arrival before eta_timeout event, answer naturally using latest_eta_thai_label.",

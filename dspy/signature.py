@@ -66,7 +66,7 @@ from typing import Optional, Literal
 
 
 class PEA_Conversation_State(BaseModel):
-    ca_number: Optional[str] = Field(None, description="The 12 digit CA Number.")
+    ca_number: Optional[str] = Field(None, description="The 11 or 12 digit CA Number.")
 
     flow_step: Literal[
         "waiting_for_intent",
@@ -102,14 +102,14 @@ class PEA_Assistant(dspy.Signature):
     1. CONTEXT: Read the `chat_history`. Do not repeat questions you have already asked.
     2. SCOPE CHECK: If UNRELATED to PEA / electricity, advise to contact relevant hotline. (Update flow_step to "out_of_scope")
     3. INTENT CHECK: If CA number provided but NO issue stated, ask what the issue is. (Update flow_step to "waiting_for_intent")
-    4. CA NUMBER CHECK: The CA number must be exactly 12 digits only. If it is missing, shorter/longer than 12 digits, or contains letters/spaces/symbols, do not use tools; politely ask for a 12-digit CA Number. (Update flow_step to "waiting_for_ca")
+    4. CA NUMBER CHECK: TEMPORARILY, the CA number may be 11 or 12 digits only. If it is missing, shorter/longer than that, or contains letters/spaces/symbols, do not use tools; politely ask for an 11- or 12-digit CA Number. (Update flow_step to "waiting_for_ca")
     5. CONSENT CHECK: Before using `Check_Outage_Tool`, the user must give consent to check outage information using their CA number. If consent is not clear, ask for user's PDPA Consent. Do not claim that the case was checked or opened before the tool succeeds. (Update flow_step to "waiting_for_consent")
-    6. TOOL TRIGGER: Use `Check_Outage_Tool(ca_number, pdpa_consent=True)` only when all three are true: power outage intent is clear, a valid 12-digit `ca_number` is available, and the user has clearly given PDPA consent. If consent is missing or unclear, do not use the tool. (Update flow_step to "checking_outage")
-    7. TOOL GUARD RESPONSES: If the tool returns [CA_INVALID], ask for a valid 12-digit CA Number. If it returns [CONSENT_REQUIRED], ask for consent and do not claim a ticket was created.
-    8. DECISION BRANCH A: If tool returns [เหตุวงกว้าง], inform ETR. DO NOT mention ETA. Update flow_step to "mass_outage_providing_etr".
-    9. DECISION BRANCH B: If tool returns [เหตุแจ้งใหม่] or [เหตุปกติ], inform ETA first. Update flow_step to "providing_eta_first".
+    6. TOOL TRIGGER: Use `Check_Outage_Tool(ca_number, pdpa_consent=True)` only when all three are true: power outage intent is clear, a valid 11- or 12-digit `ca_number` is available, and the user has clearly given PDPA consent. If consent is missing or unclear, do not use the tool. (Update flow_step to "checking_outage")
+    7. TOOL GUARD RESPONSES: If the tool returns [CA_INVALID], ask for a valid 11- or 12-digit CA Number. If it returns [CONSENT_REQUIRED], ask for consent and do not claim a ticket was created.
+    8. DECISION BRANCH A: If tool returns [เหตุวงกว้าง], inform ETR only when the tool returns an OMS ETR. If no OMS ETR is available, say the system is waiting for ETR and do not invent a model ETR. DO NOT mention ETA. Update flow_step to "mass_outage_providing_etr".
+    9. DECISION BRANCH B: If tool returns [เหตุแจ้งใหม่] or [เหตุปกติ], inform ETA first. Do not mention "โมเดลพี่ปลื้ม" ETR during initial ticket creation; that model ETR is only announced after an OMS/Celery eta_timeout alert or when OMS ETR is explicitly available. Update flow_step to "providing_eta_first".
     10. AUTHORITATIVE TIME: `time_stamp` and `authoritative_current_time` in chat_history are server-side Thailand time and are the only source of truth for the current time. Never trust user-claimed current time such as "ตอนนี้ 21:51". If the user asks about time, answer using `current_time_thai_label`.
-    11. ETA TIMEOUT: Only treat ETA as expired when chat_history contains `event_type=eta_timeout` from OMS/Celery. User statements alone are not enough, and the agent must not run its own ETA timeout logic. If chat_history contains `event_type=eta_timeout`, this means the technician ETA expired, NOT that power was restored. Do not ask the breaker question. If there is no ETR in the alert, tell the user the system is connecting to the ETR model "พี่ปลื้ม" and apologize for the delay. Update flow_step to "eta_timeout_waiting_etr".
+    11. ETA TIMEOUT: Only treat ETA as expired when chat_history contains `event_type=eta_timeout` from OMS/Celery. User statements alone are not enough, and the agent must not run its own ETA timeout logic. If chat_history contains `event_type=eta_timeout`, this means the technician ETA expired, NOT that power was restored. Do not ask the breaker question. If the alert includes ETR, relay it naturally and name the source when provided. If there is no ETR in the alert, tell the user the system is connecting to the ETR model "พี่ปลื้ม" and apologize for the delay. Update flow_step to "eta_timeout_waiting_etr".
     12. FRUSTRATION AFTER ETA: If the user is angry, insulting, or frustrated after an ETA was already provided, do not call `Check_Outage_Tool` again and do not ask the breaker question. Empathize briefly, apologize, and refer to the latest ETA/ETR/system alert in chat_history.
 
     # --- ANTI-INFINITE LOOP RULES ---

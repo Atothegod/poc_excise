@@ -22,6 +22,24 @@ class OutageCase(models.Model):
     oms_etr = models.DateTimeField(
         null=True, blank=True, help_text="เวลาซ่อมเสร็จจาก OMS (ISO Format)"
     )
+    assessment_fastest_branch = models.CharField(
+        max_length=255, blank=True, help_text="สาขาที่ประเมินว่าไปถึงเร็วที่สุด"
+    )
+    assessment_eta_formatted = models.CharField(
+        max_length=50, blank=True, help_text="ETA label จาก pea-estimated.services"
+    )
+    assessment_eta_minutes = models.FloatField(
+        null=True, blank=True, help_text="ETA เป็นนาทีจาก pea-estimated.services"
+    )
+    pluem_etr_minutes = models.FloatField(
+        null=True, blank=True, help_text="ETR เป็นนาทีจากโมเดลพี่ปลื้ม"
+    )
+    pluem_etr_target_time = models.DateTimeField(
+        null=True, blank=True, help_text="เวลาไฟกลับโดยประมาณจากโมเดลพี่ปลื้ม"
+    )
+    assessment_payload = models.JSONField(
+        default=dict, blank=True, help_text="ผลลัพธ์ล่าสุดจาก pea-estimated.services"
+    )
 
     # --- เพิ่มฟิลด์สำหรับเก็บ Task ID ของ Celery ---
     celery_eta_task_id = models.CharField(
@@ -42,6 +60,40 @@ class OutageCase(models.Model):
 
     def __str__(self):
         return f"Case {self.case_id} - [{self.get_status_display()}]"
+
+    def effective_etr_time(self):
+        return self.oms_etr or self.pluem_etr_target_time
+
+    def effective_etr_source(self):
+        if self.oms_etr:
+            return "oms"
+        if self.pluem_etr_target_time:
+            return "pluem_model"
+        return None
+
+
+class CustomerLocation(models.Model):
+    timestamp = models.DateTimeField(null=True, blank=True)
+    prefix = models.CharField(max_length=50, blank=True)
+    fullname = models.CharField(max_length=255, blank=True)
+    address = models.TextField(blank=True)
+    ca_number = models.CharField(max_length=12, unique=True, db_index=True)
+    phone_number = models.CharField(max_length=50, blank=True)
+    pea_area = models.CharField(max_length=255, blank=True)
+    user_type = models.CharField(max_length=255, blank=True)
+    outage_freq_yearly = models.CharField(max_length=100, blank=True)
+    report_channel = models.CharField(max_length=255, blank=True)
+    is_ready = models.CharField(max_length=100, blank=True)
+    latitude = models.FloatField()
+    longitude = models.FloatField()
+    eta_result = models.FloatField(null=True, blank=True)
+    imported_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["ca_number"]
+
+    def __str__(self):
+        return f"{self.ca_number} - {self.fullname}"
 
 
 class CustomerReport(models.Model):

@@ -1,542 +1,566 @@
-# PEA OMS System Architecture
+# PEA OMS Agent System Architecture
 
-เอกสารนี้อธิบาย architecture ของระบบใน repository นี้ตาม implementation ปัจจุบัน
-โดยครอบคลุม frontend demo, DSPy agent, Django OMS backend, PostgreSQL, Redis,
-Celery worker, Django Admin และ proactive notification flow
+เอกสารนี้สรุปภาพรวมระบบ PEA OMS Agent แบบอ่านง่าย พร้อมตัวอย่าง expected conversation สำหรับ scenario สำคัญที่ใช้ทดสอบ flow ปัจจุบัน
 
-สถานะเอกสาร: 2026-06-25
+## 1. Big Picture
 
-## 1. High-Level Overview
+ระบบนี้มีหน้าที่รับแจ้งไฟฟ้าขัดข้องจากผู้ใช้ผ่านหน้าแชท แล้วให้ Agent ช่วยคุยกับลูกค้าแบบมี guardrail ก่อนส่งข้อมูลเข้า Django OMS
 
-ระบบนี้เป็น prototype สำหรับรับเรื่องแจ้งไฟดับผ่าน chat interface แล้วให้ AI Agent
-ช่วยตรวจสอบ/เปิดใบงานใน OMS mock backend พร้อมกลไก ETA, ETR, proactive alert
-และ closed-loop handling
+หลักการสำคัญ:
 
-แนวคิดหลักของระบบคือ:
+- Agent ไม่ตัดสิน outage เอง
+- Agent ต้องขอ consent ก่อนใช้ `Check_Outage_Tool`
+- CA ชั่วคราวรับได้ทั้ง 11 หรือ 12 หลัก แต่ต้องเป็นตัวเลขล้วน
+- Django OMS เป็นเจ้าของข้อมูล case, customer, ETA, ETR, webhook, countdown
+- `pea-estimated.services` ใช้ประเมิน branch, ETA, และ ETR model
+- ตอนเปิดเคสใหม่ แจ้งเฉพาะ ETA ก่อน
+- ETR จาก OMS แจ้งได้ทันทีถ้ามี
+- ETR จากโมเดลพี่ปลื้มแจ้งผ่าน webhook หลัง ETA timeout เท่านั้น ถ้า OMS ยังไม่มี ETR
 
-1. ผู้ใช้คุยกับหน้าเว็บ chat demo
-2. หน้าเว็บส่งคำถามไปที่ DSPy Agent
-3. DSPy Agent คุม conversation flow, ตรวจ intent, ตรวจ CA, ขอ consent และเรียก tool
-4. Tool ยิง Django API เพื่อ sync report และสร้าง/ผูก outage case
-5. Django backend เก็บข้อมูลใน PostgreSQL และตั้งเวลา ETA timeout ผ่าน Celery
-6. Celery worker ยิง proactive webhook กลับไปที่ DSPy Agent เมื่อถึงเวลา ETA หรือเกิด event สำคัญ
-7. หน้าเว็บ polling `/notifications/{session_id}` เพื่อดึง notification ไปแสดง
-8. เจ้าหน้าที่ใช้ Django Admin ปรับ status, ETA, ETR และปิดเคส
+## 2. Components
 
 ```mermaid
 flowchart LR
-    User[User / Customer] --> Web[Static Chat UI<br/>ato.html]
-    Web -->|POST /ask| Agent[DSPy Agent<br/>FastAPI + ReAct]
-    Web -->|GET /notifications/:session_id<br/>polling every 2s| Agent
-
-    Agent -->|Check_Outage_Tool / Fast_Track_Tool| Backend[Django OMS API]
-    Backend --> DB[(PostgreSQL)]
-    Backend -->|schedule ETA task| Redis[(Redis Broker)]
-    Worker[Celery Worker] -->|consume task| Redis
-    Worker --> DB
-    Worker -->|POST /webhook/notify| Agent
-
-    Admin[Django Admin / Operator] --> Backend
-    Backend -->|signals: revoke/schedule/notify| Redis
-    Flower[Flower Dashboard] --> Redis
+    User[User / Web Chat] --> ChatUI[Django Chat Template]
+    ChatUI --> Agent[DSPy Agent API]
+    Agent --> Tool[Check_Outage_Tool]
+    Tool --> OMS[Django OMS API]
+    OMS --> DB[(PostgreSQL)]
+    OMS --> CA[CustomerLocation DB]
+    OMS --> Estimator[pea-estimated.services]
+    OMS --> Redis[(Redis)]
+    Redis --> Celery[Celery Worker]
+    Celery --> AgentWebhook[DSPy /webhook/notify]
+    AgentWebhook --> ChatUI
+    Admin[Django Admin] --> OMS
 ```
 
-## 2. Runtime Services
+## 3. Service Roles
 
-Services are defined in `docker-compose.yml`.
+| Service | Role |
+|---|---|
+| `backend` | Django API, Django Admin, chat page, OMS models |
+| `dspy-agent` | Agent reasoning, tool selection, webhook receiver |
+| `db` | PostgreSQL data store |
+| `redis` | Celery broker |
+| `celery_worker` | ETA timeout task and proactive notifications |
+| `flower` | Celery monitoring |
+| `pea-estimated.services` | External ETA/ETR assessment service |
 
-| Service | Container | Port | Responsibility |
-| --- | --- | --- | --- |
-| `backend` | `backend` | `8000:8000` | Django REST API, Django Admin, ORM, migrations |
-| `dspy-agent` | `dspy-agent` | `8001:8000` | FastAPI server, DSPy ReAct agent, in-memory session state, notification buffer |
-| `celery_worker` | `celery_worker` | internal | Runs ETA timeout and proactive alert tasks |
-| `redis` | `redis` | `6379:6379` | Celery broker |
-| `db` | `postgres` | `5432:5432` | PostgreSQL database |
-| `flower` | `celery_flower` | `5555:5555` | Celery monitoring UI |
+## 4. Main Data Models
 
-## 3. Major Components
+### `CustomerLocation`
 
-### 3.1 Static Chat UI
+Imported from `ca_lat_lon.csv`.
 
-File: `ato.html`
+Stores:
 
-Responsibilities:
+- `ca_number`
+- `fullname`
+- `address`
+- `phone_number`
+- `latitude`
+- `longitude`
+- CSV metadata
 
-- Creates or reuses a browser-local `session_id`
-- Sends user messages to `POST /ask`
-- Displays agent answer and returned state
-- Polls `GET /notifications/{session_id}` every 2 seconds
-- Shows proactive notifications returned by the DSPy Agent
+Purpose:
 
-Current implementation note:
+- Replace old CA coordinate mock
+- Allow backend to map CA to lat/lon before creating or matching outage cases
 
-- This is a browser polling simulation, not a real push channel.
-- In production, `/webhook/notify` would typically push to LINE/Facebook/WebSocket instead of relying on polling.
-- `API_URL` and `NOTIFICATIONS_URL` are currently hardcoded in the HTML and should be changed per deployment environment.
+### `CustomerReport`
 
-### 3.2 DSPy Agent Service
+One report/session from a user.
 
-Main files:
+Stores:
 
-- `dspy/webhook_server.py`
-- `dspy/agent.py`
-- `dspy/signature.py`
-- `dspy/tools.py`
+- `session_id`
+- `ca_number`
+- `customer_name`
+- `latitude`
+- `longitude`
+- `related_case`
+- `pdpa_consent`
+- `pdpa_consent_at`
+- `fast_track_quota`
+- `is_resolved`
 
-Responsibilities:
+Purpose:
 
-- Exposes FastAPI endpoints:
-  - `POST /ask`
-  - `POST /webhook/notify`
-  - `GET /notifications/{session_id}`
-  - `GET /health`
-- Holds per-session chat history in memory
-- Holds per-session consent state in memory
-- Runs DSPy ReAct agent with:
-  - `Check_Outage_Tool`
-  - `Fast_Track_Tool`
-- Buffers proactive notifications in `pending_notifications`
-- Injects proactive OMS alerts back into session memory as `System Alert (OMS)`
+- Track each user/session
+- Allow one outage case to notify all related active sessions
+
+### `OutageCase`
+
+Actual OMS outage case.
+
+Stores:
+
+- `case_id`
+- `status`
+- `latitude`
+- `longitude`
+- `eta_target_time`
+- `oms_etr`
+- `assessment_fastest_branch`
+- `assessment_eta_formatted`
+- `assessment_eta_minutes`
+- `pluem_etr_minutes`
+- `pluem_etr_target_time`
+- `assessment_payload`
+- `celery_eta_task_id`
+
+ETR priority:
+
+1. `oms_etr` if OMS/Admin has provided it
+2. `pluem_etr_target_time` only after ETA timeout flow
+
+## 5. Core Flow: New Outage Case
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant A as DSPy Agent
+    participant T as Check_Outage_Tool
+    participant O as Django OMS
+    participant D as DB
+    participant P as pea-estimated.services
+    participant C as Celery
+
+    U->>A: แจ้งไฟดับ + CA + consent
+    A->>T: Check_Outage_Tool(ca_number, pdpa_consent=True)
+    T->>O: POST /api/reports/sync/
+    O->>D: Lookup CustomerLocation by CA
+    O->>D: Find active nearby OutageCase within 5 km
+    alt no active nearby case
+        O->>P: GET assessment with ca_number, lat, lon
+        P-->>O: fastest_branch, eta_formatted, estimated_etr_minutes
+        O->>D: Create OutageCase
+        O->>D: Store ETA and cache Pluem ETR
+        O->>C: Schedule check_eta_timeout at eta_target_time
+        O-->>T: event_type=new_event, ETA only, no Pluem ETR exposed
+        T-->>A: แจ้งเปิดใบงาน + ETA
+    else nearby active case exists
+        O->>D: Link CustomerReport to existing case
+        O-->>T: event_type=repeated_event, OMS ETR only if available
+        T-->>A: แจ้งเหตุวงกว้าง / ETR if OMS has it
+    end
+```
 
 Important behavior:
 
-- CA number must be exactly 12 digits.
-- `Check_Outage_Tool` must not proceed unless user has consented.
-- Tool-level guard protects the API even if the LLM attempts to call the tool too early.
-- `pending_notifications` and conversation memory are process memory only. They are lost when `dspy-agent` restarts.
+- `estimated_etr_minutes` from `pea-estimated.services` is cached on the case
+- It is not returned to the user during initial `new_event`
+- It is used later if ETA expires and OMS has not supplied `oms_etr`
 
-### 3.3 Django OMS Backend
-
-Main files:
-
-- `backend/oms/views_api.py`
-- `backend/oms/serializers.py`
-- `backend/oms/models.py`
-- `backend/oms/tasks.py`
-- `backend/oms/signals.py`
-- `backend/oms/admin.py`
-
-Responsibilities:
-
-- Validates incoming agent reports
-- Stores customer reports and outage cases
-- Matches new reports to active nearby cases within 5 km
-- Creates new outage cases when no nearby active case exists
-- Sets ETA for newly created cases
-- Returns OMS ETR if an operator has filled it in
-- Schedules ETA timeout tasks through Celery
-- Sends proactive notifications through Celery tasks
-- Supports admin-driven ETA/ETR/status updates
-
-### 3.4 PostgreSQL
-
-Stores durable business data:
-
-- `OutageCase`
-- `CustomerReport`
-- Django auth/admin/session tables
-
-Chat history in the current agent is not stored in PostgreSQL by the DSPy service.
-`CustomerReport.chat_history` exists in the model but is not currently the source of truth for agent memory.
-
-### 3.5 Redis + Celery
-
-Redis is used as the Celery broker.
-
-Celery worker runs:
-
-- `oms.tasks.check_eta_timeout`
-- `oms.tasks.send_proactive_alert`
-
-ETA timeout tasks are scheduled with `apply_async(..., eta=eta_target_time)`.
-
-## 4. Data Model
-
-### 4.1 OutageCase
-
-Represents an OMS outage case.
-
-| Field | Meaning |
-| --- | --- |
-| `case_id` | UUID primary key |
-| `title` | Case title |
-| `status` | `reported`, `investigating`, `repairing`, `restored` |
-| `latitude`, `longitude` | Case location |
-| `eta_target_time` | ETA for technician arrival |
-| `oms_etr` | ETR filled by operator/admin or external OMS |
-| `celery_eta_task_id` | Scheduled Celery ETA timeout task id |
-| `celery_etr_task_id` | Reserved for ETR timer/task id |
-| `created_at`, `updated_at` | Timestamps |
-
-### 4.2 CustomerReport
-
-Represents a customer/session report.
-
-| Field | Meaning |
-| --- | --- |
-| `session_id` | Frontend/user session id |
-| `ca_number` | Customer account number, currently exactly 12 digits |
-| `latitude`, `longitude` | Customer/report location |
-| `related_case` | Linked `OutageCase` |
-| `chat_history` | Persisted field exists, but current DSPy memory is in-process |
-| `needs_eta`, `needs_etr` | Intent flags, currently not the main decision source |
-| `is_resolved` | Whether this report/session is resolved |
-| `fast_track_quota` | Anti-loop quota for repeated outage after closure |
-| `time_stamp` | Agent-supplied timestamp |
-
-## 5. API Surface
-
-### 5.1 DSPy Agent API
-
-| Method | Path | Caller | Purpose |
-| --- | --- | --- | --- |
-| `POST` | `/ask` | Static UI | Ask the agent a question |
-| `POST` | `/webhook/notify` | Django/Celery | Push proactive OMS alert into agent/session memory |
-| `GET` | `/notifications/{session_id}` | Static UI | Poll pending notifications for a session |
-| `GET` | `/health` | Infra/dev | Health check |
-
-### 5.2 Django OMS API
-
-| Method | Path | Caller | Purpose |
-| --- | --- | --- | --- |
-| `POST` | `/api/reports/sync/` | `Check_Outage_Tool` | Create/update report, link/create case, return ETA/ETR |
-| `GET` | `/api/reports/status/?ca_number=...` | Tool/future clients | Read active case status by CA |
-| `POST` | `/api/reports/fast-track/` | `Fast_Track_Tool` | Create urgent repeat outage ticket |
-
-### 5.3 Django Admin
-
-Path: `/admin/`
-
-Used by operator to:
-
-- View cases
-- Edit ETA
-- Fill OMS ETR
-- Change status
-- Close case by setting status to `restored`
-
-## 6. CA Validation and Consent Gate
-
-### 6.1 CA Validation
-
-CA number must match:
-
-```text
-^\d{12}$
-```
-
-Validation exists in two places:
-
-1. Django serializer/API layer:
-   - `AgentReportSerializer`
-   - `ActionStatusRequestSerializer`
-   - `fast_track_report`
-2. DSPy tool layer:
-   - `Check_Outage_Tool`
-   - `Fast_Track_Tool`
-
-If invalid, tool returns:
-
-```text
-[CA_INVALID]
-```
-
-### 6.2 Consent Before Check_Outage_Tool
-
-Before using `Check_Outage_Tool`, the agent must ask for permission to check outage data using the CA number.
-
-The current consent state is stored per `session_id` inside `MemoryAgent`.
-
-If consent has not been granted, tool returns:
-
-```text
-[CONSENT_REQUIRED]
-```
-
-This provides a second layer of protection in case the LLM tries to call the tool before the flow allows it.
-
-Current limitation:
-
-- Consent state is in memory only.
-- Restarting `dspy-agent` clears consent and chat history.
-
-## 7. Core User Flow: New Outage Report
+## 6. ETA Timeout Flow
 
 ```mermaid
 sequenceDiagram
+    participant C as Celery check_eta_timeout
+    participant D as DB
+    participant P as pea-estimated.services
+    participant W as DSPy Webhook
     participant U as User
-    participant W as Static UI
-    participant A as DSPy Agent
-    participant T as Check_Outage_Tool
-    participant B as Django OMS API
-    participant DB as PostgreSQL
-    participant R as Redis
-    participant C as Celery Worker
 
-    U->>W: Reports outage
-    W->>A: POST /ask
-    A->>A: Check intent, CA format, consent
-    A-->>U: Ask for missing CA or consent if needed
-    U->>W: Provides valid CA and consent
-    W->>A: POST /ask
-    A->>T: Check_Outage_Tool(ca_number)
-    T->>B: POST /api/reports/sync/
-    B->>DB: get_or_create CustomerReport
-    B->>DB: find active nearby OutageCase within 5 km
-
-    alt nearby active case exists
-        B->>DB: Link report to existing case
-        B-->>T: event_type=repeated_event, oms_etr if available
-        T-->>A: Mass outage response with ETR or fallback
-    else no nearby case
-        B->>DB: Create OutageCase with ETA
-        B->>R: Schedule check_eta_timeout at ETA
-        B->>DB: Save celery_eta_task_id
-        B-->>T: event_type=new_event, ETA, oms_etr if available
-        T-->>A: New event response with ETA and optional ETR
+    C->>D: Load OutageCase
+    alt case has oms_etr
+        C->>W: webhook eta_timeout with OMS ETR
+        W->>U: แจ้ง ETR จาก OMS
+    else no oms_etr but cached Pluem ETR exists
+        C->>W: webhook eta_timeout with Pluem ETR
+        W->>U: แจ้ง ETR จากโมเดลพี่ปลื้ม
+    else no oms_etr and no cached Pluem ETR
+        C->>P: GET assessment with CA/lat/lon
+        P-->>C: estimated_etr_minutes
+        C->>D: Save pluem_etr_minutes and pluem_etr_target_time
+        C->>W: webhook eta_timeout with Pluem ETR
+        W->>U: แจ้ง ETR จากโมเดลพี่ปลื้ม
+    else model unavailable
+        C->>W: webhook eta_timeout fallback message
+        W->>U: แจ้งว่าระบบกำลังเชื่อมต่อโมเดลพี่ปลื้ม
     end
-
-    A-->>W: Natural Thai answer
-    W-->>U: Display answer
 ```
 
-Behavior:
+## 7. OMS ETR Update Flow
 
-- New case gets ETA automatically.
-- New case does not automatically get ETR.
-- ETR is returned only if `oms_etr` already exists on the related case.
-- If new event has no ETR, agent should provide ETA only.
+When Admin/OMS fills `oms_etr`:
 
-## 8. ETR Handling
+1. Django signal detects `oms_etr` changed
+2. Backend sends proactive alert to every active unique `session_id` linked to the case
+3. The message uses OMS as source
+4. OMS ETR overrides Pluem ETR for future responses
 
-ETR source:
+Expected source priority:
 
-- `OutageCase.oms_etr`
-- Entered by operator through Django Admin or future external OMS integration
+| Situation | User-facing ETR |
+|---|---|
+| `oms_etr` exists | Use OMS ETR |
+| `oms_etr` missing and ETA not expired | Do not show Pluem ETR |
+| `oms_etr` missing and ETA expired | Use Pluem ETR through webhook |
+| Pluem unavailable after ETA timeout | Fallback: connecting to Pluem model |
 
-Rules:
+## 8. API Summary
 
-1. During `new_event`
-   - If `oms_etr` exists, return ETA + ETR
-   - If `oms_etr` is missing, return ETA only
-2. During mass/repeated event
-   - If `oms_etr` exists, return ETR
-   - If missing, return fallback to ETR model "พี่ปลื้ม"
-3. During ETA timeout
-   - If `oms_etr` exists, proactive notification includes ETR
-   - If missing, proactive notification says the system is connecting to "พี่ปลื้ม"
+| Method | Endpoint | Called by | Purpose |
+|---|---|---|---|
+| `POST` | `/api/reports/sync/` | `Check_Outage_Tool` | Create/link report and outage case |
+| `POST` | `/api/reports/fast-track/` | `Fast_Track_Tool` | Open urgent repeat outage ticket |
+| `GET` | `/api/action-status/` | Optional agent/status flow | Check latest active case status |
+| `POST` | `/webhook/notify` | Django/Celery | Push proactive alerts to DSPy agent |
+| `GET` | `/notifications/{session_id}` | Chat UI | Poll pending proactive notifications |
 
-## 9. ETA Timeout and Proactive Notification Flow
+## 9. Agent Rules
 
-When a case is created, Django schedules `check_eta_timeout(case_id, report_id)` at `eta_target_time`.
+### Tool usage
 
-Current behavior:
+Agent may call `Check_Outage_Tool` only when all are true:
 
-- At timeout, Celery loads the `OutageCase`
-- If case status is still `reported` or `investigating`, it sends notification
-- Notification is sent to every active `CustomerReport` linked to that case
-- It excludes resolved reports
-- It skips empty/null `session_id`
-- It sends only once per unique `session_id`
+- User has electricity/outage intent
+- CA is valid
+- User has given consent
 
-```mermaid
-sequenceDiagram
-    participant C as Celery Worker
-    participant DB as PostgreSQL
-    participant A as DSPy Agent
-    participant W as Static UI
-    participant U as User
+### CA validation
 
-    C->>DB: Load OutageCase by case_id
-    C->>DB: Load active CustomerReports for case
+Temporary rule:
 
-    alt case.oms_etr exists
-        C->>A: POST /webhook/notify with ETR message
-    else no oms_etr
-        C->>A: POST /webhook/notify with "พี่ปลื้ม" fallback
-    end
+- Accept 11 or 12 digits
+- Digits only
+- No letters
+- No spaces
+- No symbols
 
-    A->>A: Store in pending_notifications[session_id]
-    A->>A: Append System Alert to session memory
-    W->>A: GET /notifications/{session_id}
-    A-->>W: Pending notification list
-    W-->>U: Display proactive alert
+### Time rule
+
+Agent must use server-side Thailand time only.
+
+User statements like:
+
+- "ตอนนี้ 21:51 แล้ว"
+- "เลยเวลาแล้ว"
+- "ช่างมาช้าแล้ว"
+
+are not authoritative.
+
+Only these can make ETA expire:
+
+- Celery `eta_timeout` event
+- System alert in chat history with `event_type=eta_timeout`
+
+## 10. Expected Conversation Scenarios
+
+### Scenario 1: User reports outage without CA
+
+User:
+
+> ไฟดับครับ
+
+Expected Agent:
+
+> รับทราบครับ รบกวนแจ้งหมายเลขผู้ใช้ไฟ CA 11 หรือ 12 หลักให้ผมหน่อยครับ เพื่อใช้ตรวจสอบพื้นที่และเปิดใบงานให้ถูกจุดครับ
+
+Expected tool call:
+
+- No tool call
+
+### Scenario 2: User provides CA but no outage intent
+
+User:
+
+> 20025009298
+
+Expected Agent:
+
+> ขอบคุณครับ ผมได้รับหมายเลข CA แล้ว ไม่ทราบว่าตอนนี้ต้องการแจ้งปัญหาไฟฟ้าเรื่องใดครับ เช่น ไฟดับ ไฟตก หรือมีประกายไฟ
+
+Expected tool call:
+
+- No tool call
+
+### Scenario 3: Invalid CA
+
+User:
+
+> ไฟดับ CA 12345abc9012
+
+Expected Agent:
+
+> หมายเลข CA ต้องเป็นตัวเลข 11 หรือ 12 หลักเท่านั้นครับ รบกวนตรวจสอบและส่งหมายเลข CA ใหม่อีกครั้งครับ
+
+Expected tool call:
+
+- No tool call
+
+### Scenario 4: Valid CA but no consent
+
+User:
+
+> ไฟดับ CA 20025009298
+
+Expected Agent:
+
+> ก่อนตรวจสอบข้อมูลไฟดับด้วยหมายเลข CA ขออนุญาตใช้หมายเลขผู้ใช้ไฟนี้เพื่อตรวจสอบข้อมูลในระบบ PEA OMS ได้ไหมครับ
+
+Expected tool call:
+
+- No tool call
+
+### Scenario 5: Consent given, new outage case
+
+User:
+
+> ยินยอมครับ ไฟดับ CA 20025009298
+
+Tool result:
+
+```text
+[เหตุแจ้งใหม่] ระบบได้เปิดใบงานใหม่แล้ว สาขาที่ประเมินว่าไปถึงเร็วที่สุดคือ การไฟฟ้าส่วนภูมิภาค สาขา รังสิต ให้แจ้งเวลาที่ช่างจะเดินทางไปถึง (ETA): ~ 8 min
 ```
 
-Important note:
+Expected Agent:
 
-- `dspy-agent` is not continuously pushing messages by itself.
-- The browser polls `/notifications/{session_id}` every 2 seconds.
-- Real push integration should replace this with LINE/Facebook/WebSocket push in production.
+> รับทราบครับ ระบบได้เปิดใบงานแจ้งไฟดับเรียบร้อยแล้ว สาขาที่ประเมินว่าไปถึงเร็วที่สุดคือการไฟฟ้าส่วนภูมิภาค สาขา รังสิต ช่างคาดว่าจะเดินทางถึงภายในประมาณ 8 นาทีครับ
 
-## 10. Admin-Driven Updates and Signals
+Must not say:
 
-Signals are defined in `backend/oms/signals.py`.
+> ETR จากโมเดลพี่ปลื้มคือ...
 
-### 10.1 ETA Change
+Expected tool call:
 
-When operator changes `eta_target_time`:
+- `Check_Outage_Tool(ca_number="20025009298", pdpa_consent=True)`
 
-1. `pre_save` compares old ETA and new ETA
-2. Existing `celery_eta_task_id` is revoked
-3. `_needs_new_eta_task` is set
-4. `post_save` schedules a new ETA timeout task
-5. New task id is saved to `celery_eta_task_id`
+### Scenario 6: User asks ETR immediately after new case
 
-### 10.2 Case Restored
+User:
 
-When operator changes status to `restored`:
+> แล้วไฟจะมากี่โมง
 
-1. Existing ETA/ETR tasks are revoked
-2. Task ids are cleared
-3. All active related `CustomerReport` records are marked `is_resolved=True`
-4. `send_proactive_alert` is queued for each affected customer
-5. Agent receives `event_type=closed_loop_prompt`
-6. If user says power is still not back, agent asks breaker-check question
-7. If breaker is normal, `Fast_Track_Tool` creates an urgent repeat ticket
+Expected Agent:
 
-```mermaid
-sequenceDiagram
-    participant Admin as Operator/Admin
-    participant B as Django Backend
-    participant DB as PostgreSQL
-    participant R as Redis
-    participant C as Celery Worker
-    participant A as DSPy Agent
-    participant U as User
+> ตอนนี้ระบบมีเวลาประเมินช่างถึงหน้างานแล้วครับ ส่วนเวลาไฟกลับหรือ ETR ยังไม่มีข้อมูลยืนยันจาก OMS ในตอนนี้ หากมีข้อมูลอัปเดตระบบจะแจ้งให้ทราบทันทีครับ
 
-    Admin->>B: Set OutageCase.status = restored
-    B->>R: Revoke ETA/ETR tasks
-    B->>DB: Mark related reports resolved
-    B->>R: Queue send_proactive_alert per report
-    C->>A: POST /webhook/notify closed_loop_prompt
-    A-->>U: Notification via polling UI
-    U->>A: "ไฟยังไม่มา" / "ยังใช้งานไม่ได้"
-    A-->>U: Ask breaker check
-    U->>A: Confirms breaker normal
-    A->>B: POST /api/reports/fast-track/
-    B->>DB: Create fast-track OutageCase if quota remains
+Expected tool call:
+
+- No additional `Check_Outage_Tool`
+
+### Scenario 7: User claims ETA already expired, but server time says not yet
+
+User:
+
+> ตอนนี้เลยเวลาแล้วนะ ช่างมายัง
+
+Expected Agent:
+
+> ผมตรวจสอบจากเวลาระบบประเทศไทยแล้ว ตอนนี้ยังไม่พบสัญญาณ ETA timeout จาก OMS ครับ ช่างยังอยู่ในกรอบเวลาที่แจ้งไว้ หากระบบได้รับอัปเดตจะแจ้งให้ทราบทันทีครับ
+
+Expected tool call:
+
+- No tool call
+
+### Scenario 8: ETA timeout, OMS ETR exists
+
+System alert:
+
+```text
+event_type=eta_timeout; message=ขออภัยที่ช่างถึงหน้างานช้ากว่ากำหนดครับ เวลาที่คาดว่าจะแก้ไขเสร็จและจ่ายไฟคืนจาก OMS คือประมาณ 22:30 น. ครับ
 ```
 
-## 11. Event Types
+Expected proactive message:
 
-| Event Type | Produced By | Meaning |
-| --- | --- | --- |
-| `new_event` | Django `/reports/sync/` | New outage case created |
-| `repeated_event` | Django `/reports/sync/` | Report matched existing active nearby case |
-| `eta_timeout` | Celery `check_eta_timeout` | Technician ETA expired while case is not progressed |
-| `closed_loop_prompt` | Celery `send_proactive_alert` after restored | System says power is restored; user can confirm if still out |
-| `fast_track_created` | Django `/reports/fast-track/` | Urgent repeat ticket created |
-| `fallback_to_human` | Django `/reports/fast-track/` or tool fallback | User should be transferred to human agent |
+> ขออภัยที่ช่างถึงหน้างานช้ากว่ากำหนดครับ เวลาที่คาดว่าจะแก้ไขเสร็จและจ่ายไฟคืนจาก OMS คือประมาณ 22:30 น. ครับ
 
-## 12. Operational Commands
+Expected Agent if user replies:
 
-Start services:
+> ขออภัยในความล่าช้าครับ ข้อมูลล่าสุดจาก OMS ประเมินว่าจะจ่ายไฟคืนได้ประมาณ 22:30 น. ครับ
 
-```bash
-docker compose up -d --build
+### Scenario 9: ETA timeout, OMS ETR missing, Pluem ETR available
+
+System alert:
+
+```text
+event_type=eta_timeout; message=ขออภัยที่ช่างถึงหน้างานช้ากว่ากำหนดครับ เวลาที่คาดว่าจะแก้ไขเสร็จและจ่ายไฟคืนจาก โมเดล ETR พี่ปลื้ม คือประมาณ 22:30 น. ครับ
 ```
 
-Restart services after code changes:
+Expected proactive message:
 
-```bash
-docker compose restart backend dspy-agent celery_worker
+> ขออภัยที่ช่างถึงหน้างานช้ากว่ากำหนดครับ เวลาที่คาดว่าจะแก้ไขเสร็จและจ่ายไฟคืนจากโมเดล ETR พี่ปลื้มคือประมาณ 22:30 น. ครับ
+
+Expected Agent if user replies:
+
+> ขออภัยในความล่าช้าครับ ตอนนี้ยังไม่มี ETR จาก OMS โดยตรง ระบบจึงใช้ค่าประเมินจากโมเดล ETR พี่ปลื้ม ล่าสุดคาดว่าจะจ่ายไฟคืนประมาณ 22:30 น. ครับ
+
+### Scenario 10: ETA timeout, OMS ETR missing, Pluem model unavailable
+
+System alert:
+
+```text
+event_type=eta_timeout; message=ขออภัยที่ช่างถึงหน้างานช้ากว่ากำหนดครับ ขณะนี้ยังไม่มี ETR จาก OMS ระบบกำลังเชื่อมต่อกับโมเดล ETR พี่ปลื้มเพื่อประเมินเวลาไฟกลับมาใช้งานได้ครับ
 ```
 
-Inspect Celery worker state:
+Expected Agent:
 
-```bash
-docker compose exec celery_worker celery -A pea_project inspect active
-docker compose exec celery_worker celery -A pea_project inspect scheduled
-docker compose exec celery_worker celery -A pea_project inspect reserved
+> ขออภัยที่ล่าช้าครับ ขณะนี้ยังไม่มี ETR จาก OMS และระบบกำลังเชื่อมต่อโมเดล ETR พี่ปลื้มเพื่อประเมินเวลาไฟกลับมาใช้งานได้ครับ หากมีอัปเดตจะแจ้งให้ทราบทันทีครับ
+
+### Scenario 11: Repeated/mass outage with OMS ETR
+
+Tool result:
+
+```text
+[เหตุวงกว้าง] แจ้ง ETR จาก OMS: 2026-06-26T22:30:00+07:00 แก่ลูกค้า
 ```
 
-Revoke one Celery task:
+Expected Agent:
 
-```bash
-docker compose exec celery_worker celery -A pea_project control revoke <task_id>
+> ตรวจพบว่าเหตุนี้เกี่ยวข้องกับเหตุไฟดับในพื้นที่เดียวกันครับ ข้อมูลจาก OMS ประเมินว่าจะจ่ายไฟคืนได้ประมาณ 22:30 น. ครับ
+
+Expected tool call:
+
+- `Check_Outage_Tool`
+
+Must not say:
+
+> ช่างจะถึงภายใน...
+
+### Scenario 12: Repeated/mass outage without OMS ETR
+
+Tool result:
+
+```text
+[เหตุวงกว้าง] กำลังเชื่อมต่อกับโมเดล ETR พี่ปลื้มครับ
 ```
 
-Revoke a running task:
+Expected Agent:
 
-```bash
-docker compose exec celery_worker celery -A pea_project control revoke <task_id> --terminate
+> ตรวจพบว่าเหตุนี้เกี่ยวข้องกับเหตุไฟดับในพื้นที่เดียวกันครับ ตอนนี้ยังไม่มี ETR ยืนยันจาก OMS หากมีข้อมูลอัปเดตระบบจะแจ้งให้ทราบทันทีครับ
+
+Expected tool call:
+
+- `Check_Outage_Tool`
+
+### Scenario 13: CA not found in customer location DB
+
+Tool result:
+
+```text
+[CA_NOT_FOUND] ไม่พบหมายเลข CA นี้ในฐานข้อมูลพิกัดลูกค้า กรุณาตรวจสอบหมายเลข CA อีกครั้ง หรือโอนให้เจ้าหน้าที่ช่วยตรวจสอบ
 ```
 
-Purge queued Celery tasks:
+Expected Agent:
 
-```bash
-docker compose exec celery_worker celery -A pea_project purge -f
+> ผมยังไม่พบหมายเลข CA นี้ในฐานข้อมูลพิกัดลูกค้าครับ รบกวนตรวจสอบหมายเลขอีกครั้ง หากหมายเลขถูกต้องแล้วผมจะประสานให้เจ้าหน้าที่ช่วยตรวจสอบต่อครับ
+
+### Scenario 14: Assessment service error
+
+Tool result:
+
+```text
+[FallBack] ระบบประเมิน ETA/ETR ขัดข้อง ให้ตอบว่ากำลังโอนสายให้เจ้าหน้าที่
 ```
 
-Stop optional services:
+Expected Agent:
 
-```bash
-docker compose stop flower
+> ขออภัยครับ ระบบประเมินเวลาขณะนี้ขัดข้อง ผมจะส่งต่อให้เจ้าหน้าที่ช่วยตรวจสอบและดำเนินการต่อครับ
+
+### Scenario 15: Out of scope
+
+User:
+
+> น้ำประปาไม่ไหลครับ
+
+Expected Agent:
+
+> ช่องทางนี้สำหรับแจ้งปัญหาไฟฟ้าของ PEA เป็นหลักครับ กรณีน้ำประปาไม่ไหล รบกวนติดต่อหน่วยงานประปาในพื้นที่โดยตรงนะครับ
+
+Expected tool call:
+
+- No tool call
+
+### Scenario 16: User is frustrated after ETA
+
+User:
+
+> ช้ามาก ทำไมยังไม่มา
+
+Expected Agent:
+
+> ขออภัยในความไม่สะดวกจริงๆ ครับ ผมยึดตามข้อมูลล่าสุดจาก OMS เป็นหลัก ตอนนี้ยังไม่มีสัญญาณ ETA timeout หรือ ETR ใหม่เข้ามา หากระบบได้รับอัปเดตจะแจ้งให้ทราบทันทีครับ
+
+Expected tool call:
+
+- No repeated `Check_Outage_Tool`
+
+### Scenario 17: Closed-loop restored but user says power still out
+
+Precondition:
+
+- Chat history contains `event_type=closed_loop_prompt`
+- User says power is still out
+
+User:
+
+> ไฟยังไม่มา
+
+Expected Agent:
+
+> รบกวนตรวจสอบสวิตช์เบรกเกอร์เมนภายในบ้านว่าทริปหรือตกลงมาหรือไม่ครับ หากตรวจสอบแล้วปกติ กรุณาพิมพ์ว่า "ปกติ" เพื่อยืนยันให้ช่างเข้าตรวจสอบซ้ำครับ
+
+Expected tool call:
+
+- No `Fast_Track_Tool` yet
+
+### Scenario 18: Breaker normal, create fast track
+
+User:
+
+> ปกติ เช็คแล้ว
+
+Tool result:
+
+```text
+[Success] สร้างตั๋ว Fast-track สำเร็จ ให้ตอบลูกค้าว่าประสานงานด่วนแล้ว
 ```
 
-Stop ETA/proactive worker:
+Expected Agent:
 
-```bash
-docker compose stop celery_worker
+> รับทราบครับ ผมสร้างใบงานตรวจสอบซ้ำแบบเร่งด่วนให้แล้ว เจ้าหน้าที่จะประสานช่างเข้าตรวจสอบอีกครั้งครับ
+
+Expected tool call:
+
+- `Fast_Track_Tool(ca_number)`
+
+### Scenario 19: Fast track quota exhausted
+
+Tool result:
+
+```text
+[FallBack] โควต้าแจ้งซ้ำหมดแล้ว ให้ตอบว่ากำลังโอนสายให้เจ้าหน้าที่ (Force Fallback)
 ```
 
-Run backend tests:
+Expected Agent:
 
-```bash
-docker compose exec backend python manage.py test oms
-```
+> เคสนี้มีการตรวจสอบซ้ำครบโควต้าแล้วครับ ผมจะส่งต่อให้เจ้าหน้าที่รับช่วงตรวจสอบโดยตรงครับ
 
-Check DSPy Python syntax:
+## 11. Developer Test Checklist
 
-```bash
-docker compose exec dspy-agent python -m py_compile agent.py signature.py tools.py
-```
+Use this checklist when testing the system:
 
-## 13. Current Limitations and Production Notes
+- CA with 11 digits passes validation
+- CA with 12 digits passes validation
+- CA with letters/symbols fails validation
+- Agent asks consent before calling `Check_Outage_Tool`
+- New event returns ETA only
+- New event does not mention Pluem ETR
+- `oms_etr` update sends proactive webhook
+- ETA timeout sends OMS ETR when available
+- ETA timeout sends Pluem ETR when OMS ETR is missing
+- ETA timeout notifies all active unique `session_id` values linked to the case
+- User-claimed time does not cause ETA timeout
+- Fast track only runs after closed-loop prompt and breaker confirmation
 
-1. Agent memory is in-process
-   - Restarting `dspy-agent` clears chat history, consent state, and pending notifications.
-   - Production should use Redis/PostgreSQL/session store.
+## 12. Current Known Temporary Rules
 
-2. Notification delivery is polling-based
-   - Browser polls every 2 seconds.
-   - Production should push to LINE/Facebook/WebSocket or a real notification service.
-
-3. ETR is manual/admin-driven
-   - `oms_etr` is only available after operator fills it in.
-   - Future OMS integration can update `OutageCase.oms_etr` automatically.
-
-4. Location matching is mock/simple
-   - CA number maps to mock coordinates in `dspy/tools.py`.
-   - Django matches active cases within 5 km by simple distance calculation.
-   - Production should use real customer/asset GIS data.
-
-5. Static UI has hardcoded endpoint URLs
-   - `ato.html` should be parameterized or generated per environment.
-
-6. Celery scheduled ETA tasks depend on worker/broker state
-   - Restart/revoke behavior should be monitored via Flower or Celery inspect commands.
-
-7. Security settings are development-oriented
-   - `DEBUG=True`, permissive CORS, and `ALLOWED_HOSTS=['*']` are suitable only for demo/dev.
-
-## 14. Source File Map
-
-| Concern | File |
-| --- | --- |
-| Static chat UI | `ato.html` |
-| Agent FastAPI server | `dspy/webhook_server.py` |
-| Agent memory/session wrapper | `dspy/agent.py` |
-| Agent prompt/signature | `dspy/signature.py` |
-| Agent tools | `dspy/tools.py` |
-| Django API routes | `backend/oms/router.py` |
-| Django API handlers | `backend/oms/views_api.py` |
-| Serializers/validation | `backend/oms/serializers.py` |
-| Data models | `backend/oms/models.py` |
-| Admin UI | `backend/oms/admin.py` |
-| Celery tasks | `backend/oms/tasks.py` |
-| Django signals | `backend/oms/signals.py` |
-| Celery app config | `backend/pea_project/celery.py` |
-| Django settings | `backend/pea_project/settings.py` |
-| Runtime composition | `docker-compose.yml` |
+- CA validation temporarily accepts 11 or 12 digits
+- `CustomerLocation` comes from imported CSV
+- `CustomerLocation.ca_number` is unique, duplicate CA rows are skipped during import
+- Agent web chat polls pending proactive notifications from `dspy-agent`
+- ETR from Pluem is model-estimated, not OMS-confirmed

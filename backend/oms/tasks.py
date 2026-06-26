@@ -1,12 +1,63 @@
 from celery import shared_task
 from django.utils import timezone
+from datetime import timedelta
 from .models import OutageCase, CustomerReport
+from .services import get_pea_assessment
 import requests
 import os
 
 AGENT_WEBHOOK_URL = os.getenv(
     "AGENT_WEBHOOK_URL", "http://dspy-agent:8000/webhook/notify"
 )
+
+
+def _parse_float(value):
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _ensure_pluem_etr(case, report_id=None):
+    if case.oms_etr or case.pluem_etr_target_time:
+        return case
+
+    report = None
+    if report_id:
+        report = CustomerReport.objects.filter(id=report_id).first()
+
+    payload = {
+        "lat": case.latitude,
+        "lon": case.longitude,
+    }
+    if report and report.ca_number:
+        payload["ca_number"] = report.ca_number
+
+    assessment = get_pea_assessment(payload)
+    etr_minutes = _parse_float(assessment.get("estimated_etr_minutes"))
+    if assessment.get("error") or etr_minutes is None:
+        return case
+
+    case.pluem_etr_minutes = etr_minutes
+    case.pluem_etr_target_time = timezone.now() + timedelta(minutes=etr_minutes)
+    if assessment.get("fastest_branch"):
+        case.assessment_fastest_branch = assessment["fastest_branch"]
+    if assessment.get("eta_formatted"):
+        case.assessment_eta_formatted = assessment["eta_formatted"]
+    case.assessment_payload = assessment
+    case.save(
+        update_fields=[
+            "pluem_etr_minutes",
+            "pluem_etr_target_time",
+            "assessment_fastest_branch",
+            "assessment_eta_formatted",
+            "assessment_payload",
+            "updated_at",
+        ]
+    )
+    return case
 
 
 @shared_task
@@ -20,12 +71,19 @@ def check_eta_timeout(case_id, report_id):
 
         # หากสถานะยังเป็นแค่ 'reported' หรือ 'investigating' แสดงว่าช่างยังไม่แจ้งว่าถึงหน้างาน (Status != Arrived)
         if case.status in ["reported", "investigating"]:
+            if not case.oms_etr:
+                case = _ensure_pluem_etr(case, report_id)
+
             message = ""
-            if case.oms_etr:
-                etr_label = timezone.localtime(case.oms_etr).strftime("%H:%M น.")
+            etr_target_time = case.effective_etr_time()
+            if etr_target_time:
+                etr_label = timezone.localtime(etr_target_time).strftime("%H:%M น.")
+                etr_source = case.effective_etr_source()
+                source_label = "OMS" if etr_source == "oms" else "โมเดล ETR พี่ปลื้ม"
                 message = (
                     "ขออภัยที่ช่างถึงหน้างานช้ากว่ากำหนดครับ "
-                    f"เวลาที่คาดว่าจะแก้ไขเสร็จและจ่ายไฟคืนคือประมาณ {etr_label} ครับ"
+                    f"เวลาที่คาดว่าจะแก้ไขเสร็จและจ่ายไฟคืนจาก {source_label} "
+                    f"คือประมาณ {etr_label} ครับ"
                 )
             else:
                 message = "ขออภัยที่ช่างถึงหน้างานช้ากว่ากำหนดครับ ขณะนี้ยังไม่มี ETR จาก OMS ระบบกำลังเชื่อมต่อกับโมเดล ETR พี่ปลื้มเพื่อประเมินเวลาไฟกลับมาใช้งานได้ครับ"

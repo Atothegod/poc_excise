@@ -1,16 +1,19 @@
 import math
+from datetime import timedelta
+
 from rest_framework import serializers
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from django.utils import timezone
-from datetime import timedelta
-from .models import CustomerReport, OutageCase
+
+from .models import CustomerLocation, CustomerReport, OutageCase
 from .serializers import (
     AgentReportSerializer,
     ActionStatusRequestSerializer,
     ActionStatusResponseSerializer,
     validate_ca_number_format,
 )
+from .services import format_minutes_label, get_pea_assessment, parse_eta_minutes
 from .tasks import check_eta_timeout
 
 
@@ -32,6 +35,57 @@ def calculate_distance(lat1, lon1, lat2, lon2):
     return R * c
 
 
+def _parse_float(value):
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _datetime_iso(value):
+    return value.isoformat() if value else None
+
+
+def _case_response_fields(case, include_model_etr=False):
+    if not case:
+        return {
+            "case_id": None,
+            "eta_target_time": None,
+            "eta_formatted": None,
+            "fastest_branch": None,
+            "oms_etr": None,
+            "pluem_etr_minutes": None,
+            "pluem_etr_target_time": None,
+            "etr_target_time": None,
+            "etr_source": None,
+        }
+
+    etr_target_time = case.oms_etr
+    etr_source = "oms" if case.oms_etr else None
+    pluem_etr_minutes = None
+    pluem_etr_target_time = None
+
+    if include_model_etr and not case.oms_etr:
+        etr_target_time = case.pluem_etr_target_time
+        etr_source = case.effective_etr_source()
+        pluem_etr_minutes = case.pluem_etr_minutes
+        pluem_etr_target_time = case.pluem_etr_target_time
+
+    return {
+        "case_id": case.case_id,
+        "eta_target_time": _datetime_iso(case.eta_target_time),
+        "eta_formatted": case.assessment_eta_formatted or None,
+        "fastest_branch": case.assessment_fastest_branch or None,
+        "oms_etr": _datetime_iso(case.oms_etr),
+        "pluem_etr_minutes": pluem_etr_minutes,
+        "pluem_etr_target_time": _datetime_iso(pluem_etr_target_time),
+        "etr_target_time": _datetime_iso(etr_target_time),
+        "etr_source": etr_source,
+    }
+
+
 @api_view(["POST"])
 def sync_agent_report(request):
     serializer = AgentReportSerializer(data=request.data)
@@ -44,9 +98,15 @@ def sync_agent_report(request):
             session_id=session_id, ca_number=ca_number, is_resolved=False
         )
 
-        if data.get("latitude"):
+        customer_location = CustomerLocation.objects.filter(ca_number=ca_number).first()
+        if customer_location:
+            report.customer_name = customer_location.fullname
+            report.latitude = customer_location.latitude
+            report.longitude = customer_location.longitude
+
+        if data.get("latitude") is not None:
             report.latitude = data.get("latitude")
-        if data.get("longitude"):
+        if data.get("longitude") is not None:
             report.longitude = data.get("longitude")
         if data.get("time_stamp"):
             report.time_stamp = data.get("time_stamp")
@@ -57,35 +117,96 @@ def sync_agent_report(request):
 
         event_type = "new_event"
 
-        if report.latitude and report.longitude and not report.related_case:
+        has_coordinates = report.latitude is not None and report.longitude is not None
+        if not has_coordinates and not report.related_case:
+            report.save()
+            return Response(
+                {
+                    "status": "not_found",
+                    "event_type": "ca_not_found",
+                    "message": "ไม่พบ CA ในฐานข้อมูลพิกัดลูกค้า",
+                    "report_id": report.id,
+                    **_case_response_fields(None),
+                }
+            )
+
+        if has_coordinates and not report.related_case:
             active_cases = OutageCase.objects.exclude(status="restored")
             nearest_case = None
 
             for case in active_cases:
-                            dist = calculate_distance(report.latitude, report.longitude, case.latitude, case.longitude)
-                            print(f"DEBUG: Checking case {case.case_id}, Distance: {dist}")
-                            if dist <= 5.0:
-                                nearest_case = case
-                                event_type = "repeated_event"
-                                break
+                dist = calculate_distance(
+                    report.latitude, report.longitude, case.latitude, case.longitude
+                )
+                print(f"DEBUG: Checking case {case.case_id}, Distance: {dist}")
+                if dist <= 5.0:
+                    nearest_case = case
+                    event_type = "repeated_event"
+                    break
 
             if nearest_case:
                 report.related_case = nearest_case
             else:
                 base_time = report.time_stamp if report.time_stamp else timezone.now()
-                mock_eta = base_time + timedelta(minutes=45)
+                assessment = get_pea_assessment(
+                    {
+                        "ca_number": ca_number,
+                        "lat": report.latitude,
+                        "lon": report.longitude,
+                    }
+                )
+                if assessment.get("error"):
+                    report.save()
+                    return Response(
+                        {
+                            "status": "assessment_error",
+                            "event_type": "assessment_error",
+                            "message": assessment["error"],
+                            "report_id": report.id,
+                            **_case_response_fields(None),
+                        }
+                    )
+
+                eta_minutes = parse_eta_minutes(assessment.get("eta_formatted"))
+                if eta_minutes is None:
+                    report.save()
+                    return Response(
+                        {
+                            "status": "assessment_error",
+                            "event_type": "assessment_error",
+                            "message": "assessment response does not contain a usable ETA",
+                            "report_id": report.id,
+                            **_case_response_fields(None),
+                        }
+                    )
+
+                etr_minutes = _parse_float(assessment.get("estimated_etr_minutes"))
+                eta_target_time = base_time + timedelta(minutes=eta_minutes)
+                pluem_etr_target_time = (
+                    base_time + timedelta(minutes=etr_minutes)
+                    if etr_minutes is not None
+                    else None
+                )
 
                 new_case = OutageCase.objects.create(
                     title=f"แจ้งไฟดับจาก CA {ca_number}",
                     latitude=report.latitude,
                     longitude=report.longitude,
-                    eta_target_time=mock_eta,
+                    eta_target_time=eta_target_time,
+                    assessment_fastest_branch=assessment.get("fastest_branch") or "",
+                    assessment_eta_formatted=assessment.get("eta_formatted")
+                    or format_minutes_label(eta_minutes)
+                    or "",
+                    assessment_eta_minutes=eta_minutes,
+                    pluem_etr_minutes=etr_minutes,
+                    pluem_etr_target_time=pluem_etr_target_time,
+                    assessment_payload=assessment,
                 )
                 report.related_case = new_case
 
                 # สั่งรัน Task และเก็บ task_id ลง Database
                 task = check_eta_timeout.apply_async(
-                    args=[new_case.case_id, report.id], eta=mock_eta
+                    args=[new_case.case_id, report.id], eta=eta_target_time
                 )
                 new_case.celery_eta_task_id = task.id
                 new_case.save(update_fields=["celery_eta_task_id"])
@@ -95,13 +216,7 @@ def sync_agent_report(request):
             "status": "success",
             "event_type": event_type,
             "report_id": report.id,
-            "case_id": report.related_case.case_id if report.related_case else None,
-            "eta_target_time": report.related_case.eta_target_time.isoformat()
-            if report.related_case and report.related_case.eta_target_time
-            else None,
-            "oms_etr": report.related_case.oms_etr.isoformat()
-            if report.related_case and report.related_case.oms_etr
-            else None,
+            **_case_response_fields(report.related_case),
         }
         return Response(response_data)
     return Response(serializer.errors, status=400)
@@ -124,6 +239,9 @@ def get_action_status(request):
             "case_status": None,
             "case_status_display": None,
             "oms_etr": None,
+            "etr_target_time": None,
+            "etr_source": None,
+            "pluem_etr_minutes": None,
         }
         if report and report.related_case:
             case = report.related_case
@@ -134,6 +252,9 @@ def get_action_status(request):
                     "case_status": case.status,
                     "case_status_display": case.get_status_display(),
                     "oms_etr": case.oms_etr if case.oms_etr else None,
+                    "etr_target_time": case.oms_etr if case.oms_etr else None,
+                    "etr_source": "oms" if case.oms_etr else None,
+                    "pluem_etr_minutes": None,
                 }
             )
         response_serializer = ActionStatusResponseSerializer(response_data)
