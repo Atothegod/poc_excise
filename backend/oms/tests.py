@@ -6,7 +6,7 @@ from django.utils.dateparse import parse_datetime
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from .models import CustomerLocation, CustomerReport, OutageCase
+from .models import CustomerLocation, CustomerReport, OutageCase, OutageRestorationLog
 from .tasks import check_eta_timeout
 
 
@@ -47,6 +47,8 @@ class SyncAgentReportTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["event_type"], "new_event")
+        self.assertEqual(response.data["lv_group_id"], 1)
+        self.assertEqual(response.data["affected_ca_numbers"], ["123456789012"])
         self.assertIsNotNone(response.data["eta_target_time"])
         self.assertEqual(response.data["eta_formatted"], "~ 8 min")
         self.assertEqual(
@@ -71,6 +73,7 @@ class SyncAgentReportTests(TestCase):
         self.assertEqual(report.longitude, 100.926296)
         self.assertTrue(report.pdpa_consent)
         self.assertIsNotNone(report.pdpa_consent_at)
+        self.assertEqual(case.affected_ca_numbers, ["123456789012"])
         mock_assessment.assert_called_once_with(
             {
                 "ca_number": "123456789012",
@@ -114,24 +117,132 @@ class SyncAgentReportTests(TestCase):
 
         self.assertEqual(response.status_code, 400)
 
-    @patch("oms.views_api.get_pea_assessment")
-    @patch("oms.views_api.check_eta_timeout.apply_async")
-    def test_sync_report_temporarily_accepts_11_digit_ca_number(
-        self, mock_apply_async, mock_assessment
-    ):
-        mock_apply_async.return_value.id = "eta-task-id"
-        mock_assessment.return_value = {
-            "fastest_branch": "การไฟฟ้าส่วนภูมิภาค สาขา รังสิต",
-            "eta_formatted": "~ 8 min",
-            "estimated_etr_minutes": 69.0,
-        }
-        CustomerLocation.objects.create(
-            ca_number="20025009298",
-            fullname="Eleven Digit User",
-            latitude=14.0785,
-            longitude=100.6140362,
+    def test_sync_chat_history_stores_dialog_on_latest_report(self):
+        report = CustomerReport.objects.create(
+            session_id="session-dialog",
+            ca_number="123456789012",
         )
 
+        response = self.client.post(
+            "/api/reports/chat-history/",
+            {
+                "session_id": "session-dialog",
+                "ca_number": "123456789012",
+                "chat_history": [
+                    {
+                        "role": "user",
+                        "message": "ไฟดับครับ",
+                        "timestamp": "2026-06-26T12:00:00+07:00",
+                    },
+                    {
+                        "role": "agent",
+                        "message": "รบกวนแจ้ง CA ครับ",
+                        "timestamp": "2026-06-26T12:00:01+07:00",
+                    },
+                ],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        report.refresh_from_db()
+        self.assertEqual(len(report.chat_history), 2)
+        self.assertEqual(report.chat_history[0]["role"], "user")
+        self.assertEqual(report.chat_history[1]["role"], "agent")
+
+    def test_session_context_returns_chat_history_and_latest_outage(self):
+        eta = timezone.now() + timedelta(minutes=15)
+        case = OutageCase.objects.create(
+            title="Session restore case",
+            latitude=9.2917,
+            longitude=100.926296,
+            eta_target_time=eta,
+        )
+        report = CustomerReport.objects.create(
+            session_id="session-restore",
+            ca_number="123456789012",
+            related_case=case,
+            chat_history=[
+                {
+                    "role": "user",
+                    "message": "ไฟดับครับ",
+                    "timestamp": "2026-06-26T12:00:00+07:00",
+                }
+            ],
+        )
+        case.sync_affected_ca_numbers()
+
+        response = self.client.get("/api/reports/session-context/session-restore/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], "success")
+        self.assertEqual(response.data["ca_number"], "123456789012")
+        self.assertEqual(len(response.data["chat_history"]), 1)
+        self.assertEqual(
+            response.data["latest_outage"]["eta_target_time"], eta.isoformat()
+        )
+        self.assertEqual(
+            response.data["latest_outage"]["affected_ca_numbers"], ["123456789012"]
+        )
+
+    def test_session_context_returns_pluem_etr_after_eta_timeout(self):
+        eta = timezone.now() - timedelta(minutes=1)
+        pluem_etr = timezone.now() + timedelta(minutes=71)
+        case = OutageCase.objects.create(
+            title="Session timeout Pluem ETR",
+            latitude=9.2917,
+            longitude=100.926296,
+            eta_target_time=eta,
+            pluem_etr_minutes=71.0,
+            pluem_etr_target_time=pluem_etr,
+        )
+        CustomerReport.objects.create(
+            session_id="session-timeout-context",
+            ca_number="123456789012",
+            related_case=case,
+        )
+        case.sync_affected_ca_numbers()
+
+        response = self.client.get("/api/reports/session-context/session-timeout-context/")
+
+        self.assertEqual(response.status_code, 200)
+        outage = response.data["latest_outage"]
+        self.assertEqual(outage["event_type"], "eta_timeout")
+        self.assertEqual(parse_datetime(outage["etr_target_time"]), pluem_etr)
+        self.assertEqual(parse_datetime(outage["pluem_etr_target_time"]), pluem_etr)
+        self.assertEqual(outage["etr_source"], "pluem_model")
+
+    def test_session_context_uses_oms_etr_over_pluem_etr(self):
+        eta = timezone.now() - timedelta(minutes=1)
+        pluem_etr = timezone.now() + timedelta(minutes=71)
+        oms_etr = timezone.now() + timedelta(minutes=30)
+        case = OutageCase.objects.create(
+            title="Session timeout OMS ETR override",
+            latitude=9.2917,
+            longitude=100.926296,
+            eta_target_time=eta,
+            pluem_etr_minutes=71.0,
+            pluem_etr_target_time=pluem_etr,
+            oms_etr=oms_etr,
+        )
+        CustomerReport.objects.create(
+            session_id="session-oms-context",
+            ca_number="123456789012",
+            related_case=case,
+        )
+        case.sync_affected_ca_numbers()
+
+        response = self.client.get("/api/reports/session-context/session-oms-context/")
+
+        self.assertEqual(response.status_code, 200)
+        outage = response.data["latest_outage"]
+        self.assertEqual(outage["event_type"], "eta_timeout")
+        self.assertEqual(parse_datetime(outage["etr_target_time"]), oms_etr)
+        self.assertEqual(parse_datetime(outage["oms_etr"]), oms_etr)
+        self.assertIsNone(outage["pluem_etr_target_time"])
+        self.assertEqual(outage["etr_source"], "oms")
+
+    def test_sync_report_rejects_11_digit_ca_number(self):
         response = self.client.post(
             "/api/reports/sync/",
             {
@@ -142,9 +253,7 @@ class SyncAgentReportTests(TestCase):
             format="json",
         )
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["event_type"], "new_event")
-        self.assertIsNotNone(response.data["case_id"])
+        self.assertEqual(response.status_code, 400)
 
 
 class CheckEtaTimeoutTests(TestCase):
@@ -169,7 +278,9 @@ class CheckEtaTimeoutTests(TestCase):
         payload = mock_post.call_args.kwargs["json"]
         self.assertEqual(payload["event_type"], "eta_timeout")
         self.assertIn("เวลาที่คาดว่าจะแก้ไขเสร็จ", payload["message"])
+        self.assertIn("ภายในประมาณ", payload["message"])
         self.assertNotIn("พี่ปลื้ม", payload["message"])
+        self.assertNotIn("OMS", payload["message"])
 
     @patch("oms.tasks.requests.post")
     def test_eta_timeout_sends_pluem_etr_when_oms_etr_missing(self, mock_post):
@@ -192,8 +303,10 @@ class CheckEtaTimeoutTests(TestCase):
 
         payload = mock_post.call_args.kwargs["json"]
         self.assertEqual(payload["event_type"], "eta_timeout")
-        self.assertIn("โมเดล ETR พี่ปลื้ม", payload["message"])
         self.assertIn("เวลาที่คาดว่าจะแก้ไขเสร็จ", payload["message"])
+        self.assertIn("ภายในประมาณ", payload["message"])
+        self.assertNotIn("พี่ปลื้ม", payload["message"])
+        self.assertNotIn("OMS", payload["message"])
 
     @patch("oms.tasks.get_pea_assessment")
     @patch("oms.tasks.requests.post")
@@ -221,7 +334,10 @@ class CheckEtaTimeoutTests(TestCase):
 
         payload = mock_post.call_args.kwargs["json"]
         self.assertEqual(payload["event_type"], "eta_timeout")
-        self.assertIn("โมเดล ETR พี่ปลื้ม", payload["message"])
+        self.assertIn("เวลาที่คาดว่าจะแก้ไขเสร็จ", payload["message"])
+        self.assertIn("ภายในประมาณ", payload["message"])
+        self.assertNotIn("พี่ปลื้ม", payload["message"])
+        self.assertNotIn("OMS", payload["message"])
         case.refresh_from_db()
         self.assertEqual(case.pluem_etr_minutes, 69.0)
         self.assertIsNotNone(case.pluem_etr_target_time)
@@ -255,7 +371,9 @@ class CheckEtaTimeoutTests(TestCase):
 
         payload = mock_post.call_args.kwargs["json"]
         self.assertEqual(payload["event_type"], "eta_timeout")
-        self.assertIn("พี่ปลื้ม", payload["message"])
+        self.assertIn("กำลังประเมินเวลาไฟกลับ", payload["message"])
+        self.assertNotIn("พี่ปลื้ม", payload["message"])
+        self.assertNotIn("OMS", payload["message"])
 
     @patch("oms.tasks.requests.post")
     def test_eta_timeout_notifies_all_active_sessions_for_case(self, mock_post):
@@ -336,3 +454,58 @@ class OutageCaseSignalTests(TestCase):
             call.kwargs["event_type"] for call in mock_send_alert.call_args_list
         }
         self.assertEqual(event_types, {"etr_update"})
+
+    @patch("oms.signals.send_proactive_alert.delay")
+    def test_oms_etr_update_after_pluem_etr_sends_replacement_to_sessions(
+        self, mock_send_alert
+    ):
+        case = OutageCase.objects.create(
+            title="ETR update replaces Pluem",
+            latitude=9.2917,
+            longitude=100.926296,
+            eta_target_time=timezone.now() - timedelta(minutes=5),
+            pluem_etr_minutes=71.0,
+            pluem_etr_target_time=timezone.now() + timedelta(minutes=71),
+        )
+        CustomerReport.objects.create(
+            session_id="session-pluem-active",
+            ca_number="123456789012",
+            related_case=case,
+        )
+
+        case.oms_etr = timezone.now() + timedelta(minutes=30)
+        case.save(update_fields=["oms_etr"])
+
+        self.assertEqual(mock_send_alert.call_count, 1)
+        call = mock_send_alert.call_args
+        self.assertEqual(call.kwargs["event_type"], "etr_update")
+        self.assertIn("ETR ล่าสุด", call.kwargs["message"])
+        self.assertIn("ภายในประมาณ", call.kwargs["message"])
+        self.assertNotIn("พี่ปลื้ม", call.kwargs["message"])
+        self.assertNotIn("OMS", call.kwargs["message"])
+
+    @patch("oms.signals.send_proactive_alert.delay")
+    def test_restored_status_creates_restoration_log(self, mock_send_alert):
+        case = OutageCase.objects.create(
+            title="Restored analytics case",
+            latitude=9.2917,
+            longitude=100.926296,
+            eta_target_time=timezone.now() - timedelta(minutes=30),
+            oms_etr=timezone.now() + timedelta(minutes=10),
+        )
+        CustomerReport.objects.create(
+            session_id="session-restored",
+            ca_number="123456789012",
+            related_case=case,
+        )
+        case.sync_affected_ca_numbers()
+
+        case.status = "restored"
+        case.save(update_fields=["status"])
+
+        log = OutageRestorationLog.objects.get(case=case)
+        self.assertEqual(log.lv_group_id, case.lv_group_id)
+        self.assertEqual(log.affected_ca_numbers, ["123456789012"])
+        self.assertEqual(log.etr_source, "oms")
+        self.assertIsNotNone(log.restored_at)
+        self.assertIsNotNone(log.etr_delta_minutes)

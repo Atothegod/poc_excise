@@ -10,7 +10,7 @@
 
 - Agent ไม่ตัดสิน outage เอง
 - Agent ต้องขอ consent ก่อนใช้ `Check_Outage_Tool`
-- CA ชั่วคราวรับได้ทั้ง 11 หรือ 12 หลัก แต่ต้องเป็นตัวเลขล้วน
+- CA ต้องเป็นตัวเลขล้วน 12 หลักเท่านั้น
 - Django OMS เป็นเจ้าของข้อมูล case, customer, ETA, ETR, webhook, countdown
 - `pea-estimated.services` ใช้ประเมิน branch, ETA, และ ETR model
 - ตอนเปิดเคสใหม่ แจ้งเฉพาะ ETA ก่อน
@@ -222,9 +222,9 @@ Agent may call `Check_Outage_Tool` only when all are true:
 
 ### CA validation
 
-Temporary rule:
+Rule:
 
-- Accept 11 or 12 digits
+- Accept exactly 12 digits
 - Digits only
 - No letters
 - No spaces
@@ -257,7 +257,7 @@ User:
 
 Expected Agent:
 
-> รับทราบครับ รบกวนแจ้งหมายเลขผู้ใช้ไฟ CA 11 หรือ 12 หลักให้ผมหน่อยครับ เพื่อใช้ตรวจสอบพื้นที่และเปิดใบงานให้ถูกจุดครับ
+> รับทราบครับ รบกวนแจ้งหมายเลขผู้ใช้ไฟ CA 12 หลักให้ผมหน่อยครับ เพื่อใช้ตรวจสอบพื้นที่และเปิดใบงานให้ถูกจุดครับ
 
 Expected tool call:
 
@@ -267,7 +267,7 @@ Expected tool call:
 
 User:
 
-> 20025009298
+> 200250092981
 
 Expected Agent:
 
@@ -285,7 +285,7 @@ User:
 
 Expected Agent:
 
-> หมายเลข CA ต้องเป็นตัวเลข 11 หรือ 12 หลักเท่านั้นครับ รบกวนตรวจสอบและส่งหมายเลข CA ใหม่อีกครั้งครับ
+> หมายเลข CA ต้องเป็นตัวเลข 12 หลักเท่านั้นครับ รบกวนตรวจสอบและส่งหมายเลข CA ใหม่อีกครั้งครับ
 
 Expected tool call:
 
@@ -295,7 +295,7 @@ Expected tool call:
 
 User:
 
-> ไฟดับ CA 20025009298
+> ไฟดับ CA 200250092981
 
 Expected Agent:
 
@@ -309,7 +309,7 @@ Expected tool call:
 
 User:
 
-> ยินยอมครับ ไฟดับ CA 20025009298
+> ยินยอมครับ ไฟดับ CA 200250092981
 
 Tool result:
 
@@ -327,7 +327,7 @@ Must not say:
 
 Expected tool call:
 
-- `Check_Outage_Tool(ca_number="20025009298", pdpa_consent=True)`
+- `Check_Outage_Tool(ca_number="200250092981", pdpa_consent=True)`
 
 ### Scenario 6: User asks ETR immediately after new case
 
@@ -544,7 +544,7 @@ Expected Agent:
 
 Use this checklist when testing the system:
 
-- CA with 11 digits passes validation
+- CA with 11 digits fails validation
 - CA with 12 digits passes validation
 - CA with letters/symbols fails validation
 - Agent asks consent before calling `Check_Outage_Tool`
@@ -559,7 +559,7 @@ Use this checklist when testing the system:
 
 ## 12. Current Known Temporary Rules
 
-- CA validation temporarily accepts 11 or 12 digits
+- CA validation accepts exactly 12 digits
 - `CustomerLocation` comes from imported CSV
 - `CustomerLocation.ca_number` is unique, duplicate CA rows are skipped during import
 - Agent web chat polls pending proactive notifications from `dspy-agent`

@@ -1,9 +1,61 @@
 from django.db.models.signals import pre_save, post_save
 from django.dispatch import receiver
 from django.utils import timezone
-from .models import OutageCase, CustomerReport
+from math import ceil
+from .models import OutageCase, CustomerReport, OutageRestorationLog
 from .tasks import check_eta_timeout, send_proactive_alert
 from pea_project.celery import app as celery_app
+
+
+def _create_restoration_log(instance):
+    restored_at = timezone.now()
+    effective_etr = instance.effective_etr_time()
+    etr_delta_minutes = None
+    if effective_etr:
+        etr_delta_minutes = (restored_at - effective_etr).total_seconds() / 60
+
+    affected_ca_numbers = instance.sync_affected_ca_numbers()
+    OutageRestorationLog.objects.get_or_create(
+        case=instance,
+        defaults={
+            "lv_group_id": instance.lv_group_id,
+            "affected_ca_numbers": affected_ca_numbers,
+            "restored_at": restored_at,
+            "eta_target_time_at_restore": instance.eta_target_time,
+            "oms_etr_at_restore": instance.oms_etr,
+            "pluem_etr_target_time_at_restore": instance.pluem_etr_target_time,
+            "effective_etr_at_restore": effective_etr,
+            "etr_source": instance.effective_etr_source() or "",
+            "etr_delta_minutes": etr_delta_minutes,
+            "case_status_at_restore": instance.status,
+        },
+    )
+
+
+def _format_duration_label(target_time, now=None):
+    if not target_time:
+        return None
+
+    now = now or timezone.now()
+    remaining_minutes = ceil((target_time - now).total_seconds() / 60)
+    if remaining_minutes <= 0:
+        return "เลยกำหนดแล้ว"
+    if remaining_minutes < 60:
+        return f"ภายในประมาณ {remaining_minutes} นาที"
+
+    hours = remaining_minutes // 60
+    minutes = remaining_minutes % 60
+    if minutes:
+        return f"ภายในประมาณ {hours} ชั่วโมง {minutes} นาที"
+    return f"ภายในประมาณ {hours} ชั่วโมง"
+
+
+def _format_time_with_countdown(target_time):
+    if not target_time:
+        return None
+    time_label = timezone.localtime(target_time).strftime("%H:%M น.")
+    duration_label = _format_duration_label(target_time)
+    return f"{time_label} ({duration_label})"
 
 
 @receiver(pre_save, sender=OutageCase)
@@ -60,9 +112,10 @@ def process_outage_case_updates(sender, instance, created, **kwargs):
 
     # --- กรณี OMS/Admin เติมหรือแก้ ETR ---
     if getattr(instance, "_has_new_oms_etr", False):
-        etr_label = timezone.localtime(instance.oms_etr).strftime("%H:%M น.")
+        instance.sync_affected_ca_numbers()
+        etr_label = _format_time_with_countdown(instance.oms_etr)
         message = (
-            "ระบบได้รับข้อมูล ETR ล่าสุดจาก OMS แล้วครับ "
+            "ระบบได้รับข้อมูล ETR ล่าสุดแล้วครับ "
             f"เวลาที่คาดว่าจะแก้ไขเสร็จและจ่ายไฟคืนคือประมาณ {etr_label} ครับ"
         )
         sent_session_ids = set()
@@ -82,6 +135,8 @@ def process_outage_case_updates(sender, instance, created, **kwargs):
 
     # --- กรณีการปิดเคส (Closed-Loop & State Cleansing) ---
     if getattr(instance, "_is_just_restored", False):
+        _create_restoration_log(instance)
+
         # 1. ยกเลิก Timers ที่ค้างอยู่ของเคสนี้ทิ้งทั้งหมด (State Cleansing)
         if instance.celery_eta_task_id:
             celery_app.control.revoke(instance.celery_eta_task_id, terminate=True)
@@ -113,3 +168,9 @@ def process_outage_case_updates(sender, instance, created, **kwargs):
             )
 
         instance._is_just_restored = False
+
+
+@receiver(post_save, sender=CustomerReport)
+def sync_case_affected_ca(sender, instance, **kwargs):
+    if instance.related_case_id:
+        instance.related_case.sync_affected_ca_numbers()

@@ -11,6 +11,7 @@ from .serializers import (
     AgentReportSerializer,
     ActionStatusRequestSerializer,
     ActionStatusResponseSerializer,
+    ChatHistorySyncSerializer,
     validate_ca_number_format,
 )
 from .services import format_minutes_label, get_pea_assessment, parse_eta_minutes
@@ -52,6 +53,8 @@ def _case_response_fields(case, include_model_etr=False):
     if not case:
         return {
             "case_id": None,
+            "lv_group_id": None,
+            "affected_ca_numbers": [],
             "eta_target_time": None,
             "eta_formatted": None,
             "fastest_branch": None,
@@ -75,6 +78,8 @@ def _case_response_fields(case, include_model_etr=False):
 
     return {
         "case_id": case.case_id,
+        "lv_group_id": case.lv_group_id,
+        "affected_ca_numbers": case.affected_ca_numbers or [],
         "eta_target_time": _datetime_iso(case.eta_target_time),
         "eta_formatted": case.assessment_eta_formatted or None,
         "fastest_branch": case.assessment_fastest_branch or None,
@@ -212,6 +217,9 @@ def sync_agent_report(request):
                 new_case.save(update_fields=["celery_eta_task_id"])
 
         report.save()
+        if report.related_case:
+            report.related_case.sync_affected_ca_numbers()
+
         response_data = {
             "status": "success",
             "event_type": event_type,
@@ -263,6 +271,98 @@ def get_action_status(request):
         return Response({"error": str(e)}, status=500)
 
 
+@api_view(["POST"])
+def sync_chat_history(request):
+    serializer = ChatHistorySyncSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=400)
+
+    data = serializer.validated_data
+    session_id = data["session_id"]
+    ca_number = data.get("ca_number")
+    chat_history = data.get("chat_history") or []
+
+    reports = CustomerReport.objects.filter(session_id=session_id)
+    if ca_number:
+        reports = reports.filter(ca_number=ca_number)
+
+    report = reports.filter(is_resolved=False).order_by("-updated_at").first()
+    if not report:
+        report = reports.order_by("-updated_at").first()
+
+    if not report:
+        return Response({"status": "no_report"})
+
+    report.chat_history = chat_history
+    report.save(update_fields=["chat_history", "updated_at"])
+    return Response({"status": "success", "report_id": report.id})
+
+
+@api_view(["GET"])
+def get_session_context(request, session_id):
+    reports = CustomerReport.objects.filter(session_id=session_id)
+    report = reports.filter(is_resolved=False).order_by("-updated_at").first()
+    if not report:
+        report = reports.order_by("-updated_at").first()
+
+    if not report:
+        return Response(
+            {
+                "status": "not_found",
+                "session_id": session_id,
+                "chat_history": [],
+                "latest_outage": None,
+            }
+        )
+
+    case = report.related_case
+    latest_outage = None
+    if case:
+        event_type = "restored" if case.status == "restored" else "active_case_exists"
+
+        if case.status in ["reported", "investigating"] and case.eta_target_time:
+            if timezone.now() >= case.eta_target_time:
+                event_type = "eta_timeout"
+
+        effective_etr = case.oms_etr
+        etr_source = "oms" if case.oms_etr else None
+        if not effective_etr and event_type == "eta_timeout":
+            effective_etr = case.pluem_etr_target_time
+            etr_source = case.effective_etr_source()
+
+        latest_outage = {
+            "event_type": event_type,
+            "ca_number": report.ca_number,
+            "case_id": str(case.case_id),
+            "lv_group_id": case.lv_group_id,
+            "affected_ca_numbers": case.affected_ca_numbers or [],
+            "report_id": report.id,
+            "eta_target_time": _datetime_iso(case.eta_target_time),
+            "eta_formatted": case.assessment_eta_formatted or None,
+            "fastest_branch": case.assessment_fastest_branch or None,
+            "oms_etr": _datetime_iso(case.oms_etr),
+            "etr_target_time": _datetime_iso(effective_etr),
+            "etr_source": etr_source,
+            "pluem_etr_minutes": case.pluem_etr_minutes
+            if event_type == "eta_timeout" and not case.oms_etr
+            else None,
+            "pluem_etr_target_time": _datetime_iso(case.pluem_etr_target_time)
+            if event_type == "eta_timeout" and not case.oms_etr
+            else None,
+        }
+
+    return Response(
+        {
+            "status": "success",
+            "session_id": session_id,
+            "report_id": report.id,
+            "ca_number": report.ca_number,
+            "chat_history": report.chat_history or [],
+            "latest_outage": latest_outage,
+        }
+    )
+
+
 # --- API ใหม่สำหรับ Anti-Loop (Fast Track) ---
 @api_view(["POST"])
 def fast_track_report(request):
@@ -300,6 +400,7 @@ def fast_track_report(request):
         )
         report.related_case = new_case
         report.save()
+        new_case.sync_affected_ca_numbers()
 
         return Response(
             {

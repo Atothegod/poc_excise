@@ -8,6 +8,7 @@ from collections import defaultdict
 
 # 1. Import the stateful 'chatbot' instance you created in agent.py
 from agent import chatbot  # (สมมติว่าไฟล์คลาส MemoryAgent ของคุณชื่อ core_agent)
+from tools import fetch_session_context, restore_latest_outage, sync_chat_history_to_db
 
 app = FastAPI(title="DSPy Agent Webhook Server")
 pending_notifications = defaultdict(list)
@@ -93,9 +94,16 @@ async def receive_proactive_notification(data: NotificationWebhook):
         history_list.append(
             {
                 "role": "System Alert (OMS)",
+                "message": data.message,
+                "timestamp": datetime.now(ZoneInfo("Asia/Bangkok")).isoformat(),
+                "event_type": data.event_type,
                 "content": f"event_type={data.event_type}; ca_number={data.ca_number}; message={data.message}",
             }
         )
+        sync_chat_history_to_db(data.session_id, history_list)
+        context = fetch_session_context(data.session_id)
+        if context:
+            restore_latest_outage(data.session_id, context.get("latest_outage"))
 
         return {"status": "success", "message": "Notification pushed to user."}
 

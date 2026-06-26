@@ -1,6 +1,7 @@
 from celery import shared_task
 from django.utils import timezone
 from datetime import timedelta
+from math import ceil
 from .models import OutageCase, CustomerReport
 from .services import get_pea_assessment
 import requests
@@ -18,6 +19,32 @@ def _parse_float(value):
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _format_duration_label(target_time, now=None):
+    if not target_time:
+        return None
+
+    now = now or timezone.now()
+    remaining_minutes = ceil((target_time - now).total_seconds() / 60)
+    if remaining_minutes <= 0:
+        return "เลยกำหนดแล้ว"
+    if remaining_minutes < 60:
+        return f"ภายในประมาณ {remaining_minutes} นาที"
+
+    hours = remaining_minutes // 60
+    minutes = remaining_minutes % 60
+    if minutes:
+        return f"ภายในประมาณ {hours} ชั่วโมง {minutes} นาที"
+    return f"ภายในประมาณ {hours} ชั่วโมง"
+
+
+def _format_time_with_countdown(target_time):
+    if not target_time:
+        return None
+    time_label = timezone.localtime(target_time).strftime("%H:%M น.")
+    duration_label = _format_duration_label(target_time)
+    return f"{time_label} ({duration_label})"
 
 
 def _ensure_pluem_etr(case, report_id=None):
@@ -71,22 +98,20 @@ def check_eta_timeout(case_id, report_id):
 
         # หากสถานะยังเป็นแค่ 'reported' หรือ 'investigating' แสดงว่าช่างยังไม่แจ้งว่าถึงหน้างาน (Status != Arrived)
         if case.status in ["reported", "investigating"]:
+            case.sync_affected_ca_numbers()
             if not case.oms_etr:
                 case = _ensure_pluem_etr(case, report_id)
 
             message = ""
             etr_target_time = case.effective_etr_time()
             if etr_target_time:
-                etr_label = timezone.localtime(etr_target_time).strftime("%H:%M น.")
-                etr_source = case.effective_etr_source()
-                source_label = "OMS" if etr_source == "oms" else "โมเดล ETR พี่ปลื้ม"
+                etr_label = _format_time_with_countdown(etr_target_time)
                 message = (
                     "ขออภัยที่ช่างถึงหน้างานช้ากว่ากำหนดครับ "
-                    f"เวลาที่คาดว่าจะแก้ไขเสร็จและจ่ายไฟคืนจาก {source_label} "
-                    f"คือประมาณ {etr_label} ครับ"
+                    f"เวลาที่คาดว่าจะแก้ไขเสร็จและจ่ายไฟคืนคือประมาณ {etr_label} ครับ"
                 )
             else:
-                message = "ขออภัยที่ช่างถึงหน้างานช้ากว่ากำหนดครับ ขณะนี้ยังไม่มี ETR จาก OMS ระบบกำลังเชื่อมต่อกับโมเดล ETR พี่ปลื้มเพื่อประเมินเวลาไฟกลับมาใช้งานได้ครับ"
+                message = "ขออภัยที่ช่างถึงหน้างานช้ากว่ากำหนดครับ ขณะนี้ระบบกำลังประเมินเวลาไฟกลับมาใช้งานได้ หากมีข้อมูลอัปเดตจะแจ้งให้ทราบทันทีครับ"
 
             reports = CustomerReport.objects.filter(
                 related_case=case, is_resolved=False

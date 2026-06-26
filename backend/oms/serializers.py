@@ -3,14 +3,14 @@ import re
 from rest_framework import serializers
 
 
-CA_NUMBER_PATTERN = re.compile(r"^\d{11,12}$")
+CA_NUMBER_PATTERN = re.compile(r"^\d{12}$")
 
 
 def validate_ca_number_format(value):
     ca_number = str(value).strip()
     if not CA_NUMBER_PATTERN.fullmatch(ca_number):
         raise serializers.ValidationError(
-            "CA number must contain 11 or 12 digits with no letters or symbols."
+            "CA number must contain exactly 12 digits with no letters or symbols."
         )
     return ca_number
 
@@ -19,7 +19,7 @@ class AgentReportSerializer(serializers.Serializer):
     session_id = serializers.CharField(
         max_length=255, required=False, allow_blank=True, allow_null=True
     )
-    ca_number = serializers.CharField(max_length=12, min_length=11)
+    ca_number = serializers.CharField(max_length=12, min_length=12)
     latitude = serializers.FloatField(required=False, allow_null=True)
     longitude = serializers.FloatField(required=False, allow_null=True)
     chat_history = serializers.CharField(
@@ -40,7 +40,7 @@ class AgentReportSerializer(serializers.Serializer):
 class ActionStatusRequestSerializer(serializers.Serializer):
     """ใช้ตรวจพารามิเตอร์ขาเข้าตอน Agent ยิง GET มาถาม (?ca_number=xxxx)"""
 
-    ca_number = serializers.CharField(max_length=12, min_length=11)
+    ca_number = serializers.CharField(max_length=12, min_length=12)
 
     def validate_ca_number(self, value):
         return validate_ca_number_format(value)
@@ -59,3 +59,16 @@ class ActionStatusResponseSerializer(serializers.Serializer):
     etr_target_time = serializers.DateTimeField(allow_null=True, required=False)
     etr_source = serializers.CharField(allow_null=True, required=False)
     pluem_etr_minutes = serializers.FloatField(allow_null=True, required=False)
+
+
+class ChatHistorySyncSerializer(serializers.Serializer):
+    session_id = serializers.CharField(max_length=255)
+    ca_number = serializers.CharField(
+        max_length=12, min_length=12, required=False, allow_blank=True, allow_null=True
+    )
+    chat_history = serializers.ListField(child=serializers.DictField(), default=list)
+
+    def validate_ca_number(self, value):
+        if not value:
+            return value
+        return validate_ca_number_format(value)

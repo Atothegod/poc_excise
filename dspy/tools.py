@@ -3,9 +3,11 @@ import os
 import contextvars
 import re
 from datetime import datetime
+from math import ceil
+from zoneinfo import ZoneInfo
 
 DJANGO_API_URL = os.getenv("DJANGO_API_URL", "http://backend:8000/api")
-CA_NUMBER_PATTERN = re.compile(r"^\d{11,12}$")
+CA_NUMBER_PATTERN = re.compile(r"^\d{12}$")
 latest_outage_by_session = {}
 
 current_session_id = contextvars.ContextVar("current_session_id", default="unknown")
@@ -22,14 +24,54 @@ def parse_iso_datetime(value):
     return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
 
 
-def remember_latest_outage(db_response):
+def current_authoritative_time():
+    value = current_time_stamp.get()
+    if value:
+        return parse_iso_datetime(value)
+    return datetime.now(ZoneInfo("Asia/Bangkok"))
+
+
+def format_duration_label(target_time, now=None):
+    if not target_time:
+        return None
+
+    now = now or current_authoritative_time()
+    remaining_minutes = ceil((target_time - now).total_seconds() / 60)
+    if remaining_minutes <= 0:
+        return "เลยกำหนดแล้ว"
+    if remaining_minutes < 60:
+        return f"ภายในประมาณ {remaining_minutes} นาที"
+
+    hours = remaining_minutes // 60
+    minutes = remaining_minutes % 60
+    if minutes:
+        return f"ภายในประมาณ {hours} ชั่วโมง {minutes} นาที"
+    return f"ภายในประมาณ {hours} ชั่วโมง"
+
+
+def format_time_with_countdown(value):
+    target_time = parse_iso_datetime(value)
+    if not target_time:
+        return None
+
+    bangkok_time = target_time.astimezone(ZoneInfo("Asia/Bangkok"))
+    duration_label = format_duration_label(target_time)
+    if duration_label:
+        return f"{bangkok_time.strftime('%H:%M น.')} ({duration_label})"
+    return bangkok_time.strftime("%H:%M น.")
+
+
+def remember_latest_outage(db_response, ca_number=None):
     session_id = current_session_id.get()
     if not session_id or session_id == "unknown":
         return
 
     latest_outage_by_session[session_id] = {
         "event_type": db_response.get("event_type"),
+        "ca_number": ca_number,
         "case_id": db_response.get("case_id"),
+        "lv_group_id": db_response.get("lv_group_id"),
+        "affected_ca_numbers": db_response.get("affected_ca_numbers"),
         "report_id": db_response.get("report_id"),
         "eta_target_time": db_response.get("eta_target_time"),
         "eta_formatted": db_response.get("eta_formatted"),
@@ -42,6 +84,77 @@ def remember_latest_outage(db_response):
 
 def get_latest_outage(session_id: str):
     return latest_outage_by_session.get(session_id)
+
+
+def restore_latest_outage(session_id: str, latest_outage: dict | None):
+    if not session_id or session_id == "unknown" or not latest_outage:
+        return
+    latest_outage_by_session[session_id] = latest_outage
+
+
+def fetch_session_context(session_id: str):
+    if not session_id or session_id == "unknown":
+        return None
+
+    try:
+        response = requests.get(
+            f"{DJANGO_API_URL}/reports/session-context/{session_id}/",
+            timeout=5,
+        )
+        response.raise_for_status()
+        data = response.json()
+        if data.get("status") == "success":
+            return data
+    except requests.exceptions.RequestException:
+        return None
+    return None
+
+
+def _normalize_dialog_history(history):
+    dialog = []
+    for item in history:
+        raw_role = str(item.get("role", "")).lower()
+        if "user" in raw_role:
+            role = "user"
+        elif "assistant" in raw_role or "agent" in raw_role or "system alert" in raw_role:
+            role = "agent"
+        else:
+            continue
+
+        message = item.get("message") or item.get("content") or ""
+        if not message:
+            continue
+
+        dialog.append(
+            {
+                "role": role,
+                "message": str(message),
+                "timestamp": item.get("timestamp"),
+                "event_type": item.get("event_type"),
+            }
+        )
+    return dialog
+
+
+def sync_chat_history_to_db(session_id: str, history: list):
+    if not session_id or session_id == "unknown":
+        return
+
+    latest_outage = latest_outage_by_session.get(session_id) or {}
+    payload = {
+        "session_id": session_id,
+        "ca_number": latest_outage.get("ca_number"),
+        "chat_history": _normalize_dialog_history(history),
+    }
+
+    try:
+        requests.post(
+            f"{DJANGO_API_URL}/reports/chat-history/",
+            json=payload,
+            timeout=5,
+        )
+    except requests.exceptions.RequestException:
+        pass
 
 
 def save_report_to_db(ca_number: str, pdpa_consent: bool):
@@ -65,19 +178,18 @@ def save_report_to_db(ca_number: str, pdpa_consent: bool):
     return None
 
 
-def _format_etr_label(etr, etr_source):
+def _format_etr_label(etr, etr_source=None):
     if not etr:
         return None
-    if etr_source == "pluem_model":
-        return f"ETR จากโมเดลพี่ปลื้ม: {etr}"
-    return f"ETR จาก OMS: {etr}"
+    formatted_etr = format_time_with_countdown(etr)
+    return f"ETR: {formatted_etr or etr}"
 
 
 def Check_Outage_Tool(ca_number: str, pdpa_consent: bool = False):
     ca_number = str(ca_number).strip()
 
     if not is_valid_ca_number(ca_number):
-        return "[CA_INVALID] หมายเลขผู้ใช้ไฟต้องเป็นตัวเลข 11 หรือ 12 หลักเท่านั้น ห้ามมีตัวอักษรหรืออักขระอื่นปน"
+        return "[CA_INVALID] หมายเลขผู้ใช้ไฟต้องเป็นตัวเลข 12 หลักเท่านั้น ห้ามมีตัวอักษรหรืออักขระอื่นปน"
 
     if not pdpa_consent:
         return "[CONSENT_REQUIRED] ต้องขออนุญาตลูกค้าก่อนใช้ Check_Outage_Tool เพื่อตรวจสอบข้อมูลไฟดับจากหมายเลขผู้ใช้ไฟ"
@@ -89,11 +201,10 @@ def Check_Outage_Tool(ca_number: str, pdpa_consent: bool = False):
 
     event_type = db_response.get("event_type")
     eta = db_response.get("eta_target_time")
-    eta_formatted = db_response.get("eta_formatted")
     fastest_branch = db_response.get("fastest_branch")
     etr = db_response.get("etr_target_time") or db_response.get("oms_etr")
     etr_label = _format_etr_label(etr, db_response.get("etr_source"))
-    remember_latest_outage(db_response)
+    remember_latest_outage(db_response, ca_number=ca_number)
 
     # เคส 1: API ขัดข้องติดต่อกันจนครบกำหนด
     if event_type == "api_error":
@@ -110,12 +221,12 @@ def Check_Outage_Tool(ca_number: str, pdpa_consent: bool = False):
         if etr_label:
             return f"[เหตุวงกว้าง] แจ้ง {etr_label} แก่ลูกค้า"
         else:
-            return "[เหตุวงกว้าง] กำลังเชื่อมต่อกับโมเดล ETR พี่ปลื้มครับ"
+            return "[เหตุวงกว้าง] ยังไม่มี ETR ยืนยันในตอนนี้ ระบบกำลังประเมินเวลาไฟกลับมาใช้งานครับ"
 
     # เคส 3: แจ้งครั้งแรก (New Event) หรือ เคสเดี่ยว -> บังคับแจ้ง ETA ตาม Rule 7
     # และตรวจสอบ ETR เพิ่มเติม
     elif event_type == "new_event":
-        eta_label = eta_formatted or eta
+        eta_label = format_time_with_countdown(eta) or db_response.get("eta_formatted") or eta
         branch_label = f" สาขาที่ประเมินว่าไปถึงเร็วที่สุดคือ {fastest_branch}" if fastest_branch else ""
         if etr_label:
             return (
@@ -139,7 +250,7 @@ def Fast_Track_Tool(ca_number: str):
     """
     ca_number = str(ca_number).strip()
     if not is_valid_ca_number(ca_number):
-        return "[CA_INVALID] หมายเลขผู้ใช้ไฟต้องเป็นตัวเลข 11 หรือ 12 หลักเท่านั้น ห้ามมีตัวอักษรหรืออักขระอื่นปน"
+        return "[CA_INVALID] หมายเลขผู้ใช้ไฟต้องเป็นตัวเลข 12 หลักเท่านั้น ห้ามมีตัวอักษรหรืออักขระอื่นปน"
 
     endpoint = f"{DJANGO_API_URL}/reports/fast-track/"
     payload = {"ca_number": ca_number}

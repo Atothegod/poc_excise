@@ -1,4 +1,5 @@
 from django.db import models
+from django.utils import timezone
 import uuid
 
 
@@ -11,8 +12,20 @@ class OutageCase(models.Model):
     ]
 
     case_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    lv_group_id = models.PositiveIntegerField(
+        unique=True,
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="เลขกลุ่มเคสแบบรัน 1-n สำหรับ filter/readability",
+    )
     title = models.CharField(max_length=255, default="ไฟดับบริเวณใกล้เคียง")
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="reported")
+    affected_ca_numbers = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Snapshot รายการ CA ที่ผูกกับเคสนี้",
+    )
     latitude = models.FloatField()
     longitude = models.FloatField()
 
@@ -61,6 +74,17 @@ class OutageCase(models.Model):
     def __str__(self):
         return f"Case {self.case_id} - [{self.get_status_display()}]"
 
+    def save(self, *args, **kwargs):
+        if self.lv_group_id is None:
+            latest_id = (
+                OutageCase.objects.exclude(lv_group_id__isnull=True).aggregate(
+                    models.Max("lv_group_id")
+                )["lv_group_id__max"]
+                or 0
+            )
+            self.lv_group_id = latest_id + 1
+        super().save(*args, **kwargs)
+
     def effective_etr_time(self):
         return self.oms_etr or self.pluem_etr_target_time
 
@@ -70,6 +94,27 @@ class OutageCase(models.Model):
         if self.pluem_etr_target_time:
             return "pluem_model"
         return None
+
+    def get_affected_ca_numbers(self):
+        if not self.pk:
+            return []
+
+        ca_numbers = (
+            self.affected_customers.exclude(ca_number__isnull=True)
+            .exclude(ca_number="")
+            .values_list("ca_number", flat=True)
+            .distinct()
+        )
+        return sorted(ca_numbers)
+
+    def sync_affected_ca_numbers(self):
+        ca_numbers = self.get_affected_ca_numbers()
+        if self.affected_ca_numbers != ca_numbers:
+            self.affected_ca_numbers = ca_numbers
+            OutageCase.objects.filter(pk=self.pk).update(
+                affected_ca_numbers=ca_numbers
+            )
+        return ca_numbers
 
 
 class CustomerLocation(models.Model):
@@ -114,8 +159,8 @@ class CustomerReport(models.Model):
         related_name="affected_customers",
     )
 
-    chat_history = models.TextField(
-        default="[]", help_text="เก็บประวัติสนทนาล่าสุดของ Session นี้"
+    chat_history = models.JSONField(
+        default=list, blank=True, help_text="เก็บประวัติสนทนาแบบ dialog"
     )
     needs_eta = models.BooleanField(default=False, help_text="ต้องการทราบเวลาช่างมาถึง")
     needs_etr = models.BooleanField(default=False, help_text="ต้องการทราบเวลาไฟมา")
@@ -141,4 +186,30 @@ class CustomerReport(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
-        return f"Report {self.ca_number} (Session: {self.session_id[:8]}...)"
+        session_label = self.session_id[:8] if self.session_id else "no-session"
+        return f"Report {self.ca_number} (Session: {session_label}...)"
+
+
+class OutageRestorationLog(models.Model):
+    case = models.OneToOneField(
+        OutageCase,
+        on_delete=models.CASCADE,
+        related_name="restoration_log",
+    )
+    lv_group_id = models.PositiveIntegerField(null=True, blank=True, db_index=True)
+    affected_ca_numbers = models.JSONField(default=list, blank=True)
+    restored_at = models.DateTimeField(default=timezone.now)
+    eta_target_time_at_restore = models.DateTimeField(null=True, blank=True)
+    oms_etr_at_restore = models.DateTimeField(null=True, blank=True)
+    pluem_etr_target_time_at_restore = models.DateTimeField(null=True, blank=True)
+    effective_etr_at_restore = models.DateTimeField(null=True, blank=True)
+    etr_source = models.CharField(max_length=50, blank=True)
+    etr_delta_minutes = models.FloatField(null=True, blank=True)
+    case_status_at_restore = models.CharField(max_length=20, default="restored")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-restored_at"]
+
+    def __str__(self):
+        return f"Restoration log LV {self.lv_group_id or '-'} at {self.restored_at}"
