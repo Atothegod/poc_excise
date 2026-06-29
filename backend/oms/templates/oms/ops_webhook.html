@@ -17,6 +17,7 @@
             --green: #15803d;
             --red: #b42318;
             --amber: #b54708;
+            --amber-dark: #93370d;
         }
 
         * {
@@ -88,7 +89,7 @@
 
         .toolbar {
             display: grid;
-            grid-template-columns: minmax(220px, 1fr) 170px auto auto;
+            grid-template-columns: minmax(220px, 1fr) 170px auto auto auto;
             gap: 10px;
             align-items: center;
             padding: 14px 22px;
@@ -137,7 +138,7 @@
         table {
             width: 100%;
             border-collapse: collapse;
-            min-width: 940px;
+            min-width: 1120px;
             table-layout: fixed;
         }
 
@@ -341,6 +342,15 @@
             color: #fff;
         }
 
+        .btn.warning {
+            background: var(--amber);
+            color: #fff;
+        }
+
+        .btn.warning:hover {
+            background: var(--amber-dark);
+        }
+
         .btn.danger {
             background: var(--red);
             color: #fff;
@@ -458,7 +468,7 @@
         <header class="topbar">
             <div class="brand">
                 <h1>OMS Webhook Console</h1>
-                <p>ETR และสถานะจ่ายไฟคืน</p>
+                <p>ETA, ETR และสถานะจ่ายไฟคืน</p>
             </div>
             <div class="top-actions">
                 <a class="btn secondary" href="/chat/">
@@ -491,6 +501,14 @@
                 <input id="includeRestored" type="checkbox">
                 <span>รวม restored</span>
             </label>
+            <button class="btn secondary" type="button" id="exportCsvBtn">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                    <path d="M7 10l5 5 5-5"/>
+                    <path d="M12 15V3"/>
+                </svg>
+                Export
+            </button>
             <button class="btn secondary" type="button" id="clearFilterBtn">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <path d="M18 6 6 18"/>
@@ -526,13 +544,14 @@
                                 <th>Case</th>
                                 <th class="status-cell">Status</th>
                                 <th class="ca-cell">Affected CA</th>
+                                <th class="time-cell">ETA</th>
                                 <th class="time-cell">ETR</th>
                                 <th class="time-cell">Created</th>
                             </tr>
                         </thead>
                         <tbody id="caseTableBody">
                             <tr>
-                                <td colspan="7" class="empty">Loading...</td>
+                                <td colspan="8" class="empty">Loading...</td>
                             </tr>
                         </tbody>
                     </table>
@@ -597,6 +616,17 @@
                 </section>
 
                 <section class="tool-panel">
+                    <h2>ปรับ ETA</h2>
+                    <button class="btn warning full" type="button" id="setEtaNowBtn">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="12" cy="12" r="9"/>
+                            <path d="M12 7v5l3 2"/>
+                        </svg>
+                        ตั้ง ETA เป็นตอนนี้
+                    </button>
+                </section>
+
+                <section class="tool-panel">
                     <h2>จ่ายไฟคืน</h2>
                     <button class="btn success full" type="button" id="restoreBtn">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -617,6 +647,7 @@
     <script>
         const casesUrl = "{{ cases_url|escapejs }}";
         const actionUrl = "{{ action_url|escapejs }}";
+        const exportUrl = "{{ export_url|escapejs }}";
 
         const state = {
             cases: [],
@@ -629,6 +660,7 @@
             searchInput: document.getElementById("searchInput"),
             statusFilter: document.getElementById("statusFilter"),
             includeRestored: document.getElementById("includeRestored"),
+            exportCsvBtn: document.getElementById("exportCsvBtn"),
             clearFilterBtn: document.getElementById("clearFilterBtn"),
             reloadBtn: document.getElementById("reloadBtn"),
             selectFilteredBtn: document.getElementById("selectFilteredBtn"),
@@ -643,6 +675,7 @@
             etrMinutes: document.getElementById("etrMinutes"),
             etrAt: document.getElementById("etrAt"),
             sendEtrBtn: document.getElementById("sendEtrBtn"),
+            setEtaNowBtn: document.getElementById("setEtaNowBtn"),
             restoreBtn: document.getElementById("restoreBtn"),
             resultBox: document.getElementById("resultBox"),
         };
@@ -753,14 +786,16 @@
             const targetCount = targetCases().length;
             els.targetPreview.textContent = `${targetCount} cases`;
             els.sendEtrBtn.disabled = targetCount === 0 || state.loading;
+            els.setEtaNowBtn.disabled = targetCount === 0 || state.loading;
             els.restoreBtn.disabled = targetCount === 0 || state.loading;
+            els.exportCsvBtn.disabled = state.filteredCases.length === 0 || state.loading;
         }
 
         function renderCases() {
             filterCases();
 
             if (!state.filteredCases.length) {
-                els.caseTableBody.innerHTML = '<tr><td colspan="7" class="empty">No matching cases</td></tr>';
+                els.caseTableBody.innerHTML = '<tr><td colspan="8" class="empty">No matching cases</td></tr>';
                 updateSummary();
                 return;
             }
@@ -781,6 +816,7 @@
                             <span class="${statusClass(caseItem.status)}">${escapeHtml(caseItem.status_display)}</span>
                         </td>
                         <td class="ca-cell">${escapeHtml(formatCaList(caseItem))}</td>
+                        <td class="time-cell">${escapeHtml(formatDateTime(caseItem.eta_target_time))}</td>
                         <td class="time-cell">${escapeHtml(formatDateTime(caseItem.effective_etr_time))}</td>
                         <td class="time-cell">${escapeHtml(formatDateTime(caseItem.created_at))}</td>
                     </tr>
@@ -854,6 +890,13 @@
                 }
             }
 
+            if (action === "set_eta_now") {
+                const ok = window.confirm(`ตั้ง ETA ของ ${targetCount} เคสเป็นเวลาปัจจุบัน?`);
+                if (!ok) {
+                    return;
+                }
+            }
+
             state.loading = true;
             updateSummary();
             setResult("Sending...");
@@ -880,6 +923,23 @@
                 state.loading = false;
                 updateSummary();
             }
+        }
+
+        function buildExportQueryParams() {
+            const params = new URLSearchParams({
+                include_restored: els.includeRestored.checked ? "true" : "false",
+                status: els.statusFilter.value,
+            });
+            const searchTerm = els.searchInput.value.trim();
+            if (searchTerm) {
+                params.set("search", searchTerm);
+            }
+            return params;
+        }
+
+        function exportCsv() {
+            const params = buildExportQueryParams();
+            window.location.href = `${exportUrl}?${params.toString()}`;
         }
 
         function setDefaultDatetime() {
@@ -909,6 +969,7 @@
         els.searchInput.addEventListener("input", renderCases);
         els.statusFilter.addEventListener("change", renderCases);
         els.includeRestored.addEventListener("change", loadCases);
+        els.exportCsvBtn.addEventListener("click", exportCsv);
         els.reloadBtn.addEventListener("click", loadCases);
         els.clearFilterBtn.addEventListener("click", () => {
             els.searchInput.value = "";
@@ -942,6 +1003,7 @@
             });
         });
         els.sendEtrBtn.addEventListener("click", () => runAction("set_etr"));
+        els.setEtaNowBtn.addEventListener("click", () => runAction("set_eta_now"));
         els.restoreBtn.addEventListener("click", () => runAction("restore"));
 
         setDefaultDatetime();

@@ -1,11 +1,29 @@
 from django.contrib import admin
 from django.utils import timezone
 from django.utils.html import format_html, format_html_join
+from .csv_exports import csv_response, write_csv
 from .models import CustomerLocation, OutageCase, CustomerReport, OutageRestorationLog
 
 
+class CsvExportAdminMixin:
+    actions = ("export_selected_csv",)
+    csv_fields = ()
+
+    def get_csv_fields(self):
+        if self.csv_fields:
+            return self.csv_fields
+        return [field.name for field in self.model._meta.fields]
+
+    @admin.action(description="Export selected rows to CSV")
+    def export_selected_csv(self, request, queryset):
+        fields = self.get_csv_fields()
+        response = csv_response(self.model._meta.model_name)
+        rows = ([getattr(obj, field) for field in fields] for obj in queryset)
+        return write_csv(response, fields, rows)
+
+
 @admin.register(OutageCase)
-class OutageCaseAdmin(admin.ModelAdmin):
+class OutageCaseAdmin(CsvExportAdminMixin, admin.ModelAdmin):
     # นำ countdown_eta และ countdown_etr มาแสดงคู่กันในหน้าตาราง
     list_display = (
         "lv_group_id",
@@ -21,6 +39,26 @@ class OutageCaseAdmin(admin.ModelAdmin):
     )
     list_filter = ("status", "lv_group_id")
     search_fields = ("case_id", "title", "affected_customers__ca_number")
+    csv_fields = (
+        "case_id",
+        "lv_group_id",
+        "title",
+        "status",
+        "affected_ca_numbers",
+        "latitude",
+        "longitude",
+        "eta_target_time",
+        "oms_etr",
+        "assessment_fastest_branch",
+        "assessment_eta_formatted",
+        "assessment_eta_minutes",
+        "pluem_etr_minutes",
+        "pluem_etr_target_time",
+        "celery_eta_task_id",
+        "celery_etr_task_id",
+        "created_at",
+        "updated_at",
+    )
 
     def affected_CA(self, obj):
         ca_numbers = obj.affected_ca_numbers or []
@@ -110,7 +148,7 @@ class OutageCaseAdmin(admin.ModelAdmin):
 
 
 @admin.register(CustomerLocation)
-class CustomerLocationAdmin(admin.ModelAdmin):
+class CustomerLocationAdmin(CsvExportAdminMixin, admin.ModelAdmin):
     list_display = (
         "ca_number",
         "fullname",
@@ -124,10 +162,28 @@ class CustomerLocationAdmin(admin.ModelAdmin):
     search_fields = ("ca_number", "fullname", "phone_number", "address")
     list_filter = ("pea_area", "user_type", "report_channel", "is_ready")
     readonly_fields = ("imported_at",)
+    csv_fields = (
+        "id",
+        "timestamp",
+        "prefix",
+        "fullname",
+        "address",
+        "ca_number",
+        "phone_number",
+        "pea_area",
+        "user_type",
+        "outage_freq_yearly",
+        "report_channel",
+        "is_ready",
+        "latitude",
+        "longitude",
+        "eta_result",
+        "imported_at",
+    )
 
 
 @admin.register(CustomerReport)
-class CustomerReportAdmin(admin.ModelAdmin):
+class CustomerReportAdmin(CsvExportAdminMixin, admin.ModelAdmin):
     list_display = (
         "ca_number",
         "customer_name",
@@ -140,6 +196,25 @@ class CustomerReportAdmin(admin.ModelAdmin):
     )
     search_fields = ("ca_number", "customer_name", "session_id")
     readonly_fields = ("chat_dialog",)
+    csv_fields = (
+        "id",
+        "session_id",
+        "ca_number",
+        "customer_name",
+        "latitude",
+        "longitude",
+        "related_case_id",
+        "chat_history",
+        "needs_eta",
+        "needs_etr",
+        "pdpa_consent",
+        "pdpa_consent_at",
+        "is_resolved",
+        "fast_track_quota",
+        "time_stamp",
+        "created_at",
+        "updated_at",
+    )
 
     def chat_dialog_preview(self, obj):
         history = obj.chat_history or []
@@ -178,7 +253,7 @@ class CustomerReportAdmin(admin.ModelAdmin):
 
 
 @admin.register(OutageRestorationLog)
-class OutageRestorationLogAdmin(admin.ModelAdmin):
+class OutageRestorationLogAdmin(CsvExportAdminMixin, admin.ModelAdmin):
     list_display = (
         "lv_group_id",
         "case",
@@ -192,6 +267,21 @@ class OutageRestorationLogAdmin(admin.ModelAdmin):
     search_fields = ("case__case_id",)
     readonly_fields = (
         "case",
+        "lv_group_id",
+        "affected_ca_numbers",
+        "restored_at",
+        "eta_target_time_at_restore",
+        "oms_etr_at_restore",
+        "pluem_etr_target_time_at_restore",
+        "effective_etr_at_restore",
+        "etr_source",
+        "etr_delta_minutes",
+        "case_status_at_restore",
+        "created_at",
+    )
+    csv_fields = (
+        "id",
+        "case_id",
         "lv_group_id",
         "affected_ca_numbers",
         "restored_at",

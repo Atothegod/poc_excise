@@ -1,12 +1,22 @@
+import csv
+import io
 import math
 from datetime import timedelta
 from unittest.mock import patch
 
+from django.contrib.admin.sites import AdminSite
 from django.test import TestCase
+from django.test.client import RequestFactory
 from django.utils.dateparse import parse_datetime
 from django.utils import timezone
 from rest_framework.test import APIClient
 
+from .admin import (
+    CustomerLocationAdmin,
+    CustomerReportAdmin,
+    OutageCaseAdmin,
+    OutageRestorationLogAdmin,
+)
 from .models import CustomerLocation, CustomerReport, OutageCase, OutageRestorationLog
 from .tasks import check_eta_timeout
 from .views_api import calculate_distance
@@ -522,6 +532,49 @@ class OpsWebhookConsoleTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "OMS Webhook Console")
+        self.assertContains(response, "Export")
+
+    def test_ops_cases_export_csv_uses_current_filters(self):
+        matching_case = OutageCase.objects.create(
+            title="Matching CSV case",
+            affected_ca_numbers=["123456789012"],
+            latitude=9.2917,
+            longitude=100.926296,
+        )
+        OutageCase.objects.create(
+            title="Other CSV case",
+            affected_ca_numbers=["999999999999"],
+            latitude=9.2918,
+            longitude=100.926396,
+        )
+        OutageCase.objects.create(
+            title="Restored CSV case",
+            status="restored",
+            affected_ca_numbers=["123456789012"],
+            latitude=9.2919,
+            longitude=100.926496,
+        )
+
+        response = self.client.get(
+            "/ops/cases/export/",
+            {
+                "include_restored": "false",
+                "status": "reported",
+                "search": "123456789012",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "text/csv; charset=utf-8")
+        self.assertIn("ops-cases-", response["Content-Disposition"])
+
+        content = response.content.decode("utf-8-sig")
+        rows = list(csv.reader(io.StringIO(content)))
+        self.assertEqual(rows[0][:4], ["LV", "Case ID", "Title", "Status"])
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[1][1], str(matching_case.case_id))
+        self.assertEqual(rows[1][2], "Matching CSV case")
+        self.assertIn("123456789012", rows[1][5])
 
     @patch("oms.signals.send_proactive_alert.delay")
     def test_ops_action_sets_etr_for_selected_cases(self, mock_send_alert):
@@ -560,6 +613,53 @@ class OpsWebhookConsoleTests(TestCase):
         self.assertIsNone(untouched_case.oms_etr)
         mock_send_alert.assert_called_once()
 
+    @patch("oms.signals.check_eta_timeout.apply_async")
+    def test_ops_action_sets_eta_to_now_for_selected_cases(self, mock_apply_async):
+        mock_apply_async.return_value.id = "eta-now-task-id"
+        selected_case = OutageCase.objects.create(
+            title="Selected ETA case",
+            latitude=9.2917,
+            longitude=100.926296,
+            eta_target_time=timezone.now() + timedelta(minutes=30),
+        )
+        untouched_eta = timezone.now() + timedelta(minutes=45)
+        untouched_case = OutageCase.objects.create(
+            title="Untouched ETA case",
+            latitude=9.2918,
+            longitude=100.926396,
+            eta_target_time=untouched_eta,
+        )
+        report = CustomerReport.objects.create(
+            session_id="session-ops-eta",
+            ca_number="123456789012",
+            related_case=selected_case,
+        )
+
+        before = timezone.now()
+        response = self.client.post(
+            "/ops/cases/action/",
+            {
+                "action": "set_eta_now",
+                "target_mode": "selected",
+                "case_ids": [str(selected_case.case_id)],
+            },
+            format="json",
+        )
+        after = timezone.now()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["updated_count"], 1)
+        selected_case.refresh_from_db()
+        untouched_case.refresh_from_db()
+        self.assertGreaterEqual(selected_case.eta_target_time, before)
+        self.assertLessEqual(selected_case.eta_target_time, after)
+        self.assertEqual(untouched_case.eta_target_time, untouched_eta)
+        self.assertEqual(selected_case.celery_eta_task_id, "eta-now-task-id")
+        mock_apply_async.assert_called_once_with(
+            args=[selected_case.case_id, report.id],
+            eta=selected_case.eta_target_time,
+        )
+
     def test_ops_action_restores_all_active_cases(self):
         active_case = OutageCase.objects.create(
             title="Active restore case",
@@ -585,6 +685,45 @@ class OpsWebhookConsoleTests(TestCase):
         already_restored_case.refresh_from_db()
         self.assertEqual(active_case.status, "restored")
         self.assertEqual(already_restored_case.status, "restored")
+
+
+class CsvExportAdminTests(TestCase):
+    def test_registered_admin_tables_have_csv_export_action(self):
+        admin_site = AdminSite()
+        admins = [
+            OutageCaseAdmin(OutageCase, admin_site),
+            CustomerLocationAdmin(CustomerLocation, admin_site),
+            CustomerReportAdmin(CustomerReport, admin_site),
+            OutageRestorationLogAdmin(OutageRestorationLog, admin_site),
+        ]
+
+        for model_admin in admins:
+            self.assertIn("export_selected_csv", model_admin.actions)
+
+    def test_admin_export_selected_csv_returns_model_rows(self):
+        location = CustomerLocation.objects.create(
+            ca_number="123456789012",
+            fullname="CSV User",
+            latitude=9.2917,
+            longitude=100.926296,
+        )
+        model_admin = CustomerLocationAdmin(CustomerLocation, AdminSite())
+        request = RequestFactory().get("/admin/oms/customerlocation/")
+
+        response = model_admin.export_selected_csv(
+            request,
+            CustomerLocation.objects.filter(id=location.id),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "text/csv; charset=utf-8")
+        self.assertIn("customerlocation-", response["Content-Disposition"])
+
+        content = response.content.decode("utf-8-sig")
+        rows = list(csv.reader(io.StringIO(content)))
+        self.assertEqual(rows[0][:6], ["id", "timestamp", "prefix", "fullname", "address", "ca_number"])
+        self.assertEqual(rows[1][3], "CSV User")
+        self.assertEqual(rows[1][5], "123456789012")
 
 
 class DistanceLinkingTests(TestCase):

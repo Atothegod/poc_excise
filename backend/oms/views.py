@@ -12,6 +12,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 import requests
 
+from .csv_exports import csv_response, write_csv
 from .models import OutageCase
 
 
@@ -60,6 +61,7 @@ def ops_webhook_page(request):
         {
             "cases_url": reverse("ops_cases_api"),
             "action_url": reverse("ops_cases_action_api"),
+            "export_url": reverse("ops_cases_export_csv"),
         },
     )
 
@@ -87,14 +89,80 @@ def _case_payload(case):
     }
 
 
-@require_GET
-def ops_cases_api(request):
+OPS_CASE_CSV_COLUMNS = (
+    ("lv_group_id", "LV"),
+    ("case_id", "Case ID"),
+    ("title", "Title"),
+    ("status", "Status"),
+    ("status_display", "Status Label"),
+    ("affected_ca_numbers", "Affected CA"),
+    ("latitude", "Latitude"),
+    ("longitude", "Longitude"),
+    ("eta_target_time", "ETA"),
+    ("oms_etr", "OMS ETR"),
+    ("effective_etr_time", "Effective ETR"),
+    ("effective_etr_source", "ETR Source"),
+    ("created_at", "Created"),
+    ("updated_at", "Updated"),
+)
+
+
+def _case_queryset_for_request(request):
     include_restored = request.GET.get("include_restored") == "true"
+    status = (request.GET.get("status") or "").strip()
     cases = OutageCase.objects.all().order_by("-created_at")
     if not include_restored:
         cases = cases.exclude(status="restored")
 
-    return JsonResponse({"cases": [_case_payload(case) for case in cases[:500]]})
+    if status == "active":
+        cases = cases.exclude(status="restored")
+    elif status and status != "all":
+        valid_statuses = {choice[0] for choice in OutageCase.STATUS_CHOICES}
+        if status in valid_statuses:
+            cases = cases.filter(status=status)
+    return cases
+
+
+def _case_matches_search(case, search_term):
+    if not search_term:
+        return True
+    haystack = [
+        case.lv_group_id,
+        case.case_id,
+        case.title,
+        case.get_status_display(),
+        *(case.affected_ca_numbers or []),
+    ]
+    return search_term in " ".join(str(value) for value in haystack).lower()
+
+
+def _filtered_cases_for_request(request, limit=None):
+    search_term = (request.GET.get("search") or "").strip().lower()
+    cases = _case_queryset_for_request(request)
+    if search_term:
+        matched_cases = [
+            case for case in cases if _case_matches_search(case, search_term)
+        ]
+        return matched_cases[:limit] if limit is not None else matched_cases
+    return cases[:limit] if limit is not None else cases
+
+
+@require_GET
+def ops_cases_api(request):
+    cases = _filtered_cases_for_request(request, limit=500)
+
+    return JsonResponse({"cases": [_case_payload(case) for case in cases]})
+
+
+@require_GET
+def ops_cases_export_csv(request):
+    response = csv_response("ops-cases")
+    headers = [label for _, label in OPS_CASE_CSV_COLUMNS]
+    rows = (
+        [_case_payload(case)[key] for key, _ in OPS_CASE_CSV_COLUMNS]
+        for case in _filtered_cases_for_request(request)
+    )
+    return write_csv(response, headers, rows)
 
 
 def _load_json_body(request):
@@ -190,6 +258,29 @@ def ops_cases_action_api(request):
                 "status": "success",
                 "action": action,
                 "etr_target_time": _isoformat(etr_target),
+                "updated_count": len(updated_cases),
+                "skipped_count": len(skipped_cases),
+                "updated_cases": updated_cases,
+                "skipped_cases": skipped_cases,
+            }
+        )
+
+    if action == "set_eta_now":
+        eta_target = timezone.now()
+
+        for case in cases:
+            if case.status == "restored":
+                skipped_cases.append(_action_case_payload(case))
+                continue
+            case.eta_target_time = eta_target
+            case.save(update_fields=["eta_target_time", "updated_at"])
+            updated_cases.append(_action_case_payload(case))
+
+        return JsonResponse(
+            {
+                "status": "success",
+                "action": action,
+                "eta_target_time": _isoformat(eta_target),
                 "updated_count": len(updated_cases),
                 "skipped_count": len(skipped_cases),
                 "updated_cases": updated_cases,
