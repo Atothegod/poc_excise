@@ -7,6 +7,8 @@ urlpatterns = [
     path("chat/", views.chat_page, name="chat"),
 
     path("ops/webhook/", views.ops_webhook_page, name="ops_webhook"),
+    path("ops/map/", views.ops_map_page, name="ops_map"),
+    path("ops/map/data/", views.ops_map_data_api, name="ops_map_data_api"),
     path("ops/cases/", views.ops_cases_api, name="ops_cases_api"),
     path("ops/cases/export/", views.ops_cases_export_csv, name="ops_cases_export_csv"),
     path("ops/cases/action/", views.ops_cases_action_api, name="ops_cases_action_api"),

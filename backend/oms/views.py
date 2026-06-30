@@ -3,17 +3,18 @@ from datetime import timedelta
 from uuid import UUID
 
 from django.conf import settings
+from django.db.models import Q
 from django.http import JsonResponse
 from django.shortcuts import render
 from django.urls import reverse
 from django.utils import timezone
-from django.utils.dateparse import parse_datetime
+from django.utils.dateparse import parse_date, parse_datetime
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 import requests
 
 from .csv_exports import csv_response, write_csv
-from .models import OutageCase
+from .models import CustomerLocation, CustomerReport, OutageCase
 
 
 def login_page(request):
@@ -66,6 +67,17 @@ def ops_webhook_page(request):
             "cases_url": reverse("ops_cases_api"),
             "action_url": reverse("ops_cases_action_api"),
             "export_url": reverse("ops_cases_export_csv"),
+        },
+    )
+
+
+def ops_map_page(request):
+    return render(
+        request,
+        "oms/ops_map.html",
+        {
+            "map_data_url": reverse("ops_map_data_api"),
+            "ops_webhook_url": reverse("ops_webhook"),
         },
     )
 
@@ -160,6 +172,245 @@ def _filtered_cases_for_request(request, limit=None):
         ]
         return matched_cases[:limit] if limit is not None else matched_cases
     return cases[:limit] if limit is not None else cases
+
+
+MAP_STATUS_META = {
+    "reported": {"label": "ได้รับแจ้งเหตุ", "color": "#dc2626"},
+    "investigating": {"label": "กำลังตรวจสอบ", "color": "#f59e0b"},
+    "repairing": {"label": "กำลังซ่อมแซม", "color": "#2563eb"},
+    "restored": {"label": "จ่ายไฟคืนแล้ว", "color": "#16a34a"},
+    "no_case": {"label": "ไม่มีเคส", "color": "#94a3b8"},
+}
+
+
+def _bool_param(request, name, default=False):
+    value = request.GET.get(name)
+    if value is None:
+        return default
+    return str(value).lower() in {"1", "true", "yes", "on"}
+
+
+def _map_case_queryset_for_request(request):
+    status = (request.GET.get("status") or "active").strip()
+    case_type = (request.GET.get("case_type") or "all").strip()
+    created_from = parse_date((request.GET.get("created_from") or "").strip())
+    created_to = parse_date((request.GET.get("created_to") or "").strip())
+
+    cases = OutageCase.objects.all().order_by("-created_at")
+
+    if status == "active":
+        cases = cases.exclude(status="restored")
+    elif status and status != "all":
+        valid_statuses = {choice[0] for choice in OutageCase.STATUS_CHOICES}
+        if status in valid_statuses:
+            cases = cases.filter(status=status)
+
+    if case_type and case_type != "all":
+        valid_case_types = {choice[0] for choice in OutageCase.CASE_TYPE_CHOICES}
+        if case_type in valid_case_types:
+            cases = cases.filter(case_type=case_type)
+
+    if created_from:
+        cases = cases.filter(created_at__date__gte=created_from)
+    if created_to:
+        cases = cases.filter(created_at__date__lte=created_to)
+
+    return list(cases)
+
+
+def _case_ca_numbers(case, report_ca_numbers_by_case):
+    ca_numbers = set(case.affected_ca_numbers or [])
+    ca_numbers.update(report_ca_numbers_by_case.get(case.case_id, set()))
+    return sorted(ca for ca in ca_numbers if ca)
+
+
+def _report_sort_key(report):
+    updated_at = report.updated_at or timezone.now()
+    return (report.related_case.status == "restored", -updated_at.timestamp())
+
+
+def _case_context_by_ca(cases):
+    if not cases:
+        return {}, {}
+
+    reports = list(
+        CustomerReport.objects.select_related("related_case")
+        .filter(related_case__in=cases)
+        .exclude(ca_number="")
+    )
+    reports.sort(key=_report_sort_key)
+
+    report_ca_numbers_by_case = {}
+    case_by_ca = {}
+    for report in reports:
+        report_ca_numbers_by_case.setdefault(report.related_case_id, set()).add(
+            report.ca_number
+        )
+        case_by_ca.setdefault(report.ca_number, report.related_case)
+
+    for case in cases:
+        for ca_number in _case_ca_numbers(case, report_ca_numbers_by_case):
+            case_by_ca.setdefault(ca_number, case)
+
+    return case_by_ca, report_ca_numbers_by_case
+
+
+def _map_case_matches_search(case, search_term, case_ca_numbers):
+    if not search_term:
+        return True
+
+    haystack = [
+        case.lv_group_id,
+        case.case_id,
+        case.title,
+        case.case_type,
+        case.get_case_type_display(),
+        case.status,
+        case.get_status_display(),
+        *case_ca_numbers,
+    ]
+    return search_term in " ".join(str(value) for value in haystack).lower()
+
+
+def _map_search_ca_numbers(search_term, cases, report_ca_numbers_by_case):
+    if not search_term:
+        return None
+
+    customer_matches = CustomerLocation.objects.filter(
+        Q(ca_number__icontains=search_term)
+        | Q(fullname__icontains=search_term)
+        | Q(pea_area__icontains=search_term)
+        | Q(address__icontains=search_term)
+    ).values_list("ca_number", flat=True)
+    ca_numbers = set(customer_matches)
+
+    for case in cases:
+        case_ca_numbers = _case_ca_numbers(case, report_ca_numbers_by_case)
+        if _map_case_matches_search(case, search_term, case_ca_numbers):
+            ca_numbers.update(case_ca_numbers)
+
+    return ca_numbers
+
+
+def _map_case_payload(case):
+    if not case:
+        return None
+
+    return {
+        "case_id": str(case.case_id),
+        "lv_group_id": case.lv_group_id,
+        "title": case.title,
+        "case_type": case.case_type,
+        "case_type_display": case.get_case_type_display(),
+        "status": case.status,
+        "status_display": case.get_status_display(),
+        "affected_count": len(case.affected_ca_numbers or []),
+        "eta_target_time": _isoformat(case.eta_target_time),
+        "effective_etr_time": _isoformat(case.effective_etr_time()),
+        "sla_target_time": _isoformat(case.sla_target_time),
+        "created_at": _isoformat(case.created_at),
+        "updated_at": _isoformat(case.updated_at),
+    }
+
+
+def _map_marker_payload(location, case):
+    marker_status = case.status if case else "no_case"
+    status_meta = MAP_STATUS_META.get(marker_status, MAP_STATUS_META["no_case"])
+
+    return {
+        "ca_number": location.ca_number,
+        "customer_name": location.fullname,
+        "address": location.address,
+        "pea_area": location.pea_area,
+        "user_type": location.user_type,
+        "outage_freq_yearly": location.outage_freq_yearly,
+        "is_ready": location.is_ready,
+        "latitude": location.latitude,
+        "longitude": location.longitude,
+        "marker": {
+            "status": marker_status,
+            "label": status_meta["label"],
+            "color": status_meta["color"],
+            "is_fast_track": bool(case and case.case_type == "fast_track"),
+        },
+        "case": _map_case_payload(case),
+    }
+
+
+def _map_summary(markers):
+    case_ids = {
+        marker["case"]["case_id"]
+        for marker in markers
+        if marker.get("case")
+    }
+    active_case_ids = {
+        marker["case"]["case_id"]
+        for marker in markers
+        if marker.get("case") and marker["case"]["status"] != "restored"
+    }
+    fast_track_case_ids = {
+        marker["case"]["case_id"]
+        for marker in markers
+        if marker.get("case") and marker["case"]["case_type"] == "fast_track"
+    }
+    restored_case_ids = {
+        marker["case"]["case_id"]
+        for marker in markers
+        if marker.get("case") and marker["case"]["status"] == "restored"
+    }
+
+    return {
+        "total_locations": len(markers),
+        "case_locations": sum(1 for marker in markers if marker.get("case")),
+        "no_case_locations": sum(1 for marker in markers if not marker.get("case")),
+        "cases": len(case_ids),
+        "active_cases": len(active_case_ids),
+        "fast_track_cases": len(fast_track_case_ids),
+        "restored_cases": len(restored_case_ids),
+    }
+
+
+@require_GET
+def ops_map_data_api(request):
+    search_term = (request.GET.get("search") or "").strip().lower()
+    show_all = _bool_param(request, "show_all", default=False)
+    cases = _map_case_queryset_for_request(request)
+    case_by_ca, report_ca_numbers_by_case = _case_context_by_ca(cases)
+    case_ca_numbers = set(case_by_ca.keys())
+
+    locations = CustomerLocation.objects.exclude(latitude__isnull=True).exclude(
+        longitude__isnull=True
+    )
+
+    if not show_all:
+        locations = locations.filter(ca_number__in=case_ca_numbers)
+
+    search_ca_numbers = _map_search_ca_numbers(
+        search_term, cases, report_ca_numbers_by_case
+    )
+    if search_ca_numbers is not None:
+        locations = locations.filter(ca_number__in=search_ca_numbers)
+
+    markers = [
+        _map_marker_payload(location, case_by_ca.get(location.ca_number))
+        for location in locations.order_by("ca_number")[:5000]
+    ]
+
+    return JsonResponse(
+        {
+            "markers": markers,
+            "summary": _map_summary(markers),
+            "legend": MAP_STATUS_META,
+            "filters": {
+                "search": search_term,
+                "status": request.GET.get("status") or "active",
+                "case_type": request.GET.get("case_type") or "all",
+                "created_from": request.GET.get("created_from") or "",
+                "created_to": request.GET.get("created_to") or "",
+                "show_all": show_all,
+            },
+        }
+    )
 
 
 @require_GET
