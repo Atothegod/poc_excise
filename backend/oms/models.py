@@ -1,14 +1,21 @@
 from django.db import models
 from django.utils import timezone
+from datetime import timedelta
 import uuid
 
 
 class OutageCase(models.Model):
+    SLA_HOURS = 4
+
     STATUS_CHOICES = [
         ("reported", "ได้รับแจ้งเหตุ"),
         ("investigating", "กำลังดำเนินการตรวจสอบ"),
         ("repairing", "กำลังดำเนินการซ่อมแซม"),
         ("restored", "จ่ายไฟคืนกระแสสำเร็จ"),
+    ]
+    CASE_TYPE_CHOICES = [
+        ("normal", "เคสปกติ"),
+        ("fast_track", "เคสเร่งด่วน"),
     ]
 
     case_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -20,6 +27,13 @@ class OutageCase(models.Model):
         help_text="เลขกลุ่มเคสแบบรัน 1-n สำหรับ filter/readability",
     )
     title = models.CharField(max_length=255, default="ไฟดับบริเวณใกล้เคียง")
+    case_type = models.CharField(
+        max_length=20,
+        choices=CASE_TYPE_CHOICES,
+        default="normal",
+        db_index=True,
+        help_text="ประเภทเคส เช่น normal หรือ fast_track",
+    )
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="reported")
     affected_ca_numbers = models.JSONField(
         default=list,
@@ -34,6 +48,18 @@ class OutageCase(models.Model):
     )
     oms_etr = models.DateTimeField(
         null=True, blank=True, help_text="เวลาซ่อมเสร็จจาก OMS (ISO Format)"
+    )
+    oms_etr_updated_at = models.DateTimeField(
+        null=True, blank=True, help_text="เวลาที่ OMS อัปเดต ETR ล่าสุด"
+    )
+    sla_reference_time = models.DateTimeField(
+        null=True, blank=True, help_text="เวลาอ้างอิงสำหรับ SLA 4 ชั่วโมง"
+    )
+    sla_target_time = models.DateTimeField(
+        null=True, blank=True, help_text="เวลาเป้าหมาย SLA 4 ชั่วโมง"
+    )
+    sla_reason = models.CharField(
+        max_length=50, blank=True, default="", help_text="เหตุผลที่ตั้ง SLA ล่าสุด"
     )
     assessment_fastest_branch = models.CharField(
         max_length=255, blank=True, help_text="สาขาที่ประเมินว่าไปถึงเร็วที่สุด"
@@ -94,6 +120,18 @@ class OutageCase(models.Model):
         if self.pluem_etr_target_time:
             return "pluem_model"
         return None
+
+    def set_sla_target(self, reference_time=None, reason=""):
+        reference_time = (
+            reference_time
+            or self.oms_etr_updated_at
+            or self.created_at
+            or timezone.now()
+        )
+        self.sla_reference_time = reference_time
+        self.sla_target_time = reference_time + timedelta(hours=self.SLA_HOURS)
+        self.sla_reason = reason
+        return self.sla_target_time
 
     def get_affected_ca_numbers(self):
         if not self.pk:

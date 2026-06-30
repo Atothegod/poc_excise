@@ -19,7 +19,7 @@ from .admin import (
     OutageRestorationLogAdmin,
 )
 from .models import CustomerLocation, CustomerReport, OutageCase, OutageRestorationLog
-from .tasks import check_eta_timeout
+from .tasks import check_eta_timeout, check_etr_timeout
 from .views_api import calculate_distance
 
 
@@ -80,6 +80,9 @@ class SyncAgentReportTests(TestCase):
         self.assertEqual(case.assessment_eta_minutes, 8.0)
         self.assertEqual(case.pluem_etr_minutes, 69.0)
         self.assertEqual(case.pluem_etr_target_time, base_time + timedelta(minutes=69))
+        self.assertEqual(case.sla_reference_time, base_time)
+        self.assertEqual(case.sla_target_time, base_time + timedelta(hours=4))
+        self.assertEqual(case.sla_reason, "case_created")
         self.assertIsNone(case.oms_etr)
         report = CustomerReport.objects.get(id=response.data["report_id"])
         self.assertEqual(report.latitude, 9.2917)
@@ -440,6 +443,35 @@ class SyncAgentReportTests(TestCase):
         self.assertIsNone(outage["pluem_etr_target_time"])
         self.assertEqual(outage["etr_source"], "oms")
 
+    def test_session_context_returns_etr_timeout_sla(self):
+        now = timezone.now()
+        sla_target = now + timedelta(hours=2)
+        case = OutageCase.objects.create(
+            title="Session ETR timeout SLA",
+            latitude=9.2917,
+            longitude=100.926296,
+            eta_target_time=now - timedelta(hours=1),
+            oms_etr=now - timedelta(minutes=1),
+            sla_target_time=sla_target,
+            sla_reference_time=now - timedelta(hours=2),
+            sla_reason="oms_etr_update",
+        )
+        CustomerReport.objects.create(
+            session_id="session-etr-timeout-context",
+            ca_number="123456789012",
+            related_case=case,
+        )
+        case.sync_affected_ca_numbers()
+
+        response = self.client.get(
+            "/api/reports/session-context/session-etr-timeout-context/"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        outage = response.data["latest_outage"]
+        self.assertEqual(outage["event_type"], "etr_timeout_sla")
+        self.assertEqual(parse_datetime(outage["sla_target_time"]), sla_target)
+
     def test_sync_report_rejects_11_digit_ca_number(self):
         response = self.client.post(
             "/api/reports/sync/",
@@ -452,6 +484,35 @@ class SyncAgentReportTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 400)
+
+    def test_fast_track_ignores_quota_and_creates_sla_case(self):
+        CustomerReport.objects.create(
+            session_id="session-fast-track",
+            ca_number="123456789012",
+            latitude=9.2917,
+            longitude=100.926296,
+            is_resolved=True,
+            fast_track_quota=0,
+        )
+
+        before = timezone.now()
+        response = self.client.post(
+            "/api/reports/fast-track/",
+            {"ca_number": "123456789012"},
+            format="json",
+        )
+        after = timezone.now()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["event_type"], "fast_track_created")
+        case = OutageCase.objects.get(case_id=response.data["case_id"])
+        self.assertEqual(case.case_type, "fast_track")
+        self.assertEqual(case.sla_reason, "fast_track")
+        self.assertGreaterEqual(case.sla_reference_time, before)
+        self.assertLessEqual(case.sla_reference_time, after)
+        self.assertEqual(
+            case.sla_target_time, case.sla_reference_time + timedelta(hours=4)
+        )
 
 
 class CheckEtaTimeoutTests(TestCase):
@@ -475,8 +536,11 @@ class CheckEtaTimeoutTests(TestCase):
 
         payload = mock_post.call_args.kwargs["json"]
         self.assertEqual(payload["event_type"], "eta_timeout")
-        self.assertIn("เวลาที่คาดว่าจะแก้ไขเสร็จ", payload["message"])
+        self.assertIn("ครบกำหนด ETA", payload["message"])
+        self.assertIn("ETR ล่าสุด", payload["message"])
         self.assertIn("ภายในประมาณ", payload["message"])
+        self.assertNotIn("ช้ากว่ากำหนด", payload["message"])
+        self.assertNotIn("ช่างช้า", payload["message"])
         self.assertNotIn("พี่ปลื้ม", payload["message"])
         self.assertNotIn("OMS", payload["message"])
 
@@ -501,8 +565,11 @@ class CheckEtaTimeoutTests(TestCase):
 
         payload = mock_post.call_args.kwargs["json"]
         self.assertEqual(payload["event_type"], "eta_timeout")
-        self.assertIn("เวลาที่คาดว่าจะแก้ไขเสร็จ", payload["message"])
+        self.assertIn("ครบกำหนด ETA", payload["message"])
+        self.assertIn("ETR ล่าสุด", payload["message"])
         self.assertIn("ภายในประมาณ", payload["message"])
+        self.assertNotIn("ช้ากว่ากำหนด", payload["message"])
+        self.assertNotIn("ช่างช้า", payload["message"])
         self.assertNotIn("พี่ปลื้ม", payload["message"])
         self.assertNotIn("OMS", payload["message"])
 
@@ -532,8 +599,11 @@ class CheckEtaTimeoutTests(TestCase):
 
         payload = mock_post.call_args.kwargs["json"]
         self.assertEqual(payload["event_type"], "eta_timeout")
-        self.assertIn("เวลาที่คาดว่าจะแก้ไขเสร็จ", payload["message"])
+        self.assertIn("ครบกำหนด ETA", payload["message"])
+        self.assertIn("ETR ล่าสุด", payload["message"])
         self.assertIn("ภายในประมาณ", payload["message"])
+        self.assertNotIn("ช้ากว่ากำหนด", payload["message"])
+        self.assertNotIn("ช่างช้า", payload["message"])
         self.assertNotIn("พี่ปลื้ม", payload["message"])
         self.assertNotIn("OMS", payload["message"])
         case.refresh_from_db()
@@ -569,9 +639,54 @@ class CheckEtaTimeoutTests(TestCase):
 
         payload = mock_post.call_args.kwargs["json"]
         self.assertEqual(payload["event_type"], "eta_timeout")
-        self.assertIn("กำลังประเมินเวลาไฟกลับ", payload["message"])
+        self.assertIn("ครบกำหนด ETA", payload["message"])
+        self.assertIn("กำลังประเมินเวลาไฟกลับล่าสุด", payload["message"])
+        self.assertNotIn("ช้ากว่ากำหนด", payload["message"])
+        self.assertNotIn("ช่างช้า", payload["message"])
         self.assertNotIn("พี่ปลื้ม", payload["message"])
         self.assertNotIn("OMS", payload["message"])
+
+    @patch("oms.tasks.requests.post")
+    def test_eta_timeout_notifies_repairing_status(self, mock_post):
+        case = OutageCase.objects.create(
+            title="ETA timeout repairing status",
+            status="repairing",
+            latitude=9.2917,
+            longitude=100.926296,
+            eta_target_time=timezone.now() - timedelta(minutes=1),
+            oms_etr=timezone.now() + timedelta(minutes=30),
+        )
+        report = CustomerReport.objects.create(
+            session_id="session-repairing-timeout",
+            ca_number="123456789012",
+            related_case=case,
+        )
+
+        check_eta_timeout(case.case_id, report.id)
+
+        payload = mock_post.call_args.kwargs["json"]
+        self.assertEqual(payload["event_type"], "eta_timeout")
+        self.assertIn("ครบกำหนด ETA", payload["message"])
+
+    @patch("oms.tasks.requests.post")
+    def test_eta_timeout_skips_restored_status(self, mock_post):
+        case = OutageCase.objects.create(
+            title="ETA timeout restored status",
+            status="restored",
+            latitude=9.2917,
+            longitude=100.926296,
+            eta_target_time=timezone.now() - timedelta(minutes=1),
+            oms_etr=timezone.now() + timedelta(minutes=30),
+        )
+        report = CustomerReport.objects.create(
+            session_id="session-restored-timeout",
+            ca_number="123456789012",
+            related_case=case,
+        )
+
+        check_eta_timeout(case.case_id, report.id)
+
+        mock_post.assert_not_called()
 
     @patch("oms.tasks.requests.post")
     def test_eta_timeout_notifies_all_active_sessions_for_case(self, mock_post):
@@ -612,10 +727,42 @@ class CheckEtaTimeoutTests(TestCase):
         )
         self.assertEqual(mock_post.call_count, 2)
 
+    @patch("oms.tasks.requests.post")
+    def test_etr_timeout_sends_sla_notification(self, mock_post):
+        now = timezone.now()
+        case = OutageCase.objects.create(
+            title="ETR timeout SLA",
+            latitude=9.2917,
+            longitude=100.926296,
+            eta_target_time=now - timedelta(hours=1),
+            oms_etr=now - timedelta(minutes=1),
+            oms_etr_updated_at=now - timedelta(hours=1),
+            sla_reference_time=now - timedelta(hours=1),
+            sla_target_time=now + timedelta(hours=3),
+            sla_reason="oms_etr_update",
+        )
+        CustomerReport.objects.create(
+            session_id="session-etr-timeout",
+            ca_number="123456789012",
+            related_case=case,
+        )
+
+        check_etr_timeout(case.case_id)
+
+        payload = mock_post.call_args.kwargs["json"]
+        self.assertEqual(payload["event_type"], "etr_timeout_sla")
+        self.assertIn("ETR ล่าสุดเลยกำหนด", payload["message"])
+        self.assertIn("กฟภ.", payload["message"])
+        self.assertIn("ภายในประมาณ", payload["message"])
+
 
 class OutageCaseSignalTests(TestCase):
+    @patch("oms.signals.check_etr_timeout.apply_async")
     @patch("oms.signals.send_proactive_alert.delay")
-    def test_oms_etr_update_sends_etr_update_to_active_sessions(self, mock_send_alert):
+    def test_oms_etr_update_sends_etr_update_to_active_sessions(
+        self, mock_send_alert, mock_apply_async
+    ):
+        mock_apply_async.return_value.id = "etr-task-id"
         case = OutageCase.objects.create(
             title="ETR update case",
             latitude=9.2917,
@@ -647,16 +794,30 @@ class OutageCaseSignalTests(TestCase):
         case.oms_etr = timezone.now() + timedelta(hours=1)
         case.save(update_fields=["oms_etr"])
 
+        case.refresh_from_db()
+        self.assertIsNotNone(case.oms_etr_updated_at)
+        self.assertIsNotNone(case.sla_reference_time)
+        self.assertIsNotNone(case.sla_target_time)
+        self.assertEqual(case.sla_reason, "oms_etr_update")
+        self.assertEqual(case.celery_etr_task_id, "etr-task-id")
+        self.assertEqual(
+            case.sla_target_time, case.sla_reference_time + timedelta(hours=4)
+        )
+        mock_apply_async.assert_called_once_with(
+            args=[case.case_id], eta=case.oms_etr
+        )
         self.assertEqual(mock_send_alert.call_count, 2)
         event_types = {
             call.kwargs["event_type"] for call in mock_send_alert.call_args_list
         }
         self.assertEqual(event_types, {"etr_update"})
 
+    @patch("oms.signals.check_etr_timeout.apply_async")
     @patch("oms.signals.send_proactive_alert.delay")
     def test_oms_etr_update_after_pluem_etr_sends_replacement_to_sessions(
-        self, mock_send_alert
+        self, mock_send_alert, mock_apply_async
     ):
+        mock_apply_async.return_value.id = "etr-replacement-task-id"
         case = OutageCase.objects.create(
             title="ETR update replaces Pluem",
             latitude=9.2917,
@@ -707,6 +868,11 @@ class OutageCaseSignalTests(TestCase):
         self.assertEqual(log.etr_source, "oms")
         self.assertIsNotNone(log.restored_at)
         self.assertIsNotNone(log.etr_delta_minutes)
+        call = mock_send_alert.call_args
+        self.assertEqual(call.kwargs["event_type"], "closed_loop_prompt")
+        self.assertIn("เปิดเคสเร่งด่วน", call.kwargs["message"])
+        self.assertNotIn("เบรกเกอร์", call.kwargs["message"])
+        self.assertNotIn("คัตเอาต์", call.kwargs["message"])
 
 
 class OpsWebhookConsoleTests(TestCase):
@@ -756,14 +922,18 @@ class OpsWebhookConsoleTests(TestCase):
 
         content = response.content.decode("utf-8-sig")
         rows = list(csv.reader(io.StringIO(content)))
-        self.assertEqual(rows[0][:4], ["LV", "Case ID", "Title", "Status"])
+        self.assertEqual(rows[0][:5], ["LV", "Case ID", "Title", "Case Type", "Status"])
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[1][1], str(matching_case.case_id))
         self.assertEqual(rows[1][2], "Matching CSV case")
-        self.assertIn("123456789012", rows[1][5])
+        self.assertIn("123456789012", rows[1][6])
 
+    @patch("oms.signals.check_etr_timeout.apply_async")
     @patch("oms.signals.send_proactive_alert.delay")
-    def test_ops_action_sets_etr_for_selected_cases(self, mock_send_alert):
+    def test_ops_action_sets_etr_for_selected_cases(
+        self, mock_send_alert, mock_apply_async
+    ):
+        mock_apply_async.return_value.id = "ops-etr-task-id"
         selected_case = OutageCase.objects.create(
             title="Selected ETR case",
             latitude=9.2917,
@@ -796,6 +966,7 @@ class OpsWebhookConsoleTests(TestCase):
         selected_case.refresh_from_db()
         untouched_case.refresh_from_db()
         self.assertIsNotNone(selected_case.oms_etr)
+        self.assertEqual(selected_case.celery_etr_task_id, "ops-etr-task-id")
         self.assertIsNone(untouched_case.oms_etr)
         mock_send_alert.assert_called_once()
 
@@ -885,6 +1056,24 @@ class CsvExportAdminTests(TestCase):
 
         for model_admin in admins:
             self.assertIn("export_selected_csv", model_admin.actions)
+
+    def test_outage_admin_countdown_sla_states(self):
+        model_admin = OutageCaseAdmin(OutageCase, AdminSite())
+        future_case = OutageCase.objects.create(
+            title="Future SLA case",
+            latitude=9.2917,
+            longitude=100.926296,
+            sla_target_time=timezone.now() + timedelta(hours=2),
+        )
+        expired_case = OutageCase.objects.create(
+            title="Expired SLA case",
+            latitude=9.2918,
+            longitude=100.926396,
+            sla_target_time=timezone.now() - timedelta(minutes=1),
+        )
+
+        self.assertIn("เหลือ", str(model_admin.countdown_sla(future_case)))
+        self.assertIn("เลย SLA", str(model_admin.countdown_sla(expired_case)))
 
     def test_admin_export_selected_csv_returns_model_rows(self):
         location = CustomerLocation.objects.create(

@@ -36,7 +36,8 @@ class NotificationWebhook(BaseModel):
     ca_number: str = Field(..., description="หมายเลขผู้ใช้ไฟ")
     message: str = Field(..., description="ข้อความที่ต้องการให้ Agent ส่งถึง User")
     event_type: str = Field(
-        ..., description="ประเภทเหตุการณ์ เช่น eta_timeout, etr_update, closed_loop"
+        ...,
+        description="ประเภทเหตุการณ์ เช่น eta_timeout, etr_update, etr_timeout_sla, closed_loop_prompt",
     )
 
 

@@ -28,27 +28,34 @@ class OutageCaseAdmin(CsvExportAdminMixin, admin.ModelAdmin):
     list_display = (
         "lv_group_id",
         "case_id",
+        "case_type",
         "status",
         "affected_CA",
         "countdown_eta",
         "countdown_etr",
+        "countdown_sla",
         "assessment_fastest_branch",
         "assessment_eta_formatted",
         "pluem_etr_minutes",
         "created_at",
     )
-    list_filter = ("status", "lv_group_id")
+    list_filter = ("status", "case_type", "lv_group_id")
     search_fields = ("case_id", "title", "affected_customers__ca_number")
     csv_fields = (
         "case_id",
         "lv_group_id",
         "title",
+        "case_type",
         "status",
         "affected_ca_numbers",
         "latitude",
         "longitude",
         "eta_target_time",
         "oms_etr",
+        "oms_etr_updated_at",
+        "sla_reference_time",
+        "sla_target_time",
+        "sla_reason",
         "assessment_fastest_branch",
         "assessment_eta_formatted",
         "assessment_eta_minutes",
@@ -145,6 +152,32 @@ class OutageCaseAdmin(CsvExportAdminMixin, admin.ModelAdmin):
         )
 
     countdown_etr.short_description = "ETR Countdown"
+
+    def countdown_sla(self, obj):
+        if not obj.sla_target_time:
+            return format_html('<span style="color: gray;">ยังไม่กำหนด SLA</span>')
+
+        now = timezone.now()
+        if now > obj.sla_target_time:
+            return format_html(
+                '<span style="color: red; font-weight: bold;">เลย SLA แล้ว</span>'
+            )
+
+        diff = obj.sla_target_time - now
+        minutes_left = int(diff.total_seconds() // 60)
+        hours = minutes_left // 60
+        minutes = minutes_left % 60
+        label = f"{hours} ชม. {minutes} นาที" if hours else f"{minutes} นาที"
+
+        if minutes_left <= 30:
+            return format_html(
+                '<span style="color: orange; font-weight: bold;">เหลือ {}</span>',
+                label,
+            )
+
+        return format_html('<span style="color: green;">เหลือ {}</span>', label)
+
+    countdown_sla.short_description = "SLA Countdown"
 
 
 @admin.register(CustomerLocation)

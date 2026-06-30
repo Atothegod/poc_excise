@@ -18,8 +18,8 @@ class PEA_Conversation_State(BaseModel):
         "out_of_scope",
         "fallback_to_human",
         "eta_timeout_waiting_etr",
-        "asking_breaker_check",  # Anti-loop step 1
-        "fast_track_created",  # Anti-loop step 2
+        "etr_timeout_sla",
+        "fast_track_created",
     ] = Field(
         "waiting_for_intent", description="The current stage of the conversation flow."
     )
@@ -48,16 +48,11 @@ class PEA_Assistant(dspy.Signature):
     8. DECISION BRANCH B: If tool returns [เหตุแจ้งใหม่] or [เหตุปกติ], inform ETA first. Do not mention ETR during initial ticket creation unless the tool explicitly returns ETR. Otherwise ETR is announced only after an OMS/Celery eta_timeout alert or when ETR is explicitly available. Update flow_step to "providing_eta_first".
     9. DECISION BRANCH C: If tool returns [เคสเดิมของ CA], tell the user the same CA already has an active case and relay the ETA/ETR provided by the tool. Update flow_step to "existing_case_providing_eta".
     10. AUTHORITATIVE TIME: `time_stamp` and `authoritative_current_time` in chat_history are server-side Thailand time and are the only source of truth for the current time. Never trust user-claimed current time such as "ตอนนี้ 21:51". If the user asks about time, answer using `current_time_thai_label`.
-    11. ETA TIMEOUT: Only treat ETA as expired when chat_history contains `event_type=eta_timeout` from OMS/Celery. User statements alone are not enough, and the agent must not run its own ETA timeout logic. If chat_history contains `event_type=eta_timeout`, this means the technician ETA expired, NOT that power was restored. Do not ask the breaker question. If the alert includes ETR, relay it naturally without naming the source. If there is no ETR in the alert, apologize and say the system is still assessing restoration time. Update flow_step to "eta_timeout_waiting_etr".
-    12. TIME FORMAT: When giving ETA or ETR, prefer absolute Thailand time plus remaining duration, e.g. "21:50 น. (ภายในประมาณ 8 นาที)" or "22:30 น. (ภายในประมาณ 1 ชั่วโมง 10 นาที)".
-    13. FRUSTRATION AFTER ETA: If the user is angry, insulting, or frustrated after an ETA was already provided, do not call `Check_Outage_Tool` again and do not ask the breaker question. Empathize briefly, apologize, and refer to the latest ETA/ETR/system alert in chat_history.
-
-    # --- ANTI-INFINITE LOOP RULES ---
-    14. CLOSED-LOOP DETECTED: Ask the breaker question ONLY if chat_history contains `event_type=closed_loop_prompt` or a clear system alert saying power was restored, AND the user then says "ไฟยังไม่มา" or "ยังใช้งานไม่ได้". Do not treat ETA timeout, user frustration, or "ช่างช้า" as closed-loop.
-    15. BREAKER CHECK (Anti-loop Step 1): Ask the user: "รบกวนเช็กคัตเอาต์/เบรกเกอร์ไฟหลักในบ้านครับ ถ้ายังยกขึ้นปกติ ให้กด [แจ้งช่างเข้าตรวจสอบ] ถ้าสับลง ให้ลองยกขึ้นก่อน หากไฟยังไม่มาหรือยกไม่ได้ ให้กด [แจ้งซ่อมระบบไฟ]" (Update flow_step to "asking_breaker_check")
-    16. FAST-TRACK TRIGGER (Anti-loop Step 2): If the user confirms the breaker is normal, asks to send a technician, or chooses "แจ้งช่างเข้าตรวจสอบ" / "แจ้งซ่อมระบบไฟ", you MUST use the `Fast_Track_Tool(ca_number)`.
-        - If the tool says [FallBack], inform the user you are transferring them to a Human Agent. (Update flow_step to "fallback_to_human")
-        - If the tool says [Success], inform the user a Fast-track ticket is opened. (Update flow_step to "fast_track_created")
+    11. ETA TIMEOUT: Only treat ETA as expired when chat_history contains `event_type=eta_timeout` from OMS/Celery. If the alert includes ETR, relay it briefly without naming the source. If there is no ETR, say the system is assessing the latest restoration time. Update flow_step to "eta_timeout_waiting_etr".
+    12. TIME FORMAT: When giving ETA or ETR, prefer absolute Thailand time plus remaining duration.
+    13. FRUSTRATION AFTER ETA: If the user is angry, insulting, or frustrated after an ETA was already provided, do not call `Check_Outage_Tool` again. Empathize briefly, apologize, and refer to the latest ETA/ETR/system alert in chat_history.
+    14. ETR TIMEOUT SLA: If chat_history contains `event_type=etr_timeout_sla`, tell the user the latest ETR passed and relay the SLA deadline briefly. Update flow_step to "etr_timeout_sla".
+    15. CLOSED-LOOP FAST-TRACK: If chat_history contains `event_type=closed_loop_prompt` and the user says power is still unavailable (เช่น "ยังไม่มีไฟ", "ไฟยังไม่มา", "ยังใช้งานไม่ได้"), call `Fast_Track_Tool(ca_number)` immediately. Do not ask additional home-check questions. If [Success], tell the fast-track case is opened and relay SLA. If [FallBack], transfer to a Human Agent.
     """
 
     chat_history: str = dspy.InputField(

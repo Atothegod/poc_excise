@@ -81,6 +81,9 @@ def remember_latest_outage(db_response, ca_number=None):
         "oms_etr": db_response.get("oms_etr"),
         "etr_target_time": db_response.get("etr_target_time"),
         "etr_source": db_response.get("etr_source"),
+        "sla_target_time": db_response.get("sla_target_time"),
+        "sla_reference_time": db_response.get("sla_reference_time"),
+        "sla_reason": db_response.get("sla_reason"),
     }
 
 
@@ -217,6 +220,8 @@ def Check_Outage_Tool(ca_number: str, pdpa_consent: bool = False):
     fastest_branch = db_response.get("fastest_branch")
     etr = db_response.get("etr_target_time") or db_response.get("oms_etr")
     etr_label = _format_etr_label(etr, db_response.get("etr_source"))
+    sla = db_response.get("sla_target_time")
+    sla_label = format_time_with_countdown(sla)
     remember_latest_outage(db_response, ca_number=ca_number)
 
     # เคส 1: API ขัดข้องติดต่อกันจนครบกำหนด
@@ -229,20 +234,25 @@ def Check_Outage_Tool(ca_number: str, pdpa_consent: bool = False):
     if event_type == "assessment_error":
         return "[FallBack] ระบบประเมิน ETA/ETR ขัดข้อง ให้ตอบว่ากำลังโอนสายให้เจ้าหน้าที่"
 
+    if event_type == "etr_timeout_sla":
+        if sla_label:
+            return f"[SLA] ETR ล่าสุดเลยกำหนดแล้ว แจ้งว่าจะเร่งดำเนินการให้ไม่เกิน {sla_label}"
+        return "[SLA] ETR ล่าสุดเลยกำหนดแล้ว แจ้งว่าระบบกำลังเร่งดำเนินการ"
+
     # เคส 2: เกิดเหตุวงกว้าง (Mass Outage) -> บังคับแจ้ง ETR ตาม Rule 6
     if event_type == "existing_ca_case":
         eta_label = format_time_with_countdown(eta) or db_response.get("eta_formatted") or eta
         if etr_label:
-            return f"[เคสเดิมของ CA] แจ้ง {etr_label} แก่ลูกค้า"
+            return f"[เคสเดิมของ CA] แจ้ง {etr_label}"
         if eta_label:
-            return f"[เคสเดิมของ CA] ระบบพบเคสที่เปิดอยู่แล้ว ให้แจ้ง ETA เดิม: {eta_label}"
+            return f"[เคสเดิมของ CA] แจ้ง ETA เดิม: {eta_label}"
         return "[เคสเดิมของ CA] ระบบพบเคสที่เปิดอยู่แล้ว แต่ยังไม่มี ETA/ETR ล่าสุด"
 
     if event_type == "repeated_event":
         if etr_label:
-            return f"[เหตุวงกว้าง] แจ้ง {etr_label} แก่ลูกค้า"
+            return f"[เหตุวงกว้าง] แจ้ง {etr_label}"
         else:
-            return "[เหตุวงกว้าง] ยังไม่มี ETR ยืนยันในตอนนี้ ระบบกำลังประเมินเวลาไฟกลับมาใช้งานครับ"
+            return "[เหตุวงกว้าง] ยังไม่มี ETR ล่าสุด ระบบกำลังประเมินเวลาไฟกลับครับ"
 
     # เคส 3: แจ้งครั้งแรก (New Event) หรือ เคสเดี่ยว -> บังคับแจ้ง ETA ตาม Rule 7
     # และตรวจสอบ ETR เพิ่มเติม
@@ -251,14 +261,12 @@ def Check_Outage_Tool(ca_number: str, pdpa_consent: bool = False):
         branch_label = f" สาขาที่ประเมินว่าไปถึงเร็วที่สุดคือ {fastest_branch}" if fastest_branch else ""
         if etr_label:
             return (
-                f"[เหตุแจ้งใหม่] ระบบได้เปิดใบงานใหม่แล้ว{branch_label} "
-                f"ให้แจ้งเวลาที่ช่างจะเดินทางไปถึง (ETA): {eta_label} "
-                f"และแจ้งเวลาที่คาดว่าจะแก้ไขเสร็จ ({etr_label})"
+                f"[เหตุแจ้งใหม่] เปิดใบงานแล้ว{branch_label} "
+                f"แจ้ง ETA: {eta_label} และ {etr_label}"
             )
         else:
             return (
-                f"[เหตุแจ้งใหม่] ระบบได้เปิดใบงานใหม่แล้ว{branch_label} "
-                f"ให้แจ้งเวลาที่ช่างจะเดินทางไปถึง (ETA): {eta_label}"
+                f"[เหตุแจ้งใหม่] เปิดใบงานแล้ว{branch_label} แจ้ง ETA: {eta_label}"
             )
 
     return "ขัดข้อง ไม่สามารถระบุประเภทเหตุการณ์ได้"
@@ -266,8 +274,7 @@ def Check_Outage_Tool(ca_number: str, pdpa_consent: bool = False):
 
 def Fast_Track_Tool(ca_number: str):
     """
-    เครื่องมือสำหรับใช้สร้างตั๋ว Fast-track ด่วน
-    เมื่อลูกค้าบอกว่าไฟยังไม่มาและเช็คเบรกเกอร์แล้ว
+    เครื่องมือสำหรับเปิดเคสเร่งด่วนเมื่อลูกค้ายังไม่มีไฟหลังระบบปิดเคสแล้ว
     """
     login_ca_number = current_login_ca_number.get()
     if login_ca_number and is_valid_ca_number(login_ca_number):
@@ -287,8 +294,11 @@ def Fast_Track_Tool(ca_number: str):
 
         if data.get("event_type") == "fallback_to_human":
             return "[FallBack] โควต้าแจ้งซ้ำหมดแล้ว ให้ตอบว่ากำลังโอนสายให้เจ้าหน้าที่ (Force Fallback)"
-        else:
-            return "[Success] สร้างตั๋ว Fast-track สำเร็จ ให้ตอบลูกค้าว่าประสานงานด่วนแล้ว"
+
+        sla_label = format_time_with_countdown(data.get("sla_target_time"))
+        if sla_label:
+            return f"[Success] เปิดเคสเร่งด่วนแล้ว แจ้งว่าจะดำเนินการให้ไม่เกิน {sla_label}"
+        return "[Success] เปิดเคสเร่งด่วนแล้ว แจ้งว่าจะเร่งดำเนินการ"
 
     except Exception as e:
         return "[FallBack] ระบบขัดข้อง ให้ตอบว่ากำลังโอนสายให้เจ้าหน้าที่ (Force Fallback)"

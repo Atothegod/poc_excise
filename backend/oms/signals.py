@@ -1,9 +1,10 @@
 from django.db.models.signals import pre_save, post_save
 from django.dispatch import receiver
 from django.utils import timezone
+from datetime import timedelta
 from math import ceil
 from .models import OutageCase, CustomerReport, OutageRestorationLog
-from .tasks import check_eta_timeout, send_proactive_alert
+from .tasks import check_eta_timeout, check_etr_timeout, send_proactive_alert
 from pea_project.celery import app as celery_app
 
 
@@ -88,6 +89,7 @@ def track_eta_changes(sender, instance, **kwargs):
         # 3. เช็คว่า OMS เพิ่งส่ง/แก้ ETR มาไหม เพื่อแจ้งลูกค้าอัตโนมัติ
         if old_instance.oms_etr != instance.oms_etr and instance.oms_etr:
             instance._has_new_oms_etr = True
+            instance._old_celery_etr_task_id = old_instance.celery_etr_task_id
 
     except OutageCase.DoesNotExist:
         pass
@@ -98,6 +100,18 @@ def process_outage_case_updates(sender, instance, created, **kwargs):
     """
     จัดการหลังบันทึก Database เสร็จสิ้น (ตั้งเวลา Celery ใหม่ และจัดการ Closed-Loop)
     """
+    if created and not instance.sla_target_time:
+        reference_time = instance.created_at or timezone.now()
+        sla_target_time = reference_time + timedelta(hours=OutageCase.SLA_HOURS)
+        instance.sla_reference_time = reference_time
+        instance.sla_target_time = sla_target_time
+        instance.sla_reason = "case_created"
+        OutageCase.objects.filter(pk=instance.pk).update(
+            sla_reference_time=reference_time,
+            sla_target_time=sla_target_time,
+            sla_reason="case_created",
+        )
+
     # --- กรณีพนักงานแก้ไขเวลา ETA หน้า Admin ---
     if getattr(instance, "_needs_new_eta_task", False) and instance.eta_target_time:
         report = instance.affected_customers.filter(is_resolved=False).last()
@@ -112,12 +126,35 @@ def process_outage_case_updates(sender, instance, created, **kwargs):
 
     # --- กรณี OMS/Admin เติมหรือแก้ ETR ---
     if getattr(instance, "_has_new_oms_etr", False):
+        reference_time = timezone.now()
+        sla_target_time = reference_time + timedelta(hours=OutageCase.SLA_HOURS)
+        old_etr_task_id = getattr(instance, "_old_celery_etr_task_id", None)
+        if old_etr_task_id:
+            celery_app.control.revoke(old_etr_task_id, terminate=True)
+
+        etr_task_id = None
+        if instance.status != "restored":
+            task = check_etr_timeout.apply_async(
+                args=[instance.case_id], eta=instance.oms_etr
+            )
+            etr_task_id = task.id
+
+        instance.oms_etr_updated_at = reference_time
+        instance.sla_reference_time = reference_time
+        instance.sla_target_time = sla_target_time
+        instance.sla_reason = "oms_etr_update"
+        instance.celery_etr_task_id = etr_task_id
+        OutageCase.objects.filter(pk=instance.pk).update(
+            oms_etr_updated_at=reference_time,
+            sla_reference_time=reference_time,
+            sla_target_time=sla_target_time,
+            sla_reason="oms_etr_update",
+            celery_etr_task_id=etr_task_id,
+        )
+
         instance.sync_affected_ca_numbers()
         etr_label = _format_time_with_countdown(instance.oms_etr)
-        message = (
-            "ระบบได้รับข้อมูล ETR ล่าสุดแล้วครับ "
-            f"เวลาที่คาดว่าจะแก้ไขเสร็จและจ่ายไฟคืนคือประมาณ {etr_label} ครับ"
-        )
+        message = f"ETR ล่าสุด: {etr_label} ครับ"
         sent_session_ids = set()
         affected_customers = CustomerReport.objects.filter(
             related_case=instance, is_resolved=False
@@ -158,10 +195,8 @@ def process_outage_case_updates(sender, instance, created, **kwargs):
 
             # 3. ส่งข้อความยืนยันไฟมาเชิงรุกไปหาลูกค้า
             message = (
-                "ขณะนี้ระบบแจ้งว่าการไฟฟ้าได้ดำเนินการจ่ายไฟคืนระบบเรียบร้อยแล้ว "
-                "ขออภัยในความไม่สะดวกครับ 🙏\n\n"
-                "หากบ้านของท่านยังคงไม่มีไฟใช้ รบกวนแจ้งว่า 'ยังใช้งานไม่ได้' "
-                "เพื่อให้ระบบตรวจสอบเพิ่มเติมครับ"
+                "ระบบแจ้งว่าจ่ายไฟคืนแล้วครับ "
+                'หากยังไม่มีไฟ พิมพ์ "ยังไม่มีไฟ" เพื่อเปิดเคสเร่งด่วนครับ'
             )
             send_proactive_alert.delay(
                 report_id=report.id, message=message, event_type="closed_loop_prompt"

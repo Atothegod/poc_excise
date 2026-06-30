@@ -82,6 +82,11 @@ def _case_response_fields(case, include_model_etr=False):
             "pluem_etr_target_time": None,
             "etr_target_time": None,
             "etr_source": None,
+            "case_type": None,
+            "oms_etr_updated_at": None,
+            "sla_reference_time": None,
+            "sla_target_time": None,
+            "sla_reason": None,
         }
 
     etr_target_time = case.oms_etr
@@ -107,6 +112,11 @@ def _case_response_fields(case, include_model_etr=False):
         "pluem_etr_target_time": _datetime_iso(pluem_etr_target_time),
         "etr_target_time": _datetime_iso(etr_target_time),
         "etr_source": etr_source,
+        "case_type": case.case_type,
+        "oms_etr_updated_at": _datetime_iso(case.oms_etr_updated_at),
+        "sla_reference_time": _datetime_iso(case.sla_reference_time),
+        "sla_target_time": _datetime_iso(case.sla_target_time),
+        "sla_reason": case.sla_reason or None,
     }
 
 
@@ -216,15 +226,19 @@ def _latest_outage_for_report(report):
 
     event_type = "restored" if case.status == "restored" else "active_case_exists"
 
-    if case.status in ["reported", "investigating"] and case.eta_target_time:
-        if timezone.now() >= case.eta_target_time:
-            event_type = "eta_timeout"
-
     effective_etr = case.oms_etr
     etr_source = "oms" if case.oms_etr else None
+    now = timezone.now()
+
+    if case.status != "restored" and case.eta_target_time and now >= case.eta_target_time:
+        event_type = "eta_timeout"
+
     if not effective_etr and event_type == "eta_timeout":
         effective_etr = case.pluem_etr_target_time
         etr_source = case.effective_etr_source()
+
+    if case.status != "restored" and effective_etr and now >= effective_etr:
+        event_type = "etr_timeout_sla"
 
     return {
         "event_type": event_type,
@@ -239,6 +253,11 @@ def _latest_outage_for_report(report):
         "oms_etr": _datetime_iso(case.oms_etr),
         "etr_target_time": _datetime_iso(effective_etr),
         "etr_source": etr_source,
+        "case_type": case.case_type,
+        "oms_etr_updated_at": _datetime_iso(case.oms_etr_updated_at),
+        "sla_reference_time": _datetime_iso(case.sla_reference_time),
+        "sla_target_time": _datetime_iso(case.sla_target_time),
+        "sla_reason": case.sla_reason or None,
         "pluem_etr_minutes": case.pluem_etr_minutes
         if event_type == "eta_timeout" and not case.oms_etr
         else None,
@@ -382,6 +401,10 @@ def sync_agent_report(request):
                     latitude=report.latitude,
                     longitude=report.longitude,
                     eta_target_time=eta_target_time,
+                    sla_reference_time=base_time,
+                    sla_target_time=base_time
+                    + timedelta(hours=OutageCase.SLA_HOURS),
+                    sla_reason="case_created",
                     assessment_fastest_branch=assessment.get("fastest_branch") or "",
                     assessment_eta_formatted=assessment.get("eta_formatted")
                     or format_minutes_label(eta_minutes)
@@ -404,6 +427,11 @@ def sync_agent_report(request):
         if report.related_case:
             _attach_waiting_same_ca_reports(report)
             report.related_case.sync_affected_ca_numbers()
+
+        if report.related_case and report.related_case.status != "restored":
+            effective_etr = report.related_case.effective_etr_time()
+            if effective_etr and timezone.now() >= effective_etr:
+                event_type = "etr_timeout_sla"
 
         response_data = {
             "status": "success",
@@ -562,7 +590,7 @@ def get_session_context(request, session_id):
 @api_view(["POST"])
 def fast_track_report(request):
     """
-    รับคำสั่งจากการยืนยันสวิตช์เบรกเกอร์ของลูกค้า
+    เปิดเคสเร่งด่วนเมื่อลูกค้ายังไม่มีไฟหลังระบบปิดเคสเดิมแล้ว
     """
     ca_number = request.data.get("ca_number")
     try:
@@ -580,34 +608,30 @@ def fast_track_report(request):
     if not report:
         return Response({"event_type": "fallback", "message": "ไม่พบข้อมูลประวัติ"})
 
-    if report.fast_track_quota > 0:
-        # หักโควต้าและสร้างเคส Fast Track
-        report.fast_track_quota -= 1
+    base_time = timezone.now()
+    new_case = OutageCase.objects.create(
+        title=f"[ด่วน! ไฟดับซ้ำซ้อน] CA {ca_number}",
+        case_type="fast_track",
+        status="reported",
+        latitude=report.latitude or 13.0,
+        longitude=report.longitude or 100.0,
+        sla_reference_time=base_time,
+        sla_target_time=base_time + timedelta(hours=OutageCase.SLA_HOURS),
+        sla_reason="fast_track",
+    )
+    report.is_resolved = False
+    report.related_case = new_case
+    report.save()
+    new_case.sync_affected_ca_numbers()
 
-        # รีเซ็ตสถานะเป็นรอการแก้ไข
-        report.is_resolved = False
-
-        new_case = OutageCase.objects.create(
-            title=f"[ด่วน! ไฟดับซ้ำซ้อน] CA {ca_number}",
-            status="reported",
-            latitude=report.latitude or 13.0,
-            longitude=report.longitude or 100.0,
-        )
-        report.related_case = new_case
-        report.save()
-        new_case.sync_affected_ca_numbers()
-
-        return Response(
-            {
-                "event_type": "fast_track_created",
-                "message": "ส่งเรื่องตรวจสอบซ้ำ (Fast-track) ให้ช่างเรียบร้อยแล้ว",
-            }
-        )
-    else:
-        # โควต้าหมด (ป้องกันการวนลูป) -> เปลี่ยนเป็นโอนสาย
-        return Response(
-            {
-                "event_type": "fallback_to_human",
-                "message": "โควต้าการตรวจสอบซ้ำหมดแล้ว ระบบกำลังโอนสายให้เจ้าหน้าที่",
-            }
-        )
+    return Response(
+        {
+            "event_type": "fast_track_created",
+            "message": "เปิดเคสเร่งด่วนให้แล้วครับ",
+            "case_id": str(new_case.case_id),
+            "lv_group_id": new_case.lv_group_id,
+            "sla_target_time": _datetime_iso(new_case.sla_target_time),
+            "sla_reference_time": _datetime_iso(new_case.sla_reference_time),
+            "sla_reason": new_case.sla_reason,
+        }
+    )

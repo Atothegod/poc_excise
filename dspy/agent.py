@@ -98,7 +98,8 @@ class MemoryAgent:
                 f"eta_target_time={latest_outage.get('eta_target_time')}; "
                 f"fastest_branch={latest_outage.get('fastest_branch')}; "
                 f"etr_target_time={latest_outage.get('etr_target_time')}; "
-                f"oms_etr={latest_outage.get('oms_etr')}"
+                f"oms_etr={latest_outage.get('oms_etr')}; "
+                f"sla_target_time={latest_outage.get('sla_target_time')}"
             )
             system_context.extend(
                 self._format_temporal_context(server_time_stamp, latest_outage)
@@ -154,6 +155,7 @@ class MemoryAgent:
         etr = parse_iso_datetime(
             latest_outage.get("etr_target_time") or latest_outage.get("oms_etr")
         )
+        sla = parse_iso_datetime(latest_outage.get("sla_target_time"))
 
         return [
             f"System: current_time_thai_label={self._format_thai_time(now)}",
@@ -163,10 +165,14 @@ class MemoryAgent:
             f"System: latest_etr_thai_label={self._format_thai_time(etr)}",
             f"System: latest_etr_remaining_label={self._format_remaining_label(etr, now)}",
             f"System: latest_etr_user_label={self._format_user_time_label(etr, now)}",
+            f"System: latest_sla_thai_label={self._format_thai_time(sla)}",
+            f"System: latest_sla_remaining_label={self._format_remaining_label(sla, now)}",
+            f"System: latest_sla_user_label={self._format_user_time_label(sla, now)}",
             "System: ETA timeout is an OMS/Celery event. Do not say ETA expired unless chat_history contains event_type=eta_timeout.",
             "System: If asked about current time, answer naturally using current_time_thai_label.",
             "System: If asked about technician arrival before eta_timeout event, answer naturally using latest_eta_user_label.",
             "System: If asked about restoration time, answer naturally using latest_etr_user_label only if it is available; do not mention the ETR source.",
+            "System: If event_type=etr_timeout_sla or fast_track_created, answer naturally using latest_sla_user_label when available.",
         ]
 
     def chat(
