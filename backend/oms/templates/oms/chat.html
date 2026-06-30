@@ -113,6 +113,44 @@
             padding-bottom: env(safe-area-inset-bottom, 8px);
         }
 
+        .session-meta-bar {
+            display: grid;
+            gap: 6px;
+            padding: 8px 12px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.24);
+            background: rgba(115, 49, 144, 0.92);
+            color: white;
+            font-size: 12px;
+        }
+
+        .session-meta-line {
+            min-width: 0;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .session-meta-label {
+            width: 52px;
+            flex: 0 0 auto;
+            color: rgba(255, 255, 255, 0.72);
+            font-weight: 700;
+            text-transform: uppercase;
+        }
+
+        .session-meta-value {
+            min-width: 0;
+            flex: 1 1 auto;
+            overflow-x: auto;
+            white-space: nowrap;
+            font-family: "SFMono-Regular", Consolas, monospace;
+            scrollbar-width: none;
+        }
+
+        .session-meta-value::-webkit-scrollbar {
+            display: none;
+        }
+
         .state-box {
             min-height: 0;
             overflow: auto;
@@ -194,10 +232,6 @@
         }
 
         @media (max-width: 420px) {
-            .header-session {
-                display: none;
-            }
-
             .bubble {
                 max-width: 248px;
             }
@@ -226,8 +260,7 @@
                         </svg>
                     </div>
                     <div class="min-w-0">
-                        <h1 class="font-bold text-lg leading-none mb-1 truncate">ศูนย์รับแจ้งปัญหา</h1>
-                        <p class="header-session text-xs text-purple-200 truncate">Session: <span id="displaySessionId">กำลังโหลด...</span></p>
+                        <h1 class="font-bold text-lg leading-none truncate">ศูนย์รับแจ้งปัญหา</h1>
                     </div>
                 </div>
 
@@ -243,11 +276,53 @@
                     id="reset-btn"
                     class="text-sm font-medium bg-white/20 hover:bg-white/30 px-3 py-1.5 rounded-full active:opacity-70 transition-all focus:outline-none shadow-sm"
                     type="button"
-                    onclick="resetSession()"
                 >
                     เริ่มใหม่
                 </button>
             </header>
+
+            <div class="session-meta-bar shrink-0">
+                <div class="session-meta-line">
+                    <span class="session-meta-label">CA</span>
+                    <span id="displayCaNumber" class="session-meta-value">กำลังโหลด...</span>
+                </div>
+                <div id="session-display-row" class="session-meta-line">
+                    <span class="session-meta-label">Session</span>
+                    <span id="displaySessionId" class="session-meta-value">กำลังโหลด...</span>
+                    <button
+                        id="edit-session-btn"
+                        class="h-7 w-7 rounded-md bg-white/15 hover:bg-white/25 flex items-center justify-center shrink-0"
+                        type="button"
+                        aria-label="Edit session"
+                    >
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M12 20h9"/>
+                            <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>
+                        </svg>
+                    </button>
+                </div>
+                <div id="session-edit-row" class="session-meta-line hidden">
+                    <span class="session-meta-label">Session</span>
+                    <input
+                        id="session-id-input"
+                        class="h-8 min-w-0 flex-1 rounded-md border border-white/30 bg-white/95 px-2 text-xs text-gray-900 outline-none focus:border-white"
+                        type="text"
+                        autocomplete="off"
+                        aria-label="Session ID"
+                    >
+                    <button id="save-session-btn" class="h-8 w-8 rounded-md bg-white/15 hover:bg-white/25 flex items-center justify-center shrink-0" type="button" aria-label="Save session">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M20 6 9 17l-5-5"/>
+                        </svg>
+                    </button>
+                    <button id="cancel-session-btn" class="h-8 w-8 rounded-md bg-white/15 hover:bg-white/25 flex items-center justify-center shrink-0" type="button" aria-label="Cancel session edit">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M18 6 6 18"/>
+                            <path d="m6 6 12 12"/>
+                        </svg>
+                    </button>
+                </div>
+            </div>
 
             <main id="chat-container" class="flex-1 overflow-y-auto no-scrollbar p-4 space-y-4 flex flex-col bg-[#8baecf]" aria-live="polite">
                 <div id="chat-spacer" class="h-2"></div>
@@ -281,7 +356,7 @@
                         type="text"
                         id="message-input"
                         class="w-full bg-transparent outline-none text-sm text-gray-800 placeholder-gray-400 min-w-0"
-                        placeholder="พิมพ์ข้อความหรือ CA 12 หลัก"
+                        placeholder="พิมพ์ปัญหาไฟฟ้าของคุณ"
                         autocomplete="off"
                     >
                     <button id="send-button" class="ml-2 text-blue-500 font-semibold focus:outline-none hidden" type="button" aria-label="Send message">
@@ -312,6 +387,7 @@
         const agentBaseUrl = configuredAgentBaseUrl || "";
         const API_URL = agentBaseUrl ? `${agentBaseUrl}/ask` : "/agent/ask/";
         const NOTIFICATIONS_URL = agentBaseUrl ? `${agentBaseUrl}/notifications` : "/agent/notifications";
+        const SESSION_LOGIN_URL = "/api/reports/session-login/";
 
         const chatContainer = document.getElementById("chat-container");
         const messageInput = document.getElementById("message-input");
@@ -321,8 +397,23 @@
         const stateToggle = document.getElementById("state-toggle");
         const endpointLabel = document.getElementById("endpoint-label");
         const displaySessionId = document.getElementById("displaySessionId");
+        const displayCaNumber = document.getElementById("displayCaNumber");
+        const sessionDisplayRow = document.getElementById("session-display-row");
+        const sessionEditRow = document.getElementById("session-edit-row");
+        const sessionIdInput = document.getElementById("session-id-input");
+        const editSessionButton = document.getElementById("edit-session-btn");
+        const saveSessionButton = document.getElementById("save-session-btn");
+        const cancelSessionButton = document.getElementById("cancel-session-btn");
 
         endpointLabel.textContent = agentBaseUrl || "Django agent proxy";
+
+        const loggedInCaNumber = localStorage.getItem("pea_chat_ca_number") || "";
+        const hasPdpaConsent = localStorage.getItem("pea_chat_pdpa_consent") === "true";
+        const loginReady = /^\d{12}$/.test(loggedInCaNumber) && hasPdpaConsent;
+
+        if (!loginReady) {
+            window.location.replace("/");
+        }
 
         const botLightningIcon = `
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5 text-[#733190]">
@@ -349,6 +440,40 @@
             currentSessionId = sessionId;
             localStorage.setItem("pea_chat_session_id", sessionId);
             displaySessionId.textContent = sessionId;
+        }
+
+        function isValidSessionId(sessionId) {
+            return /^[A-Za-z0-9_.:-]{3,255}$/.test(sessionId);
+        }
+
+        function beginSessionEdit() {
+            sessionIdInput.value = currentSessionId;
+            sessionDisplayRow.classList.add("hidden");
+            sessionEditRow.classList.remove("hidden");
+            sessionEditRow.classList.add("flex");
+            sessionIdInput.focus();
+            sessionIdInput.select();
+        }
+
+        function cancelSessionEdit() {
+            sessionEditRow.classList.add("hidden");
+            sessionEditRow.classList.remove("flex");
+            sessionDisplayRow.classList.remove("hidden");
+        }
+
+        async function saveEditedSession() {
+            const nextSessionId = sessionIdInput.value.trim();
+            if (!isValidSessionId(nextSessionId)) {
+                stateBox.textContent = "Session ID ต้องใช้ตัวอักษร ตัวเลข หรือ . _ : - และยาวอย่างน้อย 3 ตัวอักษร";
+                sessionIdInput.focus();
+                return;
+            }
+
+            cancelSessionEdit();
+            setSessionId(nextSessionId);
+            initChat();
+            await registerCurrentSession();
+            messageInput.focus();
         }
 
         function formatTime() {
@@ -387,7 +512,7 @@
                         <div class="flex items-end">
                             <div class="chat-bubble-left bubble relative bg-white text-gray-800 text-sm py-2 px-3 rounded-2xl rounded-tl-md max-w-[280px] shadow-sm leading-relaxed whitespace-pre-wrap break-words">สวัสดีครับ แอดมินบอทยินดีให้บริการครับ
 
-หากพบปัญหาไฟฟ้าขัดข้อง สามารถพิมพ์รายละเอียดพร้อมหมายเลข CA ได้เลยครับ</div>
+แจ้งปัญหาไฟฟ้าขัดข้องได้เลยครับ</div>
                             <span class="text-[10px] text-white/70 ml-2 mb-1">${timeString}</span>
                         </div>
                     </div>
@@ -410,9 +535,10 @@
             applyStatePanelPreference();
         }
 
-        function resetSession() {
+        async function resetSession() {
             setSessionId(createSessionId());
             initChat();
+            await registerCurrentSession();
             messageInput.value = "";
             sendButton.classList.add("hidden");
             messageInput.focus();
@@ -524,9 +650,108 @@
             sendButton.disabled = isBusy;
         }
 
+        function formatCaseTime(value) {
+            if (!value) return null;
+            const date = new Date(value);
+            if (Number.isNaN(date.getTime())) return null;
+            return date.toLocaleTimeString("th-TH", {
+                hour: "2-digit",
+                minute: "2-digit"
+            });
+        }
+
+        function latestOutageSummary(outage) {
+            if (!outage || outage.event_type === "restored") return null;
+
+            const etrTime = formatCaseTime(outage.etr_target_time || outage.oms_etr);
+            if (etrTime) {
+                return `พบเคสที่เปิดอยู่สำหรับ CA นี้ครับ เวลาที่คาดว่าจะแก้ไขเสร็จและจ่ายไฟคืนคือประมาณ ${etrTime} น.`;
+            }
+
+            const etaTime = formatCaseTime(outage.eta_target_time);
+            if (etaTime) {
+                return `พบเคสที่เปิดอยู่สำหรับ CA นี้ครับ เวลาที่ช่างจะเดินทางไปถึงโดยประมาณคือ ${etaTime} น.`;
+            }
+
+            return "พบเคสที่เปิดอยู่สำหรับ CA นี้ครับ ระบบกำลังรอข้อมูลเวลาอัปเดตล่าสุด";
+        }
+
+        function renderChatHistory(chatHistory) {
+            if (!Array.isArray(chatHistory) || chatHistory.length === 0) {
+                return false;
+            }
+
+            clearChat();
+            chatSpacer().insertAdjacentHTML("beforebegin", `
+                <div class="flex justify-center my-2">
+                    <div class="bg-black/20 text-white text-[11px] px-3 py-1 rounded-full backdrop-blur-sm">ประวัติสนทนา</div>
+                </div>
+            `);
+
+            chatHistory.forEach((item) => {
+                const message = item.message || item.content || "";
+                if (!message) return;
+
+                if (item.role === "user") {
+                    appendUserMessage(message);
+                } else {
+                    appendBotMessage(message, {
+                        label: item.event_type ? "ระบบ OMS" : "ศูนย์รับแจ้งปัญหา"
+                    });
+                }
+            });
+            return true;
+        }
+
+        function applySessionContext(data) {
+            const hasHistory = renderChatHistory(data.chat_history);
+            if (!hasHistory) {
+                const summary = latestOutageSummary(data.latest_outage);
+                if (summary) {
+                    appendBotMessage(summary);
+                }
+            }
+            stateBox.textContent = JSON.stringify(
+                {
+                    session_id: currentSessionId,
+                    ca_number: loggedInCaNumber,
+                    latest_outage: data.latest_outage || null
+                },
+                null,
+                2
+            );
+        }
+
+        async function registerCurrentSession() {
+            if (!loginReady) return;
+
+            try {
+                const response = await fetch(SESSION_LOGIN_URL, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        session_id: currentSessionId,
+                        ca_number: loggedInCaNumber,
+                        pdpa_consent: true
+                    })
+                });
+                const data = await response.json();
+
+                if (response.ok) {
+                    applySessionContext(data);
+                } else {
+                    appendBotMessage("ไม่สามารถลงทะเบียน Session นี้ได้ กรุณากลับไปหน้าเข้าสู่ระบบอีกครั้ง");
+                    stateBox.textContent = JSON.stringify(data, null, 2);
+                }
+            } catch (error) {
+                appendBotMessage("เกิดข้อผิดพลาดในการลงทะเบียน Session");
+                stateBox.textContent = String(error);
+            }
+        }
+
         async function pollNotifications() {
             try {
-                const response = await fetch(`${NOTIFICATIONS_URL}/${currentSessionId}`);
+                const response = await fetch(`${NOTIFICATIONS_URL}/${encodeURIComponent(currentSessionId)}`);
                 const data = await response.json();
                 if (response.ok && Array.isArray(data.notifications)) {
                     data.notifications.forEach((notification) => {
@@ -554,7 +779,9 @@
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({
                         question: text,
-                        session_id: currentSessionId
+                        session_id: currentSessionId,
+                        ca_number: loggedInCaNumber,
+                        pdpa_consent: true
                     })
                 });
 
@@ -588,11 +815,27 @@
 
         sendButton.addEventListener("click", sendMessage);
         resetButton.addEventListener("click", resetSession);
+        editSessionButton.addEventListener("click", beginSessionEdit);
+        saveSessionButton.addEventListener("click", saveEditedSession);
+        cancelSessionButton.addEventListener("click", cancelSessionEdit);
+
+        sessionIdInput.addEventListener("keydown", function (event) {
+            if (event.key === "Enter") {
+                saveEditedSession();
+            }
+            if (event.key === "Escape") {
+                cancelSessionEdit();
+            }
+        });
 
         setSessionId(currentSessionId);
+        displayCaNumber.textContent = loggedInCaNumber || "-";
         applyStatePanelPreference();
-        initChat();
-        setInterval(pollNotifications, 2000);
+        if (loginReady) {
+            initChat();
+            registerCurrentSession();
+            setInterval(pollNotifications, 2000);
+        }
     </script>
 </body>
 </html>

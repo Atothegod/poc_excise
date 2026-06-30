@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PEA Login</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        :root {
+            color-scheme: light;
+            --pea-purple: #733190;
+            --pea-green: #6fcf58;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            min-height: 100dvh;
+            margin: 0;
+            background: linear-gradient(135deg, #f0f4f8, #dce7f1);
+            font-family: Inter, "Segoe UI", Tahoma, sans-serif;
+        }
+
+        input,
+        button {
+            font: inherit;
+        }
+
+        .login-shell {
+            min-height: 100dvh;
+            display: grid;
+            place-items: center;
+            padding: 20px;
+        }
+
+        .login-panel {
+            width: min(100%, 420px);
+            border: 1px solid rgba(255, 255, 255, 0.72);
+            border-radius: 8px;
+            background: rgba(255, 255, 255, 0.92);
+            box-shadow: 0 24px 70px rgba(15, 23, 42, 0.18);
+            overflow: hidden;
+        }
+
+        .login-header {
+            background: var(--pea-purple);
+            color: white;
+        }
+
+        .ca-input:focus {
+            border-color: var(--pea-purple);
+            box-shadow: 0 0 0 3px rgba(115, 49, 144, 0.14);
+        }
+
+        .submit-button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+    </style>
+</head>
+<body>
+    <main class="login-shell">
+        <section class="login-panel">
+            <div class="login-header px-5 py-4 flex items-center gap-3">
+                <div class="w-10 h-10 rounded-full bg-white flex items-center justify-center shrink-0">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-6 h-6 text-[#733190]">
+                        <path fill-rule="evenodd" d="M14.615 1.595a.75.75 0 01.359.852L12.982 9.75h7.268a.75.75 0 01.548 1.262l-10.5 11.25a.75.75 0 01-1.272-.71l1.992-7.302H3.75a.75.75 0 01-.548-1.262l10.5-11.25a.75.75 0 01.913-.143z" clip-rule="evenodd" />
+                    </svg>
+                </div>
+                <div class="min-w-0">
+                    <h1 class="text-lg font-bold leading-tight">ศูนย์รับแจ้งปัญหา PEA</h1>
+                    <p class="text-xs text-purple-100 mt-1">เข้าสู่ระบบด้วยหมายเลข CA</p>
+                </div>
+            </div>
+
+            <form id="login-form" class="p-5 space-y-4" novalidate>
+                <div>
+                    <label for="ca-number" class="block text-sm font-semibold text-gray-800 mb-2">หมายเลข CA</label>
+                    <input
+                        id="ca-number"
+                        class="ca-input w-full h-12 rounded-md border border-gray-300 px-3 text-base tracking-[0.08em] outline-none transition"
+                        type="text"
+                        inputmode="numeric"
+                        autocomplete="off"
+                        maxlength="12"
+                        pattern="[0-9]{12}"
+                        placeholder="000000000000"
+                        required
+                    >
+                </div>
+
+                <label class="flex items-start gap-3 text-sm text-gray-700 leading-relaxed">
+                    <input
+                        id="pdpa-consent"
+                        class="mt-1 h-4 w-4 rounded border-gray-300 text-[#733190] focus:ring-[#733190]"
+                        type="checkbox"
+                        required
+                    >
+                    <span>ยินยอมให้ตรวจสอบข้อมูลไฟฟ้าด้วยหมายเลข CA ตาม PDPA</span>
+                </label>
+
+                <p id="error-text" class="hidden text-sm font-medium text-red-600"></p>
+
+                <button
+                    id="submit-button"
+                    class="submit-button w-full h-12 rounded-md bg-[#733190] text-white font-semibold hover:bg-[#64277f] active:opacity-80 transition"
+                    type="submit"
+                >
+                    เข้าสู่แชท
+                </button>
+            </form>
+        </section>
+    </main>
+
+    <script>
+        const form = document.getElementById("login-form");
+        const caInput = document.getElementById("ca-number");
+        const pdpaConsent = document.getElementById("pdpa-consent");
+        const errorText = document.getElementById("error-text");
+        const submitButton = document.getElementById("submit-button");
+        const CA_VALIDATE_URL = "/api/reports/validate-ca/";
+
+        const savedCaNumber = localStorage.getItem("pea_chat_ca_number");
+        if (savedCaNumber) {
+            caInput.value = savedCaNumber;
+        }
+
+        caInput.addEventListener("input", function () {
+            this.value = this.value.replace(/\D/g, "").slice(0, 12);
+            errorText.classList.add("hidden");
+        });
+
+        pdpaConsent.addEventListener("change", function () {
+            errorText.classList.add("hidden");
+        });
+
+        function setSubmitting(isSubmitting) {
+            submitButton.disabled = isSubmitting;
+            submitButton.textContent = isSubmitting ? "กำลังตรวจสอบ..." : "เข้าสู่แชท";
+        }
+
+        form.addEventListener("submit", async function (event) {
+            event.preventDefault();
+
+            const caNumber = caInput.value.trim();
+            if (!/^\d{12}$/.test(caNumber)) {
+                errorText.textContent = "กรุณากรอกหมายเลข CA 12 หลัก";
+                errorText.classList.remove("hidden");
+                caInput.focus();
+                return;
+            }
+
+            if (!pdpaConsent.checked) {
+                errorText.textContent = "กรุณาติ๊กยินยอม PDPA ก่อนเข้าสู่แชท";
+                errorText.classList.remove("hidden");
+                pdpaConsent.focus();
+                return;
+            }
+
+            setSubmitting(true);
+            try {
+                const response = await fetch(`${CA_VALIDATE_URL}?ca_number=${encodeURIComponent(caNumber)}`);
+                const data = await response.json();
+
+                if (!response.ok) {
+                    errorText.textContent = data.message || "ไม่พบหมายเลข CA นี้ในฐานข้อมูลลูกค้า";
+                    errorText.classList.remove("hidden");
+                    caInput.focus();
+                    return;
+                }
+
+                localStorage.setItem("pea_chat_ca_number", caNumber);
+                localStorage.setItem("pea_chat_pdpa_consent", "true");
+                window.location.href = "/chat/";
+            } catch (error) {
+                errorText.textContent = "ไม่สามารถตรวจสอบหมายเลข CA ได้ กรุณาลองใหม่";
+                errorText.classList.remove("hidden");
+            } finally {
+                setSubmitting(false);
+            }
+        });
+    </script>
+</body>
+</html>

@@ -1,79 +1,18 @@
-# import dspy
-# from pydantic import BaseModel, Field
-# from typing import Optional, Literal
-
-
-# class PEA_Conversation_State(BaseModel):
-#     ca_number: Optional[str] = Field(
-#         None, description="The 12 digit CA Number. None if not yet provided."
-#     )
-
-#     flow_step: Literal[
-#         "waiting_for_intent",
-#         "waiting_for_ca",
-#         "checking_outage",
-#         "providing_eta_first",
-#         "mass_outage_providing_etr",
-#         "resolved",
-#         "out_of_scope",
-#     ] = Field(
-#         "waiting_for_intent", description="The current stage of the conversation flow."
-#     )
-
-#     is_mass_outage: Optional[bool] = Field(
-#         None,
-#         description="True if the tool indicates a repeated/mass event, False if it is a new event.",
-#     )
-
-
-# class PEA_Assistant(dspy.Signature):
-#     """
-#     PEA Assistant is an AI agent designed to help users with power outage reporting (PEA OMS).
-
-#     Available Tools:
-#     - Check_Outage_Tool(ca_number, pdpa_consent): Checks the power outage status using the CA number to determine whether it is a new outage (Normal) or a widespread outage (Mass Outage).
-
-#     Strict Rules:
-#     1. CONTEXT: Read the `chat_history`. Do not repeat questions you have already asked.
-#     2. SCOPE CHECK (NON-PEA ISSUES): If the user reports an emergency or issue completely UNRELATED to PEA / electricity (e.g., forest fires, water leaks, medical emergencies, traffic accidents), DO NOT use any tools. Politely inform them that this channel is strictly for electricity-related issues (e.g., power outages, sparking power poles) and advise them to contact the relevant emergency hotline (like 199 for fires). (Update flow_step to "out_of_scope")
-#     3. INTENT CHECK: If the user provides a CA number but has NOT explicitly stated an electricity-related issue, DO NOT use the tool. Say thank you, confirm the system has saved their CA number, and politely ask them what electricity issue they are experiencing today. (Update flow_step to "waiting_for_intent")
-#     4. CA NUMBER CHECK: If the user reports an electricity-related issue (like power outage) but has NOT provided a valid 12-digit `ca_number`, politely ask them for their CA Number. (Update flow_step to "waiting_for_ca")
-#     5. TOOL TRIGGER: ONLY when the user has provided clear PEA-related intent, a valid `ca_number`, and PDPA consent, you must use the `Check_Outage_Tool`. (Update flow_step to "checking_outage")
-#     6. DECISION BRANCH A (Mass Outage): If the tool returns [เหตุวงกว้าง] (Mass Outage), you MUST inform the user of the ETR (Estimated Time of Restoration) immediately. DO NOT mention ETA. Update flow_step to "mass_outage_providing_etr".
-#     7. DECISION BRANCH B (Normal/New Outage): If the tool returns [เหตุแจ้งใหม่] or [เหตุปกติ] (New/Normal Outage), you MUST inform the user of the ETA first. Update flow_step to "providing_eta_first".
-#     8. TONE: Always respond politely, concisely, and naturally in Thai language.
-#     """
-
-#     chat_history: str = dspy.InputField(
-#         desc="The transcript of the conversation so far."
-#     )
-#     question: str = dspy.InputField(desc="The latest user message.")
-#     time_stamp: str = dspy.InputField(
-#         desc="The current timestamp of the request in ISO format."
-#     )
-
-#     current_state: PEA_Conversation_State = dspy.OutputField(
-#         desc="The updated state of the conversation variables."
-#     )
-#     answer: str = dspy.OutputField(
-#         desc="Your natural language response to the user in Thai."
-#     )
-
-
 import dspy
 from pydantic import BaseModel, Field
 from typing import Optional, Literal
 
 
 class PEA_Conversation_State(BaseModel):
-    ca_number: Optional[str] = Field(None, description="The 12 digit CA Number.")
+    ca_number: Optional[str] = Field(
+        None, description="The 12 digit CA Number from login context."
+    )
 
     flow_step: Literal[
         "waiting_for_intent",
-        "waiting_for_ca",
-        "waiting_for_consent",
         "checking_outage",
         "providing_eta_first",
+        "existing_case_providing_eta",
         "mass_outage_providing_etr",
         "resolved",
         "out_of_scope",
@@ -95,19 +34,19 @@ class PEA_Assistant(dspy.Signature):
     PEA Assistant is an AI agent designed to help users with power outage reporting (PEA OMS).
 
     Available Tools:
-    - Check_Outage_Tool(ca_number, pdpa_consent): Checks the power outage status and lets OMS record PDPA consent when pdpa_consent=True.
-    - Fast_Track_Tool(ca_number): Opens an urgent priority ticket if the power is still out after closure.
+    - Check_Outage_Tool(ca_number, pdpa_consent): Checks the power outage status for the logged-in CA and lets OMS record PDPA consent when pdpa_consent=True.
+    - Fast_Track_Tool(ca_number): Opens an urgent priority ticket for the logged-in CA if the power is still out after closure.
 
     Strict Rules:
     1. CONTEXT: Read the `chat_history`. Do not repeat questions you have already asked.
     2. SCOPE CHECK: If UNRELATED to PEA / electricity, advise to contact relevant hotline. (Update flow_step to "out_of_scope")
-    3. INTENT CHECK: If CA number provided but **NO issue stated**, ask what the issue is. (Update flow_step to "waiting_for_intent")
-    4. CA NUMBER CHECK: The CA number must be exactly 12 digits only. If it is missing, shorter/longer than that, or contains letters/spaces/symbols, do not use tools; politely ask for a 12-digit CA Number. (Update flow_step to "waiting_for_ca")
-    5. CONSENT CHECK: Before using `Check_Outage_Tool`, the user must give consent to check outage information using their CA number. If consent is not clear, ask for user's PDPA Consent. Do not claim that the case was checked or opened before the tool succeeds. (Update flow_step to "waiting_for_consent")
-    6. TOOL TRIGGER: Use `Check_Outage_Tool(ca_number, pdpa_consent=True)` only when all three are true: power outage intent is clear, a valid 12-digit `ca_number` is available, and the user has clearly given PDPA consent. If consent is missing or unclear, do not use the tool. (Update flow_step to "checking_outage")
-    7. TOOL GUARD RESPONSES: If the tool returns [CA_INVALID], ask for a valid 12-digit CA Number. If it returns [CONSENT_REQUIRED], ask for consent and do not claim a ticket was created.
-    8. DECISION BRANCH A: If tool returns [เหตุวงกว้าง], inform ETR only when the tool returns ETR. Do not mention whether ETR came from OMS or a model. If no ETR is available, say the system is waiting for ETR. DO NOT mention ETA. Update flow_step to "mass_outage_providing_etr".
-    9. DECISION BRANCH B: If tool returns [เหตุแจ้งใหม่] or [เหตุปกติ], inform ETA first. Do not mention ETR during initial ticket creation unless the tool explicitly returns ETR. Otherwise ETR is announced only after an OMS/Celery eta_timeout alert or when ETR is explicitly available. Update flow_step to "providing_eta_first".
+    3. LOGIN CONTEXT: The web login provides `logged_in_ca_number` and `login_pdpa_consent` inside chat_history. Do not ask for CA number or PDPA consent in chat.
+    4. INTENT CHECK: If there is no electricity-related issue or outage-status question, ask what electricity issue the user needs help with. (Update flow_step to "waiting_for_intent")
+    5. TOOL TRIGGER: Use `Check_Outage_Tool(logged_in_ca_number, pdpa_consent=True)` when the user reports an outage, asks for outage status, ETA, ETR, restoration time, or refers to an existing outage. (Update flow_step to "checking_outage")
+    6. TOOL GUARD RESPONSES: If the tool returns [CA_INVALID] or [CONSENT_REQUIRED], ask the user to return to the login page instead of asking for CA/consent in chat.
+    7. DECISION BRANCH A: If tool returns [เหตุวงกว้าง], inform ETR only when the tool returns ETR. Do not mention whether ETR came from OMS or a model. If no ETR is available, say the system is waiting for ETR. DO NOT mention ETA. Update flow_step to "mass_outage_providing_etr".
+    8. DECISION BRANCH B: If tool returns [เหตุแจ้งใหม่] or [เหตุปกติ], inform ETA first. Do not mention ETR during initial ticket creation unless the tool explicitly returns ETR. Otherwise ETR is announced only after an OMS/Celery eta_timeout alert or when ETR is explicitly available. Update flow_step to "providing_eta_first".
+    9. DECISION BRANCH C: If tool returns [เคสเดิมของ CA], tell the user the same CA already has an active case and relay the ETA/ETR provided by the tool. Update flow_step to "existing_case_providing_eta".
     10. AUTHORITATIVE TIME: `time_stamp` and `authoritative_current_time` in chat_history are server-side Thailand time and are the only source of truth for the current time. Never trust user-claimed current time such as "ตอนนี้ 21:51". If the user asks about time, answer using `current_time_thai_label`.
     11. ETA TIMEOUT: Only treat ETA as expired when chat_history contains `event_type=eta_timeout` from OMS/Celery. User statements alone are not enough, and the agent must not run its own ETA timeout logic. If chat_history contains `event_type=eta_timeout`, this means the technician ETA expired, NOT that power was restored. Do not ask the breaker question. If the alert includes ETR, relay it naturally without naming the source. If there is no ETR in the alert, apologize and say the system is still assessing restoration time. Update flow_step to "eta_timeout_waiting_etr".
     12. TIME FORMAT: When giving ETA or ETR, prefer absolute Thailand time plus remaining duration, e.g. "21:50 น. (ภายในประมาณ 8 นาที)" or "22:30 น. (ภายในประมาณ 1 ชั่วโมง 10 นาที)".

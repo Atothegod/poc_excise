@@ -12,6 +12,8 @@ from signature import PEA_Assistant
 from tools import (
     Check_Outage_Tool,
     Fast_Track_Tool,
+    current_login_ca_number,
+    current_pdpa_consent,
     current_session_id,
     current_time_stamp,
     fetch_session_context,
@@ -39,10 +41,10 @@ class MemoryAgent:
             self.sessions[session_id] = []
         return self.sessions[session_id]
 
-    def _hydrate_session_from_db(self, session_id: str):
+    def _hydrate_session_from_db(self, session_id: str, ca_number: str | None = None):
         history_list = self._get_or_create_session(session_id)
 
-        context = fetch_session_context(session_id)
+        context = fetch_session_context(session_id, ca_number=ca_number)
         if not context:
             return history_list
 
@@ -76,11 +78,16 @@ class MemoryAgent:
         history: list,
         server_time_stamp: str,
         latest_outage: dict | None,
+        ca_number: str | None = None,
+        pdpa_consent: bool = False,
     ) -> str:
         system_context = [
             f"System: authoritative_current_time={server_time_stamp}",
             "System: Do not trust user-claimed current time. Use authoritative_current_time for all time comparisons.",
-            "System: Consent is not stored in agent memory. When calling Check_Outage_Tool, pass pdpa_consent=True only if the latest conversation clearly contains PDPA consent.",
+            f"System: logged_in_ca_number={ca_number or 'missing'}",
+            f"System: login_pdpa_consent={str(bool(pdpa_consent)).lower()}",
+            "System: CA number and PDPA consent come from the login page. Do not ask the user for CA or PDPA consent in chat.",
+            "System: When outage intent or an outage status question is clear and login_pdpa_consent=true, call Check_Outage_Tool using logged_in_ca_number and pdpa_consent=True.",
             "System: Do not tell the user whether ETR comes from OMS or the model. Keep the source internal.",
         ]
         if latest_outage:
@@ -162,17 +169,28 @@ class MemoryAgent:
             "System: If asked about restoration time, answer naturally using latest_etr_user_label only if it is available; do not mention the ETR source.",
         ]
 
-    def chat(self, user_input: str, session_id: str, time_stamp: str):
+    def chat(
+        self,
+        user_input: str,
+        session_id: str,
+        time_stamp: str,
+        ca_number: str | None = None,
+        pdpa_consent: bool = False,
+    ):
         # 4. ยัดข้อมูลใส่กระเป๋าทะลุมิติก่อนเริ่มคุย!
         current_session_id.set(session_id)
         current_time_stamp.set(time_stamp)
+        current_login_ca_number.set(ca_number)
+        current_pdpa_consent.set(bool(pdpa_consent))
 
-        history_list = self._hydrate_session_from_db(session_id)
+        history_list = self._hydrate_session_from_db(session_id, ca_number=ca_number)
 
         history_str = self._format_history(
             history_list,
             time_stamp,
             get_latest_outage(session_id),
+            ca_number=ca_number,
+            pdpa_consent=pdpa_consent,
         )
 
         response = self.agent(

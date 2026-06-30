@@ -72,3 +72,24 @@ class ChatHistorySyncSerializer(serializers.Serializer):
         if not value:
             return value
         return validate_ca_number_format(value)
+
+
+class SessionLoginSerializer(serializers.Serializer):
+    session_id = serializers.CharField(max_length=255)
+    ca_number = serializers.CharField(max_length=12, min_length=12)
+    pdpa_consent = serializers.BooleanField()
+
+    def validate_ca_number(self, value):
+        return validate_ca_number_format(value)
+
+    def validate_pdpa_consent(self, value):
+        if not value:
+            raise serializers.ValidationError("PDPA consent is required.")
+        return value
+
+
+class CaValidationSerializer(serializers.Serializer):
+    ca_number = serializers.CharField(max_length=12, min_length=12)
+
+    def validate_ca_number(self, value):
+        return validate_ca_number_format(value)

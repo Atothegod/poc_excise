@@ -3,6 +3,12 @@ from . import views_api
 
 urlpatterns = [
     path("reports/sync/", views_api.sync_agent_report, name="sync_report"),
+    path("reports/validate-ca/", views_api.validate_ca_login, name="validate_ca_login"),
+    path(
+        "reports/session-login/",
+        views_api.register_session_login,
+        name="session_login",
+    ),
     path("reports/chat-history/", views_api.sync_chat_history, name="sync_chat_history"),
     path(
         "reports/session-context/<str:session_id>/",

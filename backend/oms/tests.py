@@ -4,6 +4,7 @@ import math
 from datetime import timedelta
 from unittest.mock import patch
 
+from django.contrib.auth.models import User
 from django.contrib.admin.sites import AdminSite
 from django.test import TestCase
 from django.test.client import RequestFactory
@@ -128,6 +129,191 @@ class SyncAgentReportTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 400)
+
+    def test_session_login_links_same_ca_to_existing_active_case(self):
+        eta = timezone.now() + timedelta(minutes=20)
+        CustomerLocation.objects.create(
+            ca_number="123456789012",
+            fullname="Existing CA User",
+            latitude=9.2917,
+            longitude=100.926296,
+        )
+        case = OutageCase.objects.create(
+            title="Existing CA case",
+            latitude=9.2917,
+            longitude=100.926296,
+            eta_target_time=eta,
+        )
+        CustomerReport.objects.create(
+            session_id="session-one",
+            ca_number="123456789012",
+            related_case=case,
+        )
+        case.sync_affected_ca_numbers()
+
+        response = self.client.post(
+            "/api/reports/session-login/",
+            {
+                "session_id": "session-two",
+                "ca_number": "123456789012",
+                "pdpa_consent": True,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        report = CustomerReport.objects.get(
+            session_id="session-two", ca_number="123456789012"
+        )
+        self.assertEqual(report.related_case, case)
+        self.assertTrue(report.pdpa_consent)
+        self.assertIsNotNone(report.pdpa_consent_at)
+        case.refresh_from_db()
+        self.assertEqual(case.affected_ca_numbers, ["123456789012"])
+        self.assertEqual(response.data["latest_outage"]["case_id"], str(case.case_id))
+
+    def test_validate_ca_login_requires_customer_location(self):
+        response = self.client.get(
+            "/api/reports/validate-ca/", {"ca_number": "123456789012"}
+        )
+
+        self.assertEqual(response.status_code, 404)
+
+        CustomerLocation.objects.create(
+            ca_number="123456789012",
+            fullname="Valid CA User",
+            latitude=9.2917,
+            longitude=100.926296,
+        )
+
+        response = self.client.get(
+            "/api/reports/validate-ca/", {"ca_number": "123456789012"}
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], "success")
+        self.assertEqual(response.data["ca_number"], "123456789012")
+
+    def test_session_login_rejects_ca_without_customer_location(self):
+        response = self.client.post(
+            "/api/reports/session-login/",
+            {
+                "session_id": "session-missing-ca",
+                "ca_number": "123456789012",
+                "pdpa_consent": True,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertFalse(
+            CustomerReport.objects.filter(session_id="session-missing-ca").exists()
+        )
+
+    def test_session_login_works_without_csrf_for_authenticated_browser_session(self):
+        CustomerLocation.objects.create(
+            ca_number="123456789012",
+            fullname="CSRF User",
+            latitude=9.2917,
+            longitude=100.926296,
+        )
+        User.objects.create_user(username="admin-user", password="test-password")
+        csrf_client = APIClient(enforce_csrf_checks=True)
+        self.assertTrue(csrf_client.login(username="admin-user", password="test-password"))
+
+        response = csrf_client.post(
+            "/api/reports/session-login/",
+            {
+                "session_id": "session-csrf",
+                "ca_number": "123456789012",
+                "pdpa_consent": True,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(
+            CustomerReport.objects.filter(session_id="session-csrf").exists()
+        )
+
+    @patch("oms.views_api.get_pea_assessment")
+    def test_sync_report_reuses_active_case_for_same_ca_across_sessions(
+        self, mock_assessment
+    ):
+        case = OutageCase.objects.create(
+            title="Same CA active case",
+            latitude=9.2917,
+            longitude=100.926296,
+            eta_target_time=timezone.now() + timedelta(minutes=15),
+        )
+        CustomerReport.objects.create(
+            session_id="session-one",
+            ca_number="123456789012",
+            related_case=case,
+        )
+
+        response = self.client.post(
+            "/api/reports/sync/",
+            {
+                "session_id": "session-two",
+                "ca_number": "123456789012",
+                "pdpa_consent": True,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["event_type"], "existing_ca_case")
+        self.assertEqual(str(response.data["case_id"]), str(case.case_id))
+        self.assertEqual(OutageCase.objects.count(), 1)
+        report = CustomerReport.objects.get(
+            session_id="session-two", ca_number="123456789012"
+        )
+        self.assertEqual(report.related_case, case)
+        mock_assessment.assert_not_called()
+
+    @patch("oms.views_api.get_pea_assessment")
+    @patch("oms.views_api.check_eta_timeout.apply_async")
+    def test_new_case_attaches_waiting_same_ca_sessions(
+        self, mock_apply_async, mock_assessment
+    ):
+        mock_apply_async.return_value.id = "eta-task-id"
+        mock_assessment.return_value = {
+            "fastest_branch": "การไฟฟ้าส่วนภูมิภาค สาขา รังสิต",
+            "eta_formatted": "~ 8 min",
+            "estimated_etr_minutes": 69.0,
+        }
+        CustomerLocation.objects.create(
+            ca_number="123456789012",
+            fullname="Waiting Same CA User",
+            latitude=9.2917,
+            longitude=100.926296,
+        )
+        waiting_report = CustomerReport.objects.create(
+            session_id="session-two",
+            ca_number="123456789012",
+            pdpa_consent=True,
+        )
+
+        response = self.client.post(
+            "/api/reports/sync/",
+            {
+                "session_id": "session-one",
+                "ca_number": "123456789012",
+                "pdpa_consent": True,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["event_type"], "new_event")
+        waiting_report.refresh_from_db()
+        self.assertIsNotNone(waiting_report.related_case)
+        self.assertEqual(
+            str(waiting_report.related_case_id), str(response.data["case_id"])
+        )
+        case = OutageCase.objects.get(case_id=response.data["case_id"])
+        self.assertEqual(case.affected_ca_numbers, ["123456789012"])
 
     def test_sync_chat_history_stores_dialog_on_latest_report(self):
         report = CustomerReport.objects.create(

@@ -12,6 +12,8 @@ latest_outage_by_session = {}
 
 current_session_id = contextvars.ContextVar("current_session_id", default="unknown")
 current_time_stamp = contextvars.ContextVar("current_time_stamp", default=None)
+current_login_ca_number = contextvars.ContextVar("current_login_ca_number", default=None)
+current_pdpa_consent = contextvars.ContextVar("current_pdpa_consent", default=False)
 
 
 def is_valid_ca_number(ca_number: str) -> bool:
@@ -92,13 +94,18 @@ def restore_latest_outage(session_id: str, latest_outage: dict | None):
     latest_outage_by_session[session_id] = latest_outage
 
 
-def fetch_session_context(session_id: str):
+def fetch_session_context(session_id: str, ca_number: str | None = None):
     if not session_id or session_id == "unknown":
         return None
+
+    params = {}
+    if ca_number and is_valid_ca_number(ca_number):
+        params["ca_number"] = ca_number
 
     try:
         response = requests.get(
             f"{DJANGO_API_URL}/reports/session-context/{session_id}/",
+            params=params,
             timeout=5,
         )
         response.raise_for_status()
@@ -141,9 +148,10 @@ def sync_chat_history_to_db(session_id: str, history: list):
         return
 
     latest_outage = latest_outage_by_session.get(session_id) or {}
+    ca_number = latest_outage.get("ca_number") or current_login_ca_number.get()
     payload = {
         "session_id": session_id,
-        "ca_number": latest_outage.get("ca_number"),
+        "ca_number": ca_number,
         "chat_history": _normalize_dialog_history(history),
     }
 
@@ -186,13 +194,18 @@ def _format_etr_label(etr, etr_source=None):
 
 
 def Check_Outage_Tool(ca_number: str, pdpa_consent: bool = False):
-    ca_number = str(ca_number).strip()
+    login_ca_number = current_login_ca_number.get()
+    if login_ca_number and is_valid_ca_number(login_ca_number):
+        ca_number = login_ca_number
+    else:
+        ca_number = str(ca_number).strip()
+    pdpa_consent = bool(pdpa_consent or current_pdpa_consent.get())
 
     if not is_valid_ca_number(ca_number):
-        return "[CA_INVALID] หมายเลขผู้ใช้ไฟต้องเป็นตัวเลข 12 หลักเท่านั้น ห้ามมีตัวอักษรหรืออักขระอื่นปน"
+        return "[CA_INVALID] ไม่พบหมายเลข CA จากหน้าเข้าสู่ระบบ กรุณากลับไปเข้าสู่ระบบใหม่"
 
     if not pdpa_consent:
-        return "[CONSENT_REQUIRED] ต้องขออนุญาตลูกค้าก่อนใช้ Check_Outage_Tool เพื่อตรวจสอบข้อมูลไฟดับจากหมายเลขผู้ใช้ไฟ"
+        return "[CONSENT_REQUIRED] ยังไม่ได้รับ PDPA consent จากหน้าเข้าสู่ระบบ กรุณากลับไปเข้าสู่ระบบใหม่"
 
     db_response = save_report_to_db(ca_number, pdpa_consent)
 
@@ -217,6 +230,14 @@ def Check_Outage_Tool(ca_number: str, pdpa_consent: bool = False):
         return "[FallBack] ระบบประเมิน ETA/ETR ขัดข้อง ให้ตอบว่ากำลังโอนสายให้เจ้าหน้าที่"
 
     # เคส 2: เกิดเหตุวงกว้าง (Mass Outage) -> บังคับแจ้ง ETR ตาม Rule 6
+    if event_type == "existing_ca_case":
+        eta_label = format_time_with_countdown(eta) or db_response.get("eta_formatted") or eta
+        if etr_label:
+            return f"[เคสเดิมของ CA] แจ้ง {etr_label} แก่ลูกค้า"
+        if eta_label:
+            return f"[เคสเดิมของ CA] ระบบพบเคสที่เปิดอยู่แล้ว ให้แจ้ง ETA เดิม: {eta_label}"
+        return "[เคสเดิมของ CA] ระบบพบเคสที่เปิดอยู่แล้ว แต่ยังไม่มี ETA/ETR ล่าสุด"
+
     if event_type == "repeated_event":
         if etr_label:
             return f"[เหตุวงกว้าง] แจ้ง {etr_label} แก่ลูกค้า"
@@ -248,7 +269,11 @@ def Fast_Track_Tool(ca_number: str):
     เครื่องมือสำหรับใช้สร้างตั๋ว Fast-track ด่วน
     เมื่อลูกค้าบอกว่าไฟยังไม่มาและเช็คเบรกเกอร์แล้ว
     """
-    ca_number = str(ca_number).strip()
+    login_ca_number = current_login_ca_number.get()
+    if login_ca_number and is_valid_ca_number(login_ca_number):
+        ca_number = login_ca_number
+    else:
+        ca_number = str(ca_number).strip()
     if not is_valid_ca_number(ca_number):
         return "[CA_INVALID] หมายเลขผู้ใช้ไฟต้องเป็นตัวเลข 12 หลักเท่านั้น ห้ามมีตัวอักษรหรืออักขระอื่นปน"
 

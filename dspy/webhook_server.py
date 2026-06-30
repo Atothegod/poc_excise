@@ -25,6 +25,8 @@ app.add_middleware(
 class QuestionRequest(BaseModel):
     question: str
     session_id: str
+    ca_number: Optional[str] = None
+    pdpa_consent: bool = False
     time_stamp: Optional[str] = None
 
 
@@ -38,6 +40,21 @@ class NotificationWebhook(BaseModel):
     )
 
 
+def _state_payload(state, ca_number=None):
+    if state is None:
+        payload = {}
+    elif hasattr(state, "model_dump"):
+        payload = state.model_dump()
+    elif isinstance(state, dict):
+        payload = dict(state)
+    else:
+        payload = {"value": str(state)}
+
+    if ca_number:
+        payload["ca_number"] = ca_number
+    return payload
+
+
 @app.post("/ask")
 async def ask_agent(data: QuestionRequest):
     try:
@@ -49,11 +66,16 @@ async def ask_agent(data: QuestionRequest):
             user_input=data.question,
             session_id=data.session_id,
             time_stamp=final_time_stamp,
+            ca_number=data.ca_number,
+            pdpa_consent=data.pdpa_consent,
         )
 
         return {
             "answer": getattr(response, "answer", str(response)),
-            "state": getattr(response, "current_state", None),
+            "state": _state_payload(
+                getattr(response, "current_state", None),
+                ca_number=data.ca_number,
+            ),
             "used_timestamp": final_time_stamp,
         }
     except Exception as e:
@@ -101,9 +123,17 @@ async def receive_proactive_notification(data: NotificationWebhook):
             }
         )
         sync_chat_history_to_db(data.session_id, history_list)
-        context = fetch_session_context(data.session_id)
+        context = fetch_session_context(data.session_id, ca_number=data.ca_number)
         if context:
             restore_latest_outage(data.session_id, context.get("latest_outage"))
+        else:
+            restore_latest_outage(
+                data.session_id,
+                {
+                    "event_type": data.event_type,
+                    "ca_number": data.ca_number,
+                },
+            )
 
         return {"status": "success", "message": "Notification pushed to user."}
 

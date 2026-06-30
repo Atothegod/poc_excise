@@ -16,6 +16,10 @@ from .csv_exports import csv_response, write_csv
 from .models import OutageCase
 
 
+def login_page(request):
+    return render(request, "oms/login.html")
+
+
 def chat_page(request):
     return render(
         request,

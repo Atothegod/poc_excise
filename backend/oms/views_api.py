@@ -2,7 +2,12 @@ import math
 from datetime import timedelta
 
 from rest_framework import serializers
-from rest_framework.decorators import api_view
+from rest_framework.decorators import (
+    api_view,
+    authentication_classes,
+    permission_classes,
+)
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from django.utils import timezone
 
@@ -11,7 +16,9 @@ from .serializers import (
     AgentReportSerializer,
     ActionStatusRequestSerializer,
     ActionStatusResponseSerializer,
+    CaValidationSerializer,
     ChatHistorySyncSerializer,
+    SessionLoginSerializer,
     validate_ca_number_format,
 )
 from .services import format_minutes_label, get_pea_assessment, parse_eta_minutes
@@ -103,6 +110,174 @@ def _case_response_fields(case, include_model_etr=False):
     }
 
 
+def _get_or_create_active_report(session_id, ca_number):
+    report = (
+        CustomerReport.objects.filter(
+            session_id=session_id, ca_number=ca_number, is_resolved=False
+        )
+        .order_by("-updated_at")
+        .first()
+    )
+    if report:
+        return report, False
+    return (
+        CustomerReport.objects.create(session_id=session_id, ca_number=ca_number),
+        True,
+    )
+
+
+def _apply_customer_location(report, ca_number):
+    customer_location = CustomerLocation.objects.filter(ca_number=ca_number).first()
+    if not customer_location:
+        return
+
+    report.customer_name = customer_location.fullname
+    report.latitude = customer_location.latitude
+    report.longitude = customer_location.longitude
+
+
+def _grant_pdpa_consent(report):
+    report.pdpa_consent = True
+    if not report.pdpa_consent_at:
+        report.pdpa_consent_at = timezone.now()
+
+
+def _has_active_related_case(report):
+    return bool(
+        report
+        and report.related_case_id
+        and report.related_case
+        and report.related_case.status != "restored"
+    )
+
+
+def _active_reports_for_ca(ca_number):
+    return (
+        CustomerReport.objects.select_related("related_case")
+        .filter(
+            ca_number=ca_number,
+            is_resolved=False,
+            related_case__isnull=False,
+        )
+        .exclude(related_case__status="restored")
+        .order_by("-updated_at")
+    )
+
+
+def _latest_active_report_for_ca(ca_number, exclude_report_id=None):
+    reports = _active_reports_for_ca(ca_number)
+    if exclude_report_id:
+        reports = reports.exclude(id=exclude_report_id)
+    return reports.first()
+
+
+def _attach_active_ca_case(report):
+    if _has_active_related_case(report):
+        return False
+
+    active_report = _latest_active_report_for_ca(
+        report.ca_number, exclude_report_id=report.id
+    )
+    if not active_report or not active_report.related_case:
+        return False
+
+    report.related_case = active_report.related_case
+    return True
+
+
+def _attach_waiting_same_ca_reports(report):
+    if not report.related_case_id:
+        return 0
+
+    return (
+        CustomerReport.objects.filter(
+            ca_number=report.ca_number,
+            is_resolved=False,
+            related_case__isnull=True,
+        )
+        .exclude(id=report.id)
+        .update(related_case=report.related_case)
+    )
+
+
+def _should_include_model_etr(case):
+    return bool(
+        case
+        and case.eta_target_time
+        and timezone.now() >= case.eta_target_time
+        and not case.oms_etr
+    )
+
+
+def _latest_outage_for_report(report):
+    case = report.related_case
+    if not case:
+        return None
+
+    event_type = "restored" if case.status == "restored" else "active_case_exists"
+
+    if case.status in ["reported", "investigating"] and case.eta_target_time:
+        if timezone.now() >= case.eta_target_time:
+            event_type = "eta_timeout"
+
+    effective_etr = case.oms_etr
+    etr_source = "oms" if case.oms_etr else None
+    if not effective_etr and event_type == "eta_timeout":
+        effective_etr = case.pluem_etr_target_time
+        etr_source = case.effective_etr_source()
+
+    return {
+        "event_type": event_type,
+        "ca_number": report.ca_number,
+        "case_id": str(case.case_id),
+        "lv_group_id": case.lv_group_id,
+        "affected_ca_numbers": case.affected_ca_numbers or [],
+        "report_id": report.id,
+        "eta_target_time": _datetime_iso(case.eta_target_time),
+        "eta_formatted": case.assessment_eta_formatted or None,
+        "fastest_branch": case.assessment_fastest_branch or None,
+        "oms_etr": _datetime_iso(case.oms_etr),
+        "etr_target_time": _datetime_iso(effective_etr),
+        "etr_source": etr_source,
+        "pluem_etr_minutes": case.pluem_etr_minutes
+        if event_type == "eta_timeout" and not case.oms_etr
+        else None,
+        "pluem_etr_target_time": _datetime_iso(case.pluem_etr_target_time)
+        if event_type == "eta_timeout" and not case.oms_etr
+        else None,
+    }
+
+
+def _session_context_payload(session_id, report):
+    if not report:
+        return {
+            "status": "not_found",
+            "session_id": session_id,
+            "chat_history": [],
+            "latest_outage": None,
+        }
+
+    return {
+        "status": "success",
+        "session_id": session_id,
+        "report_id": report.id,
+        "ca_number": report.ca_number,
+        "chat_history": report.chat_history or [],
+        "latest_outage": _latest_outage_for_report(report),
+    }
+
+
+def _select_session_report(session_id, ca_number=None):
+    reports = CustomerReport.objects.filter(session_id=session_id)
+    if ca_number:
+        reports = reports.filter(ca_number=ca_number)
+
+    report = reports.filter(is_resolved=False).order_by("-updated_at").first()
+    if not report:
+        report = reports.order_by("-updated_at").first()
+    return report
+
+
 @api_view(["POST"])
 def sync_agent_report(request):
     serializer = AgentReportSerializer(data=request.data)
@@ -111,15 +286,9 @@ def sync_agent_report(request):
         session_id = data.get("session_id")
         ca_number = data.get("ca_number")
 
-        report, created = CustomerReport.objects.get_or_create(
-            session_id=session_id, ca_number=ca_number, is_resolved=False
-        )
+        report, created = _get_or_create_active_report(session_id, ca_number)
 
-        customer_location = CustomerLocation.objects.filter(ca_number=ca_number).first()
-        if customer_location:
-            report.customer_name = customer_location.fullname
-            report.latitude = customer_location.latitude
-            report.longitude = customer_location.longitude
+        _apply_customer_location(report, ca_number)
 
         if data.get("latitude") is not None:
             report.latitude = data.get("latitude")
@@ -128,11 +297,14 @@ def sync_agent_report(request):
         if data.get("time_stamp"):
             report.time_stamp = data.get("time_stamp")
         if data.get("pdpa_consent"):
-            report.pdpa_consent = True
-            if not report.pdpa_consent_at:
-                report.pdpa_consent_at = timezone.now()
+            _grant_pdpa_consent(report)
 
         event_type = "new_event"
+
+        if _has_active_related_case(report) and not created:
+            event_type = "existing_ca_case"
+        elif _attach_active_ca_case(report):
+            event_type = "existing_ca_case"
 
         has_coordinates = report.latitude is not None and report.longitude is not None
         if not has_coordinates and not report.related_case:
@@ -230,13 +402,17 @@ def sync_agent_report(request):
 
         report.save()
         if report.related_case:
+            _attach_waiting_same_ca_reports(report)
             report.related_case.sync_affected_ca_numbers()
 
         response_data = {
             "status": "success",
             "event_type": event_type,
             "report_id": report.id,
-            **_case_response_fields(report.related_case),
+            **_case_response_fields(
+                report.related_case,
+                include_model_etr=_should_include_model_etr(report.related_case),
+            ),
         }
         return Response(response_data)
     return Response(serializer.errors, status=400)
@@ -250,9 +426,7 @@ def get_action_status(request):
 
     ca_number = request_serializer.validated_data.get("ca_number")
     try:
-        report = CustomerReport.objects.filter(
-            ca_number=ca_number, is_resolved=False
-        ).last()
+        report = _latest_active_report_for_ca(ca_number)
         response_data = {
             "status": "first_time",
             "case_id": None,
@@ -281,6 +455,67 @@ def get_action_status(request):
         return Response(response_serializer.data)
     except Exception as e:
         return Response({"error": str(e)}, status=500)
+
+
+@api_view(["GET"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+def validate_ca_login(request):
+    serializer = CaValidationSerializer(data=request.query_params)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=400)
+
+    ca_number = serializer.validated_data["ca_number"]
+    customer_location = CustomerLocation.objects.filter(ca_number=ca_number).first()
+    if not customer_location:
+        return Response(
+            {
+                "status": "not_found",
+                "message": "ไม่พบหมายเลข CA นี้ในฐานข้อมูลลูกค้า",
+            },
+            status=404,
+        )
+
+    return Response(
+        {
+            "status": "success",
+            "ca_number": ca_number,
+            "customer_name": customer_location.fullname,
+        }
+    )
+
+
+@api_view(["POST"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+def register_session_login(request):
+    serializer = SessionLoginSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=400)
+
+    data = serializer.validated_data
+    if not CustomerLocation.objects.filter(ca_number=data["ca_number"]).exists():
+        return Response(
+            {
+                "status": "not_found",
+                "message": "ไม่พบหมายเลข CA นี้ในฐานข้อมูลลูกค้า",
+            },
+            status=404,
+        )
+
+    report, _created = _get_or_create_active_report(
+        data["session_id"], data["ca_number"]
+    )
+    _apply_customer_location(report, data["ca_number"])
+    _grant_pdpa_consent(report)
+    _attach_active_ca_case(report)
+    report.save()
+
+    if report.related_case:
+        _attach_waiting_same_ca_reports(report)
+        report.related_case.sync_affected_ca_numbers()
+
+    return Response(_session_context_payload(data["session_id"], report))
 
 
 @api_view(["POST"])
@@ -312,67 +547,15 @@ def sync_chat_history(request):
 
 @api_view(["GET"])
 def get_session_context(request, session_id):
-    reports = CustomerReport.objects.filter(session_id=session_id)
-    report = reports.filter(is_resolved=False).order_by("-updated_at").first()
-    if not report:
-        report = reports.order_by("-updated_at").first()
+    ca_number = request.query_params.get("ca_number")
+    if ca_number:
+        try:
+            ca_number = validate_ca_number_format(ca_number)
+        except serializers.ValidationError as e:
+            return Response({"error": str(e)}, status=400)
 
-    if not report:
-        return Response(
-            {
-                "status": "not_found",
-                "session_id": session_id,
-                "chat_history": [],
-                "latest_outage": None,
-            }
-        )
-
-    case = report.related_case
-    latest_outage = None
-    if case:
-        event_type = "restored" if case.status == "restored" else "active_case_exists"
-
-        if case.status in ["reported", "investigating"] and case.eta_target_time:
-            if timezone.now() >= case.eta_target_time:
-                event_type = "eta_timeout"
-
-        effective_etr = case.oms_etr
-        etr_source = "oms" if case.oms_etr else None
-        if not effective_etr and event_type == "eta_timeout":
-            effective_etr = case.pluem_etr_target_time
-            etr_source = case.effective_etr_source()
-
-        latest_outage = {
-            "event_type": event_type,
-            "ca_number": report.ca_number,
-            "case_id": str(case.case_id),
-            "lv_group_id": case.lv_group_id,
-            "affected_ca_numbers": case.affected_ca_numbers or [],
-            "report_id": report.id,
-            "eta_target_time": _datetime_iso(case.eta_target_time),
-            "eta_formatted": case.assessment_eta_formatted or None,
-            "fastest_branch": case.assessment_fastest_branch or None,
-            "oms_etr": _datetime_iso(case.oms_etr),
-            "etr_target_time": _datetime_iso(effective_etr),
-            "etr_source": etr_source,
-            "pluem_etr_minutes": case.pluem_etr_minutes
-            if event_type == "eta_timeout" and not case.oms_etr
-            else None,
-            "pluem_etr_target_time": _datetime_iso(case.pluem_etr_target_time)
-            if event_type == "eta_timeout" and not case.oms_etr
-            else None,
-        }
-
-    return Response(
-        {
-            "status": "success",
-            "session_id": session_id,
-            "report_id": report.id,
-            "ca_number": report.ca_number,
-            "chat_history": report.chat_history or [],
-            "latest_outage": latest_outage,
-        }
-    )
+    report = _select_session_report(session_id, ca_number=ca_number)
+    return Response(_session_context_payload(session_id, report))
 
 
 # --- API ใหม่สำหรับ Anti-Loop (Fast Track) ---
