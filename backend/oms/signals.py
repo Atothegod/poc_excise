@@ -2,7 +2,6 @@ from django.db.models.signals import pre_save, post_save
 from django.dispatch import receiver
 from django.utils import timezone
 from datetime import timedelta
-from math import ceil
 from .models import OutageCase, CustomerReport, OutageRestorationLog
 from .tasks import check_eta_timeout, check_etr_timeout, send_proactive_alert
 from pea_project.celery import app as celery_app
@@ -33,30 +32,17 @@ def _create_restoration_log(instance):
     )
 
 
-def _format_duration_label(target_time, now=None):
+def _format_time_label(target_time):
     if not target_time:
         return None
-
-    now = now or timezone.now()
-    remaining_minutes = ceil((target_time - now).total_seconds() / 60)
-    if remaining_minutes <= 0:
-        return "เลยกำหนดแล้ว"
-    if remaining_minutes < 60:
-        return f"ภายในประมาณ {remaining_minutes} นาที"
-
-    hours = remaining_minutes // 60
-    minutes = remaining_minutes % 60
-    if minutes:
-        return f"ภายในประมาณ {hours} ชั่วโมง {minutes} นาที"
-    return f"ภายในประมาณ {hours} ชั่วโมง"
+    return timezone.localtime(target_time).strftime("%H:%M น.")
 
 
-def _format_time_with_countdown(target_time):
-    if not target_time:
-        return None
-    time_label = timezone.localtime(target_time).strftime("%H:%M น.")
-    duration_label = _format_duration_label(target_time)
-    return f"{time_label} ({duration_label})"
+def _sla_case_start_time(instance, fallback=None):
+    case_start_times = [
+        value for value in [instance.sla_reference_time, instance.created_at] if value
+    ]
+    return min(case_start_times) if case_start_times else fallback
 
 
 @receiver(pre_save, sender=OutageCase)
@@ -126,8 +112,9 @@ def process_outage_case_updates(sender, instance, created, **kwargs):
 
     # --- กรณี OMS/Admin เติมหรือแก้ ETR ---
     if getattr(instance, "_has_new_oms_etr", False):
-        reference_time = timezone.now()
-        sla_target_time = reference_time + timedelta(hours=OutageCase.SLA_HOURS)
+        etr_updated_at = timezone.now()
+        sla_reference_time = _sla_case_start_time(instance, fallback=etr_updated_at)
+        sla_target_time = sla_reference_time + timedelta(hours=OutageCase.SLA_HOURS)
         old_etr_task_id = getattr(instance, "_old_celery_etr_task_id", None)
         if old_etr_task_id:
             celery_app.control.revoke(old_etr_task_id, terminate=True)
@@ -139,21 +126,21 @@ def process_outage_case_updates(sender, instance, created, **kwargs):
             )
             etr_task_id = task.id
 
-        instance.oms_etr_updated_at = reference_time
-        instance.sla_reference_time = reference_time
+        instance.oms_etr_updated_at = etr_updated_at
+        instance.sla_reference_time = sla_reference_time
         instance.sla_target_time = sla_target_time
         instance.sla_reason = "oms_etr_update"
         instance.celery_etr_task_id = etr_task_id
         OutageCase.objects.filter(pk=instance.pk).update(
-            oms_etr_updated_at=reference_time,
-            sla_reference_time=reference_time,
+            oms_etr_updated_at=etr_updated_at,
+            sla_reference_time=sla_reference_time,
             sla_target_time=sla_target_time,
             sla_reason="oms_etr_update",
             celery_etr_task_id=etr_task_id,
         )
 
         instance.sync_affected_ca_numbers()
-        etr_label = _format_time_with_countdown(instance.oms_etr)
+        etr_label = _format_time_label(instance.oms_etr)
         message = f"ETR ล่าสุด: {etr_label} ครับ"
         sent_session_ids = set()
         affected_customers = CustomerReport.objects.filter(

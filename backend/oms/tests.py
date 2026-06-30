@@ -538,7 +538,8 @@ class CheckEtaTimeoutTests(TestCase):
         self.assertEqual(payload["event_type"], "eta_timeout")
         self.assertIn("ครบกำหนด ETA", payload["message"])
         self.assertIn("ETR ล่าสุด", payload["message"])
-        self.assertIn("ภายในประมาณ", payload["message"])
+        self.assertIn(timezone.localtime(etr).strftime("%H:%M น."), payload["message"])
+        self.assertNotIn("ภายในประมาณ", payload["message"])
         self.assertNotIn("ช้ากว่ากำหนด", payload["message"])
         self.assertNotIn("ช่างช้า", payload["message"])
         self.assertNotIn("พี่ปลื้ม", payload["message"])
@@ -567,7 +568,10 @@ class CheckEtaTimeoutTests(TestCase):
         self.assertEqual(payload["event_type"], "eta_timeout")
         self.assertIn("ครบกำหนด ETA", payload["message"])
         self.assertIn("ETR ล่าสุด", payload["message"])
-        self.assertIn("ภายในประมาณ", payload["message"])
+        self.assertIn(
+            timezone.localtime(pluem_etr).strftime("%H:%M น."), payload["message"]
+        )
+        self.assertNotIn("ภายในประมาณ", payload["message"])
         self.assertNotIn("ช้ากว่ากำหนด", payload["message"])
         self.assertNotIn("ช่างช้า", payload["message"])
         self.assertNotIn("พี่ปลื้ม", payload["message"])
@@ -601,7 +605,8 @@ class CheckEtaTimeoutTests(TestCase):
         self.assertEqual(payload["event_type"], "eta_timeout")
         self.assertIn("ครบกำหนด ETA", payload["message"])
         self.assertIn("ETR ล่าสุด", payload["message"])
-        self.assertIn("ภายในประมาณ", payload["message"])
+        self.assertRegex(payload["message"], r"\d{2}:\d{2} น\.")
+        self.assertNotIn("ภายในประมาณ", payload["message"])
         self.assertNotIn("ช้ากว่ากำหนด", payload["message"])
         self.assertNotIn("ช่างช้า", payload["message"])
         self.assertNotIn("พี่ปลื้ม", payload["message"])
@@ -736,11 +741,15 @@ class CheckEtaTimeoutTests(TestCase):
             longitude=100.926296,
             eta_target_time=now - timedelta(hours=1),
             oms_etr=now - timedelta(minutes=1),
-            oms_etr_updated_at=now - timedelta(hours=1),
-            sla_reference_time=now - timedelta(hours=1),
-            sla_target_time=now + timedelta(hours=3),
+        )
+        wrong_sla_reference = case.created_at + timedelta(hours=1)
+        OutageCase.objects.filter(pk=case.pk).update(
+            oms_etr_updated_at=wrong_sla_reference,
+            sla_reference_time=wrong_sla_reference,
+            sla_target_time=wrong_sla_reference + timedelta(hours=4),
             sla_reason="oms_etr_update",
         )
+        case.refresh_from_db()
         CustomerReport.objects.create(
             session_id="session-etr-timeout",
             ca_number="123456789012",
@@ -748,12 +757,20 @@ class CheckEtaTimeoutTests(TestCase):
         )
 
         check_etr_timeout(case.case_id)
+        case.refresh_from_db()
+        expected_sla_target = case.created_at + timedelta(hours=OutageCase.SLA_HOURS)
 
         payload = mock_post.call_args.kwargs["json"]
         self.assertEqual(payload["event_type"], "etr_timeout_sla")
         self.assertIn("ETR ล่าสุดเลยกำหนด", payload["message"])
         self.assertIn("กฟภ.", payload["message"])
-        self.assertIn("ภายในประมาณ", payload["message"])
+        self.assertEqual(case.sla_reference_time, case.created_at)
+        self.assertEqual(case.sla_target_time, expected_sla_target)
+        self.assertIn(
+            timezone.localtime(expected_sla_target).strftime("%H:%M น."),
+            payload["message"],
+        )
+        self.assertNotIn("ภายในประมาณ", payload["message"])
 
 
 class OutageCaseSignalTests(TestCase):
@@ -790,6 +807,8 @@ class OutageCaseSignalTests(TestCase):
             related_case=case,
             is_resolved=True,
         )
+        original_sla_reference_time = case.sla_reference_time
+        original_sla_target_time = case.sla_target_time
 
         case.oms_etr = timezone.now() + timedelta(hours=1)
         case.save(update_fields=["oms_etr"])
@@ -800,8 +819,10 @@ class OutageCaseSignalTests(TestCase):
         self.assertIsNotNone(case.sla_target_time)
         self.assertEqual(case.sla_reason, "oms_etr_update")
         self.assertEqual(case.celery_etr_task_id, "etr-task-id")
-        self.assertEqual(
-            case.sla_target_time, case.sla_reference_time + timedelta(hours=4)
+        self.assertEqual(case.sla_reference_time, original_sla_reference_time)
+        self.assertEqual(case.sla_target_time, original_sla_target_time)
+        self.assertNotEqual(
+            case.sla_target_time, case.oms_etr_updated_at + timedelta(hours=4)
         )
         mock_apply_async.assert_called_once_with(
             args=[case.case_id], eta=case.oms_etr
@@ -839,7 +860,8 @@ class OutageCaseSignalTests(TestCase):
         call = mock_send_alert.call_args
         self.assertEqual(call.kwargs["event_type"], "etr_update")
         self.assertIn("ETR ล่าสุด", call.kwargs["message"])
-        self.assertIn("ภายในประมาณ", call.kwargs["message"])
+        self.assertNotIn("ภายในประมาณ", call.kwargs["message"])
+        self.assertRegex(call.kwargs["message"], r"\d{2}:\d{2} น\.")
         self.assertNotIn("พี่ปลื้ม", call.kwargs["message"])
         self.assertNotIn("OMS", call.kwargs["message"])
 

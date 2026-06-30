@@ -2,7 +2,7 @@ import requests
 import os
 import contextvars
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from math import ceil
 from zoneinfo import ZoneInfo
 
@@ -33,34 +33,29 @@ def current_authoritative_time():
     return datetime.now(ZoneInfo("Asia/Bangkok"))
 
 
-def format_duration_label(target_time, now=None):
-    if not target_time:
-        return None
-
-    now = now or current_authoritative_time()
-    remaining_minutes = ceil((target_time - now).total_seconds() / 60)
-    if remaining_minutes <= 0:
-        return "เลยกำหนดแล้ว"
-    if remaining_minutes < 60:
-        return f"ภายในประมาณ {remaining_minutes} นาที"
-
-    hours = remaining_minutes // 60
-    minutes = remaining_minutes % 60
-    if minutes:
-        return f"ภายในประมาณ {hours} ชั่วโมง {minutes} นาที"
-    return f"ภายในประมาณ {hours} ชั่วโมง"
-
-
-def format_time_with_countdown(value):
+def format_time_only(value):
     target_time = parse_iso_datetime(value)
     if not target_time:
         return None
 
-    bangkok_time = target_time.astimezone(ZoneInfo("Asia/Bangkok"))
-    duration_label = format_duration_label(target_time)
-    if duration_label:
-        return f"{bangkok_time.strftime('%H:%M น.')} ({duration_label})"
-    return bangkok_time.strftime("%H:%M น.")
+    return target_time.astimezone(ZoneInfo("Asia/Bangkok")).strftime("%H:%M น.")
+
+
+def format_eta_label(eta, eta_formatted=None):
+    eta_label = format_time_only(eta)
+    if eta_label:
+        return eta_label
+
+    if not eta_formatted:
+        return None
+
+    minute_match = re.search(r"(\d+(?:\.\d+)?)", str(eta_formatted))
+    if not minute_match:
+        return str(eta_formatted)
+
+    eta_minutes = ceil(float(minute_match.group(1)))
+    eta_time = current_authoritative_time() + timedelta(minutes=eta_minutes)
+    return eta_time.astimezone(ZoneInfo("Asia/Bangkok")).strftime("%H:%M น.")
 
 
 def remember_latest_outage(db_response, ca_number=None):
@@ -192,7 +187,7 @@ def save_report_to_db(ca_number: str, pdpa_consent: bool):
 def _format_etr_label(etr, etr_source=None):
     if not etr:
         return None
-    formatted_etr = format_time_with_countdown(etr)
+    formatted_etr = format_time_only(etr)
     return f"ETR: {formatted_etr or etr}"
 
 
@@ -221,7 +216,7 @@ def Check_Outage_Tool(ca_number: str, pdpa_consent: bool = False):
     etr = db_response.get("etr_target_time") or db_response.get("oms_etr")
     etr_label = _format_etr_label(etr, db_response.get("etr_source"))
     sla = db_response.get("sla_target_time")
-    sla_label = format_time_with_countdown(sla)
+    sla_label = format_time_only(sla)
     remember_latest_outage(db_response, ca_number=ca_number)
 
     # เคส 1: API ขัดข้องติดต่อกันจนครบกำหนด
@@ -241,11 +236,11 @@ def Check_Outage_Tool(ca_number: str, pdpa_consent: bool = False):
 
     # เคส 2: เกิดเหตุวงกว้าง (Mass Outage) -> บังคับแจ้ง ETR ตาม Rule 6
     if event_type == "existing_ca_case":
-        eta_label = format_time_with_countdown(eta) or db_response.get("eta_formatted") or eta
+        eta_label = format_eta_label(eta, db_response.get("eta_formatted")) or eta
         if etr_label:
             return f"[เคสเดิมของ CA] แจ้ง {etr_label}"
         if eta_label:
-            return f"[เคสเดิมของ CA] แจ้ง ETA เดิม: {eta_label}"
+            return f"[เคสเดิมของ CA] แจ้งเวลาช่างถึงหน้างานเดิมประมาณ {eta_label}"
         return "[เคสเดิมของ CA] ระบบพบเคสที่เปิดอยู่แล้ว แต่ยังไม่มี ETA/ETR ล่าสุด"
 
     if event_type == "repeated_event":
@@ -257,16 +252,17 @@ def Check_Outage_Tool(ca_number: str, pdpa_consent: bool = False):
     # เคส 3: แจ้งครั้งแรก (New Event) หรือ เคสเดี่ยว -> บังคับแจ้ง ETA ตาม Rule 7
     # และตรวจสอบ ETR เพิ่มเติม
     elif event_type == "new_event":
-        eta_label = format_time_with_countdown(eta) or db_response.get("eta_formatted") or eta
+        eta_label = format_eta_label(eta, db_response.get("eta_formatted")) or eta
         branch_label = f" สาขาที่ประเมินว่าไปถึงเร็วที่สุดคือ {fastest_branch}" if fastest_branch else ""
         if etr_label:
             return (
                 f"[เหตุแจ้งใหม่] เปิดใบงานแล้ว{branch_label} "
-                f"แจ้ง ETA: {eta_label} และ {etr_label}"
+                f"แจ้งว่าช่างจะถึงหน้างานประมาณ {eta_label} และ {etr_label}"
             )
         else:
             return (
-                f"[เหตุแจ้งใหม่] เปิดใบงานแล้ว{branch_label} แจ้ง ETA: {eta_label}"
+                f"[เหตุแจ้งใหม่] เปิดใบงานแล้ว{branch_label} "
+                f"แจ้งว่าช่างจะถึงหน้างานประมาณ {eta_label}"
             )
 
     return "ขัดข้อง ไม่สามารถระบุประเภทเหตุการณ์ได้"
@@ -295,7 +291,7 @@ def Fast_Track_Tool(ca_number: str):
         if data.get("event_type") == "fallback_to_human":
             return "[FallBack] โควต้าแจ้งซ้ำหมดแล้ว ให้ตอบว่ากำลังโอนสายให้เจ้าหน้าที่ (Force Fallback)"
 
-        sla_label = format_time_with_countdown(data.get("sla_target_time"))
+        sla_label = format_time_only(data.get("sla_target_time"))
         if sla_label:
             return f"[Success] เปิดเคสเร่งด่วนแล้ว แจ้งว่าจะดำเนินการให้ไม่เกิน {sla_label}"
         return "[Success] เปิดเคสเร่งด่วนแล้ว แจ้งว่าจะเร่งดำเนินการ"

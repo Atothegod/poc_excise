@@ -122,12 +122,11 @@ class OutageCase(models.Model):
         return None
 
     def set_sla_target(self, reference_time=None, reason=""):
-        reference_time = (
-            reference_time
-            or self.oms_etr_updated_at
-            or self.created_at
-            or timezone.now()
-        )
+        if reference_time is None:
+            case_start_times = [
+                value for value in [self.sla_reference_time, self.created_at] if value
+            ]
+            reference_time = min(case_start_times) if case_start_times else timezone.now()
         self.sla_reference_time = reference_time
         self.sla_target_time = reference_time + timedelta(hours=self.SLA_HOURS)
         self.sla_reason = reason

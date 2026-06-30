@@ -1,7 +1,6 @@
 from celery import shared_task
 from django.utils import timezone
 from datetime import timedelta
-from math import ceil
 from .models import OutageCase, CustomerReport
 from .services import get_pea_assessment
 import requests
@@ -21,34 +20,31 @@ def _parse_float(value):
         return None
 
 
-def _format_duration_label(target_time, now=None):
+def _format_time_label(target_time):
     if not target_time:
         return None
-
-    now = now or timezone.now()
-    remaining_minutes = ceil((target_time - now).total_seconds() / 60)
-    if remaining_minutes <= 0:
-        return "เลยกำหนดแล้ว"
-    if remaining_minutes < 60:
-        return f"ภายในประมาณ {remaining_minutes} นาที"
-
-    hours = remaining_minutes // 60
-    minutes = remaining_minutes % 60
-    if minutes:
-        return f"ภายในประมาณ {hours} ชั่วโมง {minutes} นาที"
-    return f"ภายในประมาณ {hours} ชั่วโมง"
+    return timezone.localtime(target_time).strftime("%H:%M น.")
 
 
-def _format_time_with_countdown(target_time):
-    if not target_time:
-        return None
-    time_label = timezone.localtime(target_time).strftime("%H:%M น.")
-    duration_label = _format_duration_label(target_time)
-    return f"{time_label} ({duration_label})"
+def _sla_case_start_time(case):
+    case_start_times = [
+        value for value in [case.sla_reference_time, case.created_at] if value
+    ]
+    return min(case_start_times) if case_start_times else None
 
 
 def _ensure_sla(case, reference_time=None, reason="case_created"):
-    if case.sla_target_time:
+    reference_time = reference_time or _sla_case_start_time(case)
+    expected_target_time = (
+        reference_time + timedelta(hours=OutageCase.SLA_HOURS)
+        if reference_time
+        else None
+    )
+    if (
+        case.sla_target_time
+        and case.sla_reference_time == reference_time
+        and case.sla_target_time == expected_target_time
+    ):
         return case
 
     case.set_sla_target(reference_time=reference_time, reason=reason)
@@ -148,7 +144,7 @@ def check_eta_timeout(case_id, report_id):
 
         etr_target_time = case.effective_etr_time()
         if etr_target_time:
-            etr_label = _format_time_with_countdown(etr_target_time)
+            etr_label = _format_time_label(etr_target_time)
             message = f"ครบกำหนด ETA แล้วครับ ขณะนี้ระบบแจ้ง ETR ล่าสุด: {etr_label}"
         else:
             message = "ครบกำหนด ETA แล้วครับ ระบบกำลังประเมินเวลาไฟกลับล่าสุด"
@@ -179,11 +175,11 @@ def check_etr_timeout(case_id):
         case.sync_affected_ca_numbers()
         case = _ensure_sla(
             case,
-            reference_time=case.oms_etr_updated_at or case.created_at,
+            reference_time=_sla_case_start_time(case),
             reason=case.sla_reason or "etr_timeout",
         )
 
-        sla_label = _format_time_with_countdown(case.sla_target_time)
+        sla_label = _format_time_label(case.sla_target_time)
         message = (
             "ETR ล่าสุดเลยกำหนดแล้วครับ "
             f"กฟภ.จะเร่งดำเนินการให้ไม่เกิน {sla_label} ครับ"

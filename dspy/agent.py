@@ -2,7 +2,6 @@
 import config
 import dspy
 from datetime import datetime
-from math import ceil
 from zoneinfo import ZoneInfo
 
 # 2. Now import your components safely
@@ -120,32 +119,10 @@ class MemoryAgent:
         bangkok_time = value.astimezone(ZoneInfo("Asia/Bangkok"))
         return bangkok_time.strftime("%H:%M น.")
 
-    def _format_remaining_label(
-        self, target_time: datetime | None, now: datetime | None
-    ) -> str | None:
-        if not target_time or not now:
-            return None
-
-        remaining_minutes = ceil((target_time - now).total_seconds() / 60)
-        if remaining_minutes <= 0:
-            return "เลยกำหนดแล้ว"
-        if remaining_minutes < 60:
-            return f"ภายในประมาณ {remaining_minutes} นาที"
-
-        hours = remaining_minutes // 60
-        minutes = remaining_minutes % 60
-        if minutes:
-            return f"ภายในประมาณ {hours} ชั่วโมง {minutes} นาที"
-        return f"ภายในประมาณ {hours} ชั่วโมง"
-
     def _format_user_time_label(
         self, target_time: datetime | None, now: datetime | None
     ) -> str | None:
-        thai_time = self._format_thai_time(target_time)
-        remaining_label = self._format_remaining_label(target_time, now)
-        if thai_time and remaining_label:
-            return f"{thai_time} ({remaining_label})"
-        return thai_time
+        return self._format_thai_time(target_time)
 
     def _format_temporal_context(
         self, server_time_stamp: str, latest_outage: dict
@@ -160,13 +137,10 @@ class MemoryAgent:
         return [
             f"System: current_time_thai_label={self._format_thai_time(now)}",
             f"System: latest_eta_thai_label={self._format_thai_time(eta)}",
-            f"System: latest_eta_remaining_label={self._format_remaining_label(eta, now)}",
-            f"System: latest_eta_user_label={self._format_user_time_label(eta, now)}",
+            f"System: latest_eta_user_label={self._format_thai_time(eta)}",
             f"System: latest_etr_thai_label={self._format_thai_time(etr)}",
-            f"System: latest_etr_remaining_label={self._format_remaining_label(etr, now)}",
             f"System: latest_etr_user_label={self._format_user_time_label(etr, now)}",
             f"System: latest_sla_thai_label={self._format_thai_time(sla)}",
-            f"System: latest_sla_remaining_label={self._format_remaining_label(sla, now)}",
             f"System: latest_sla_user_label={self._format_user_time_label(sla, now)}",
             "System: ETA timeout is an OMS/Celery event. Do not say ETA expired unless chat_history contains event_type=eta_timeout.",
             "System: If asked about current time, answer naturally using current_time_thai_label.",
