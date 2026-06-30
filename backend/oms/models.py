@@ -199,8 +199,6 @@ class CustomerReport(models.Model):
     chat_history = models.JSONField(
         default=list, blank=True, help_text="เก็บประวัติสนทนาแบบ dialog"
     )
-    needs_eta = models.BooleanField(default=False, help_text="ต้องการทราบเวลาช่างมาถึง")
-    needs_etr = models.BooleanField(default=False, help_text="ต้องการทราบเวลาไฟมา")
     pdpa_consent = models.BooleanField(
         default=False, help_text="ลูกค้าให้ความยินยอมให้ตรวจสอบข้อมูลด้วยหมายเลข CA"
     )
@@ -209,11 +207,6 @@ class CustomerReport(models.Model):
     )
     is_resolved = models.BooleanField(
         default=False, help_text="จบการสนทนาหรือไฟมาปกติแล้ว"
-    )
-
-    # --- เพิ่มฟิลด์สำหรับระบบ Anti-Loop ---
-    fast_track_quota = models.IntegerField(
-        default=1, help_text="โควต้าการแจ้งไฟดับซ้ำซ้อน (1 ครั้ง/เคส)"
     )
 
     time_stamp = models.DateTimeField(

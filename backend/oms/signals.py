@@ -141,7 +141,7 @@ def process_outage_case_updates(sender, instance, created, **kwargs):
 
         instance.sync_affected_ca_numbers()
         etr_label = _format_time_label(instance.oms_etr)
-        message = f"ETR ล่าสุด: {etr_label} ครับ"
+        message = f"อัปเดตล่าสุด คาดว่าจะจ่ายไฟคืนประมาณ {etr_label} ครับ"
         sent_session_ids = set()
         affected_customers = CustomerReport.objects.filter(
             related_case=instance, is_resolved=False

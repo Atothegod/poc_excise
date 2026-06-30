@@ -188,7 +188,7 @@ def _format_etr_label(etr, etr_source=None):
     if not etr:
         return None
     formatted_etr = format_time_only(etr)
-    return f"ETR: {formatted_etr or etr}"
+    return f"คาดว่าจะจ่ายไฟคืนประมาณ {formatted_etr or etr}"
 
 
 def Check_Outage_Tool(ca_number: str, pdpa_consent: bool = False):
@@ -227,12 +227,12 @@ def Check_Outage_Tool(ca_number: str, pdpa_consent: bool = False):
         return "[CA_NOT_FOUND] ไม่พบหมายเลข CA นี้ในฐานข้อมูลพิกัดลูกค้า กรุณาตรวจสอบหมายเลข CA อีกครั้ง หรือโอนให้เจ้าหน้าที่ช่วยตรวจสอบ"
 
     if event_type == "assessment_error":
-        return "[FallBack] ระบบประเมิน ETA/ETR ขัดข้อง ให้ตอบว่ากำลังโอนสายให้เจ้าหน้าที่"
+        return "[FallBack] ระบบประเมินเวลาเข้าหน้างานหรือเวลาไฟกลับขัดข้อง ให้ตอบว่ากำลังโอนสายให้เจ้าหน้าที่"
 
     if event_type == "etr_timeout_sla":
         if sla_label:
-            return f"[SLA] ETR ล่าสุดเลยกำหนดแล้ว แจ้งว่าจะเร่งดำเนินการให้ไม่เกิน {sla_label}"
-        return "[SLA] ETR ล่าสุดเลยกำหนดแล้ว แจ้งว่าระบบกำลังเร่งดำเนินการ"
+            return f"[กำหนดเวลาเร่งดำเนินการ] เวลาไฟกลับที่ประเมินไว้เลยกำหนดแล้ว แจ้งว่าจะเร่งดำเนินการให้ไม่เกิน {sla_label}"
+        return "[กำหนดเวลาเร่งดำเนินการ] เวลาไฟกลับที่ประเมินไว้เลยกำหนดแล้ว แจ้งว่าระบบกำลังเร่งดำเนินการ"
 
     # เคส 2: เกิดเหตุวงกว้าง (Mass Outage) -> บังคับแจ้ง ETR ตาม Rule 6
     if event_type == "existing_ca_case":
@@ -241,13 +241,13 @@ def Check_Outage_Tool(ca_number: str, pdpa_consent: bool = False):
             return f"[เคสเดิมของ CA] แจ้ง {etr_label}"
         if eta_label:
             return f"[เคสเดิมของ CA] แจ้งเวลาช่างถึงหน้างานเดิมประมาณ {eta_label}"
-        return "[เคสเดิมของ CA] ระบบพบเคสที่เปิดอยู่แล้ว แต่ยังไม่มี ETA/ETR ล่าสุด"
+        return "[เคสเดิมของ CA] ระบบพบเคสที่เปิดอยู่แล้ว แต่ยังไม่มีเวลาประเมินล่าสุด"
 
     if event_type == "repeated_event":
         if etr_label:
             return f"[เหตุวงกว้าง] แจ้ง {etr_label}"
         else:
-            return "[เหตุวงกว้าง] ยังไม่มี ETR ล่าสุด ระบบกำลังประเมินเวลาไฟกลับครับ"
+            return "[เหตุวงกว้าง] ยังไม่มีเวลาไฟกลับล่าสุด ระบบกำลังประเมินเวลาไฟกลับครับ"
 
     # เคส 3: แจ้งครั้งแรก (New Event) หรือ เคสเดี่ยว -> บังคับแจ้ง ETA ตาม Rule 7
     # และตรวจสอบ ETR เพิ่มเติม
@@ -281,20 +281,35 @@ def Fast_Track_Tool(ca_number: str):
         return "[CA_INVALID] หมายเลขผู้ใช้ไฟต้องเป็นตัวเลข 12 หลักเท่านั้น ห้ามมีตัวอักษรหรืออักขระอื่นปน"
 
     endpoint = f"{DJANGO_API_URL}/reports/fast-track/"
-    payload = {"ca_number": ca_number}
+    payload = {"ca_number": ca_number, "session_id": current_session_id.get()}
 
     try:
         response = requests.post(endpoint, json=payload, timeout=5)
         response.raise_for_status()
         data = response.json()
 
-        if data.get("event_type") == "fallback_to_human":
-            return "[FallBack] โควต้าแจ้งซ้ำหมดแล้ว ให้ตอบว่ากำลังโอนสายให้เจ้าหน้าที่ (Force Fallback)"
+        remember_latest_outage(
+            {
+                "event_type": data.get("event_type"),
+                "ca_number": ca_number,
+                "case_id": data.get("case_id"),
+                "lv_group_id": data.get("lv_group_id"),
+                "sla_target_time": data.get("sla_target_time"),
+                "sla_reference_time": data.get("sla_reference_time"),
+                "sla_reason": data.get("sla_reason"),
+            },
+            ca_number=ca_number,
+        )
 
         sla_label = format_time_only(data.get("sla_target_time"))
+        action_label = (
+            "รับเรื่องไว้ในเคสเร่งด่วนเดิมแล้ว"
+            if data.get("event_type") == "fast_track_existing"
+            else "เปิดเคสเร่งด่วนแล้ว"
+        )
         if sla_label:
-            return f"[Success] เปิดเคสเร่งด่วนแล้ว แจ้งว่าจะดำเนินการให้ไม่เกิน {sla_label}"
-        return "[Success] เปิดเคสเร่งด่วนแล้ว แจ้งว่าจะเร่งดำเนินการ"
+            return f"[Success] {action_label} แจ้งว่าจะดำเนินการให้ไม่เกิน {sla_label}"
+        return f"[Success] {action_label} แจ้งว่าจะเร่งดำเนินการ"
 
     except Exception as e:
         return "[FallBack] ระบบขัดข้อง ให้ตอบว่ากำลังโอนสายให้เจ้าหน้าที่ (Force Fallback)"

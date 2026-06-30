@@ -181,6 +181,37 @@ def _latest_active_report_for_ca(ca_number, exclude_report_id=None):
     return reports.first()
 
 
+def _active_fast_track_case_for_ca(ca_number):
+    report = (
+        _active_reports_for_ca(ca_number)
+        .filter(related_case__case_type="fast_track")
+        .first()
+    )
+    return report.related_case if report else None
+
+
+def _select_fast_track_report(ca_number, session_id=None):
+    if session_id:
+        report = (
+            CustomerReport.objects.filter(session_id=session_id, ca_number=ca_number)
+            .order_by("-updated_at")
+            .first()
+        )
+        if report:
+            return report
+
+        report = CustomerReport(session_id=session_id, ca_number=ca_number)
+        _apply_customer_location(report, ca_number)
+        report.save()
+        return report
+
+    return (
+        CustomerReport.objects.filter(ca_number=ca_number)
+        .order_by("-updated_at")
+        .first()
+    )
+
+
 def _attach_active_ca_case(report):
     if _has_active_related_case(report):
         return False
@@ -593,20 +624,41 @@ def fast_track_report(request):
     เปิดเคสเร่งด่วนเมื่อลูกค้ายังไม่มีไฟหลังระบบปิดเคสเดิมแล้ว
     """
     ca_number = request.data.get("ca_number")
+    session_id = str(request.data.get("session_id") or "").strip() or None
+    if session_id == "unknown":
+        session_id = None
     try:
         ca_number = validate_ca_number_format(ca_number)
     except serializers.ValidationError as e:
         return Response({"error": str(e)}, status=400)
 
-    # ดึงประวัติลูกค้าล่าสุดที่เคสเพิ่งถูกปิดไป (is_resolved=True ล่าสุด) หรือเคสเดิม
-    report = (
-        CustomerReport.objects.filter(ca_number=ca_number)
-        .order_by("-updated_at")
-        .first()
-    )
+    report = _select_fast_track_report(ca_number, session_id=session_id)
 
     if not report:
         return Response({"event_type": "fallback", "message": "ไม่พบข้อมูลประวัติ"})
+
+    _apply_customer_location(report, ca_number)
+
+    active_fast_track_case = _active_fast_track_case_for_ca(ca_number)
+    if active_fast_track_case:
+        report.is_resolved = False
+        report.related_case = active_fast_track_case
+        report.save()
+        _attach_waiting_same_ca_reports(report)
+        active_fast_track_case.sync_affected_ca_numbers()
+        return Response(
+            {
+                "event_type": "fast_track_existing",
+                "message": "รับเรื่องไว้ในเคสเร่งด่วนเดิมแล้วครับ",
+                "case_id": str(active_fast_track_case.case_id),
+                "lv_group_id": active_fast_track_case.lv_group_id,
+                "sla_target_time": _datetime_iso(active_fast_track_case.sla_target_time),
+                "sla_reference_time": _datetime_iso(
+                    active_fast_track_case.sla_reference_time
+                ),
+                "sla_reason": active_fast_track_case.sla_reason,
+            }
+        )
 
     base_time = timezone.now()
     new_case = OutageCase.objects.create(

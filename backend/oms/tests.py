@@ -485,20 +485,19 @@ class SyncAgentReportTests(TestCase):
 
         self.assertEqual(response.status_code, 400)
 
-    def test_fast_track_ignores_quota_and_creates_sla_case(self):
+    def test_fast_track_creates_sla_case(self):
         CustomerReport.objects.create(
             session_id="session-fast-track",
             ca_number="123456789012",
             latitude=9.2917,
             longitude=100.926296,
             is_resolved=True,
-            fast_track_quota=0,
         )
 
         before = timezone.now()
         response = self.client.post(
             "/api/reports/fast-track/",
-            {"ca_number": "123456789012"},
+            {"ca_number": "123456789012", "session_id": "session-fast-track"},
             format="json",
         )
         after = timezone.now()
@@ -513,6 +512,49 @@ class SyncAgentReportTests(TestCase):
         self.assertEqual(
             case.sla_target_time, case.sla_reference_time + timedelta(hours=4)
         )
+
+    def test_fast_track_reuses_active_fast_track_case_for_same_ca(self):
+        CustomerReport.objects.create(
+            session_id="session-b",
+            ca_number="123456789012",
+            latitude=9.2917,
+            longitude=100.926296,
+            is_resolved=True,
+        )
+        CustomerReport.objects.create(
+            session_id="session-a",
+            ca_number="123456789012",
+            latitude=9.2917,
+            longitude=100.926296,
+            is_resolved=True,
+        )
+
+        first_response = self.client.post(
+            "/api/reports/fast-track/",
+            {"ca_number": "123456789012", "session_id": "session-b"},
+            format="json",
+        )
+        second_response = self.client.post(
+            "/api/reports/fast-track/",
+            {"ca_number": "123456789012", "session_id": "session-a"},
+            format="json",
+        )
+
+        self.assertEqual(first_response.status_code, 200)
+        self.assertEqual(second_response.status_code, 200)
+        self.assertEqual(first_response.data["event_type"], "fast_track_created")
+        self.assertEqual(second_response.data["event_type"], "fast_track_existing")
+        self.assertEqual(first_response.data["case_id"], second_response.data["case_id"])
+        self.assertEqual(OutageCase.objects.filter(case_type="fast_track").count(), 1)
+
+        fast_track_case = OutageCase.objects.get(case_id=first_response.data["case_id"])
+        session_a_report = CustomerReport.objects.get(session_id="session-a")
+        session_b_report = CustomerReport.objects.get(session_id="session-b")
+        self.assertFalse(session_a_report.is_resolved)
+        self.assertFalse(session_b_report.is_resolved)
+        self.assertEqual(session_a_report.related_case, fast_track_case)
+        self.assertEqual(session_b_report.related_case, fast_track_case)
+        self.assertEqual(fast_track_case.affected_ca_numbers, ["123456789012"])
 
 
 class CheckEtaTimeoutTests(TestCase):
@@ -536,10 +578,15 @@ class CheckEtaTimeoutTests(TestCase):
 
         payload = mock_post.call_args.kwargs["json"]
         self.assertEqual(payload["event_type"], "eta_timeout")
-        self.assertIn("ครบกำหนด ETA", payload["message"])
-        self.assertIn("ETR ล่าสุด", payload["message"])
+        self.assertIn("ขออัปเดตสถานะ", payload["message"])
+        self.assertIn("ทีมงานกำลังดำเนินการอยู่", payload["message"])
+        self.assertIn("คาดว่าจะจ่ายไฟคืน", payload["message"])
+        self.assertNotIn("ครบเวลาประเมินการเข้าหน้างาน", payload["message"])
         self.assertIn(timezone.localtime(etr).strftime("%H:%M น."), payload["message"])
         self.assertNotIn("ภายในประมาณ", payload["message"])
+        self.assertNotIn("ETA", payload["message"])
+        self.assertNotIn("ETR", payload["message"])
+        self.assertNotIn("SLA", payload["message"])
         self.assertNotIn("ช้ากว่ากำหนด", payload["message"])
         self.assertNotIn("ช่างช้า", payload["message"])
         self.assertNotIn("พี่ปลื้ม", payload["message"])
@@ -566,12 +613,17 @@ class CheckEtaTimeoutTests(TestCase):
 
         payload = mock_post.call_args.kwargs["json"]
         self.assertEqual(payload["event_type"], "eta_timeout")
-        self.assertIn("ครบกำหนด ETA", payload["message"])
-        self.assertIn("ETR ล่าสุด", payload["message"])
+        self.assertIn("ขออัปเดตสถานะ", payload["message"])
+        self.assertIn("ทีมงานกำลังดำเนินการอยู่", payload["message"])
+        self.assertIn("คาดว่าจะจ่ายไฟคืน", payload["message"])
+        self.assertNotIn("ครบเวลาประเมินการเข้าหน้างาน", payload["message"])
         self.assertIn(
             timezone.localtime(pluem_etr).strftime("%H:%M น."), payload["message"]
         )
         self.assertNotIn("ภายในประมาณ", payload["message"])
+        self.assertNotIn("ETA", payload["message"])
+        self.assertNotIn("ETR", payload["message"])
+        self.assertNotIn("SLA", payload["message"])
         self.assertNotIn("ช้ากว่ากำหนด", payload["message"])
         self.assertNotIn("ช่างช้า", payload["message"])
         self.assertNotIn("พี่ปลื้ม", payload["message"])
@@ -603,10 +655,15 @@ class CheckEtaTimeoutTests(TestCase):
 
         payload = mock_post.call_args.kwargs["json"]
         self.assertEqual(payload["event_type"], "eta_timeout")
-        self.assertIn("ครบกำหนด ETA", payload["message"])
-        self.assertIn("ETR ล่าสุด", payload["message"])
+        self.assertIn("ขออัปเดตสถานะ", payload["message"])
+        self.assertIn("ทีมงานกำลังดำเนินการอยู่", payload["message"])
+        self.assertIn("คาดว่าจะจ่ายไฟคืน", payload["message"])
+        self.assertNotIn("ครบเวลาประเมินการเข้าหน้างาน", payload["message"])
         self.assertRegex(payload["message"], r"\d{2}:\d{2} น\.")
         self.assertNotIn("ภายในประมาณ", payload["message"])
+        self.assertNotIn("ETA", payload["message"])
+        self.assertNotIn("ETR", payload["message"])
+        self.assertNotIn("SLA", payload["message"])
         self.assertNotIn("ช้ากว่ากำหนด", payload["message"])
         self.assertNotIn("ช่างช้า", payload["message"])
         self.assertNotIn("พี่ปลื้ม", payload["message"])
@@ -644,8 +701,13 @@ class CheckEtaTimeoutTests(TestCase):
 
         payload = mock_post.call_args.kwargs["json"]
         self.assertEqual(payload["event_type"], "eta_timeout")
-        self.assertIn("ครบกำหนด ETA", payload["message"])
+        self.assertIn("ขออัปเดตสถานะ", payload["message"])
+        self.assertIn("ทีมงานกำลังดำเนินการอยู่", payload["message"])
         self.assertIn("กำลังประเมินเวลาไฟกลับล่าสุด", payload["message"])
+        self.assertNotIn("ครบเวลาประเมินการเข้าหน้างาน", payload["message"])
+        self.assertNotIn("ETA", payload["message"])
+        self.assertNotIn("ETR", payload["message"])
+        self.assertNotIn("SLA", payload["message"])
         self.assertNotIn("ช้ากว่ากำหนด", payload["message"])
         self.assertNotIn("ช่างช้า", payload["message"])
         self.assertNotIn("พี่ปลื้ม", payload["message"])
@@ -671,7 +733,12 @@ class CheckEtaTimeoutTests(TestCase):
 
         payload = mock_post.call_args.kwargs["json"]
         self.assertEqual(payload["event_type"], "eta_timeout")
-        self.assertIn("ครบกำหนด ETA", payload["message"])
+        self.assertIn("ขออัปเดตสถานะ", payload["message"])
+        self.assertIn("ทีมงานกำลังดำเนินการอยู่", payload["message"])
+        self.assertNotIn("ครบเวลาประเมินการเข้าหน้างาน", payload["message"])
+        self.assertNotIn("ETA", payload["message"])
+        self.assertNotIn("ETR", payload["message"])
+        self.assertNotIn("SLA", payload["message"])
 
     @patch("oms.tasks.requests.post")
     def test_eta_timeout_skips_restored_status(self, mock_post):
@@ -762,7 +829,7 @@ class CheckEtaTimeoutTests(TestCase):
 
         payload = mock_post.call_args.kwargs["json"]
         self.assertEqual(payload["event_type"], "etr_timeout_sla")
-        self.assertIn("ETR ล่าสุดเลยกำหนด", payload["message"])
+        self.assertIn("เวลาไฟกลับที่ประเมินไว้เลยกำหนด", payload["message"])
         self.assertIn("กฟภ.", payload["message"])
         self.assertEqual(case.sla_reference_time, case.created_at)
         self.assertEqual(case.sla_target_time, expected_sla_target)
@@ -771,6 +838,9 @@ class CheckEtaTimeoutTests(TestCase):
             payload["message"],
         )
         self.assertNotIn("ภายในประมาณ", payload["message"])
+        self.assertNotIn("ETA", payload["message"])
+        self.assertNotIn("ETR", payload["message"])
+        self.assertNotIn("SLA", payload["message"])
 
 
 class OutageCaseSignalTests(TestCase):
@@ -859,8 +929,12 @@ class OutageCaseSignalTests(TestCase):
         self.assertEqual(mock_send_alert.call_count, 1)
         call = mock_send_alert.call_args
         self.assertEqual(call.kwargs["event_type"], "etr_update")
-        self.assertIn("ETR ล่าสุด", call.kwargs["message"])
+        self.assertIn("อัปเดตล่าสุด", call.kwargs["message"])
+        self.assertIn("คาดว่าจะจ่ายไฟคืน", call.kwargs["message"])
         self.assertNotIn("ภายในประมาณ", call.kwargs["message"])
+        self.assertNotIn("ETA", call.kwargs["message"])
+        self.assertNotIn("ETR", call.kwargs["message"])
+        self.assertNotIn("SLA", call.kwargs["message"])
         self.assertRegex(call.kwargs["message"], r"\d{2}:\d{2} น\.")
         self.assertNotIn("พี่ปลื้ม", call.kwargs["message"])
         self.assertNotIn("OMS", call.kwargs["message"])

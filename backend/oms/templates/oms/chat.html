@@ -665,12 +665,12 @@
 
             const etrTime = formatCaseTime(outage.etr_target_time || outage.oms_etr);
             if (etrTime) {
-                return `พบเคสที่เปิดอยู่สำหรับ CA นี้ครับ เวลาที่คาดว่าจะแก้ไขเสร็จและจ่ายไฟคืนคือประมาณ ${etrTime} น.`;
+                return `พบเคสที่เปิดอยู่สำหรับ CA นี้ครับ คาดว่าจะจ่ายไฟคืนประมาณ ${etrTime} น.`;
             }
 
             const etaTime = formatCaseTime(outage.eta_target_time);
             if (etaTime) {
-                return `พบเคสที่เปิดอยู่สำหรับ CA นี้ครับ เวลาที่ช่างจะเดินทางไปถึงโดยประมาณคือ ${etaTime} น.`;
+                return `พบเคสที่เปิดอยู่สำหรับ CA นี้ครับ ช่างจะถึงหน้างานประมาณ ${etaTime} น.`;
             }
 
             return "พบเคสที่เปิดอยู่สำหรับ CA นี้ครับ ระบบกำลังรอข้อมูลเวลาอัปเดตล่าสุด";

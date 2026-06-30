@@ -87,7 +87,8 @@ class MemoryAgent:
             f"System: login_pdpa_consent={str(bool(pdpa_consent)).lower()}",
             "System: CA number and PDPA consent come from the login page. Do not ask the user for CA or PDPA consent in chat.",
             "System: When outage intent or an outage status question is clear and login_pdpa_consent=true, call Check_Outage_Tool using logged_in_ca_number and pdpa_consent=True.",
-            "System: Do not tell the user whether ETR comes from OMS or the model. Keep the source internal.",
+            "System: Do not tell the user whether restoration time comes from OMS or the model. Keep the source internal.",
+            "System: In customer-facing answers, never use ETA, ETR, or SLA. Use plain Thai wording such as technician arrival time, expected power restoration time, and not-later-than time.",
         ]
         if latest_outage:
             system_context.append(
@@ -142,7 +143,7 @@ class MemoryAgent:
             f"System: latest_etr_user_label={self._format_user_time_label(etr, now)}",
             f"System: latest_sla_thai_label={self._format_thai_time(sla)}",
             f"System: latest_sla_user_label={self._format_user_time_label(sla, now)}",
-            "System: ETA timeout is an OMS/Celery event. Do not say ETA expired unless chat_history contains event_type=eta_timeout.",
+            "System: event_type=eta_timeout is an OMS/Celery event. Do not say the technician arrival estimate is past unless chat_history contains event_type=eta_timeout.",
             "System: If asked about current time, answer naturally using current_time_thai_label.",
             "System: If asked about technician arrival before eta_timeout event, answer naturally using latest_eta_user_label.",
             "System: If asked about restoration time, answer naturally using latest_etr_user_label only if it is available; do not mention the ETR source.",
