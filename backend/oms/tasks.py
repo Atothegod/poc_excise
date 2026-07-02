@@ -33,6 +33,10 @@ def _sla_case_start_time(case):
     return min(case_start_times) if case_start_times else None
 
 
+def _sla_case_start_reason(case):
+    return "fast_track" if case.case_type == "fast_track" else "case_created"
+
+
 def _ensure_sla(case, reference_time=None, reason="case_created"):
     reference_time = reference_time or _sla_case_start_time(case)
     expected_target_time = (
@@ -182,7 +186,7 @@ def check_etr_timeout(case_id):
         case = _ensure_sla(
             case,
             reference_time=_sla_case_start_time(case),
-            reason=case.sla_reason or "etr_timeout",
+            reason=_sla_case_start_reason(case),
         )
 
         sla_label = _format_time_label(case.sla_target_time)

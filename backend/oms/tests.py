@@ -833,6 +833,7 @@ class CheckEtaTimeoutTests(TestCase):
         self.assertIn("กฟภ.", payload["message"])
         self.assertEqual(case.sla_reference_time, case.created_at)
         self.assertEqual(case.sla_target_time, expected_sla_target)
+        self.assertEqual(case.sla_reason, "case_created")
         self.assertIn(
             timezone.localtime(expected_sla_target).strftime("%H:%M น."),
             payload["message"],
@@ -879,6 +880,7 @@ class OutageCaseSignalTests(TestCase):
         )
         original_sla_reference_time = case.sla_reference_time
         original_sla_target_time = case.sla_target_time
+        original_sla_reason = case.sla_reason
 
         case.oms_etr = timezone.now() + timedelta(hours=1)
         case.save(update_fields=["oms_etr"])
@@ -887,7 +889,7 @@ class OutageCaseSignalTests(TestCase):
         self.assertIsNotNone(case.oms_etr_updated_at)
         self.assertIsNotNone(case.sla_reference_time)
         self.assertIsNotNone(case.sla_target_time)
-        self.assertEqual(case.sla_reason, "oms_etr_update")
+        self.assertEqual(case.sla_reason, original_sla_reason)
         self.assertEqual(case.celery_etr_task_id, "etr-task-id")
         self.assertEqual(case.sla_reference_time, original_sla_reference_time)
         self.assertEqual(case.sla_target_time, original_sla_target_time)
@@ -966,7 +968,9 @@ class OutageCaseSignalTests(TestCase):
         self.assertIsNotNone(log.etr_delta_minutes)
         call = mock_send_alert.call_args
         self.assertEqual(call.kwargs["event_type"], "closed_loop_prompt")
-        self.assertIn("เปิดเคสเร่งด่วน", call.kwargs["message"])
+        self.assertIn("ไฟกลับมาใช้งานได้แล้วหรือยัง", call.kwargs["message"])
+        self.assertNotIn("พิมพ์", call.kwargs["message"])
+        self.assertNotIn("เปิดเคสเร่งด่วน", call.kwargs["message"])
         self.assertNotIn("เบรกเกอร์", call.kwargs["message"])
         self.assertNotIn("คัตเอาต์", call.kwargs["message"])
 
@@ -981,6 +985,218 @@ class OpsWebhookConsoleTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "OMS Webhook Console")
         self.assertContains(response, "Export")
+
+    def test_chat_page_contains_closed_loop_dropdown_options(self):
+        response = self.client.get("/chat/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "เลือกสถานะไฟฟ้า")
+        self.assertContains(response, "ไฟมาแล้ว / ใช้งานได้แล้ว")
+        self.assertContains(response, "ยังไม่มีไฟ / เปิดเคสเร่งด่วน")
+        self.assertContains(response, "closed_loop_prompt")
+
+    def test_ops_map_page_renders(self):
+        response = self.client.get("/ops/map/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "OMS Location Map")
+        self.assertContains(response, "Legend")
+        self.assertContains(response, "Filter")
+
+    def test_ops_map_data_returns_customer_location_with_case_metadata(self):
+        location = CustomerLocation.objects.create(
+            ca_number="123456789012",
+            fullname="Somchai Map",
+            pea_area="PEA Rangsit",
+            latitude=13.7563,
+            longitude=100.5018,
+        )
+        case = OutageCase.objects.create(
+            title="Map fast-track case",
+            case_type="fast_track",
+            status="reported",
+            affected_ca_numbers=[location.ca_number],
+            latitude=13.7563,
+            longitude=100.5018,
+        )
+        CustomerReport.objects.create(
+            session_id="session-map",
+            ca_number=location.ca_number,
+            related_case=case,
+        )
+
+        response = self.client.get("/ops/map/data/")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["summary"]["total_locations"], 1)
+        marker = payload["markers"][0]
+        self.assertEqual(marker["ca_number"], location.ca_number)
+        self.assertEqual(marker["customer_name"], "Somchai Map")
+        self.assertEqual(marker["case"]["case_id"], str(case.case_id))
+        self.assertEqual(marker["case"]["case_type"], "fast_track")
+        self.assertEqual(marker["marker"]["status"], "reported")
+        self.assertTrue(marker["marker"]["is_fast_track"])
+
+    def test_ops_map_show_all_controls_locations_without_cases(self):
+        assigned_location = CustomerLocation.objects.create(
+            ca_number="123456789012",
+            fullname="Assigned Map",
+            pea_area="PEA Rangsit",
+            latitude=13.7563,
+            longitude=100.5018,
+        )
+        unassigned_location = CustomerLocation.objects.create(
+            ca_number="999999999999",
+            fullname="No Case Map",
+            pea_area="PEA Khlong Luang",
+            latitude=14.0081,
+            longitude=100.5247,
+        )
+        case = OutageCase.objects.create(
+            title="Assigned map case",
+            affected_ca_numbers=[assigned_location.ca_number],
+            latitude=13.7563,
+            longitude=100.5018,
+        )
+        CustomerReport.objects.create(
+            session_id="session-map-assigned",
+            ca_number=assigned_location.ca_number,
+            related_case=case,
+        )
+
+        default_response = self.client.get("/ops/map/data/")
+        show_all_response = self.client.get("/ops/map/data/", {"show_all": "true"})
+
+        self.assertEqual(
+            {marker["ca_number"] for marker in default_response.json()["markers"]},
+            {assigned_location.ca_number},
+        )
+        self.assertEqual(
+            {marker["ca_number"] for marker in show_all_response.json()["markers"]},
+            {assigned_location.ca_number, unassigned_location.ca_number},
+        )
+        no_case_marker = [
+            marker
+            for marker in show_all_response.json()["markers"]
+            if marker["ca_number"] == unassigned_location.ca_number
+        ][0]
+        self.assertIsNone(no_case_marker["case"])
+        self.assertEqual(no_case_marker["marker"]["status"], "no_case")
+
+    def test_ops_map_data_filters_by_status_type_date_and_text(self):
+        fast_location = CustomerLocation.objects.create(
+            ca_number="123456789012",
+            fullname="Fast Track Customer",
+            pea_area="PEA Rangsit",
+            latitude=13.7563,
+            longitude=100.5018,
+        )
+        restored_location = CustomerLocation.objects.create(
+            ca_number="123456789013",
+            fullname="Restored Customer",
+            pea_area="PEA Khlong Luang",
+            latitude=14.0081,
+            longitude=100.5247,
+        )
+        fast_case = OutageCase.objects.create(
+            title="Fast Track Search Case",
+            case_type="fast_track",
+            status="repairing",
+            affected_ca_numbers=[fast_location.ca_number],
+            latitude=13.7563,
+            longitude=100.5018,
+        )
+        restored_case = OutageCase.objects.create(
+            title="Restored Search Case",
+            status="restored",
+            affected_ca_numbers=[restored_location.ca_number],
+            latitude=14.0081,
+            longitude=100.5247,
+        )
+        CustomerReport.objects.create(
+            session_id="session-map-fast",
+            ca_number=fast_location.ca_number,
+            related_case=fast_case,
+        )
+        CustomerReport.objects.create(
+            session_id="session-map-restored",
+            ca_number=restored_location.ca_number,
+            related_case=restored_case,
+        )
+
+        text_response = self.client.get("/ops/map/data/", {"search": "rangsit"})
+        type_response = self.client.get("/ops/map/data/", {"case_type": "fast_track"})
+        status_response = self.client.get("/ops/map/data/", {"status": "restored"})
+        date_response = self.client.get(
+            "/ops/map/data/",
+            {"created_from": timezone.localdate().isoformat()},
+        )
+        future_response = self.client.get(
+            "/ops/map/data/",
+            {"created_from": (timezone.localdate() + timedelta(days=1)).isoformat()},
+        )
+
+        self.assertEqual(
+            {marker["ca_number"] for marker in text_response.json()["markers"]},
+            {fast_location.ca_number},
+        )
+        self.assertEqual(
+            {marker["ca_number"] for marker in type_response.json()["markers"]},
+            {fast_location.ca_number},
+        )
+        self.assertEqual(
+            {marker["ca_number"] for marker in status_response.json()["markers"]},
+            {restored_location.ca_number},
+        )
+        self.assertIn(
+            fast_location.ca_number,
+            {marker["ca_number"] for marker in date_response.json()["markers"]},
+        )
+        self.assertEqual(future_response.json()["markers"], [])
+
+    def test_ops_map_case_search_includes_all_customer_locations_in_case(self):
+        first_location = CustomerLocation.objects.create(
+            ca_number="123456789012",
+            fullname="First Case Customer",
+            pea_area="PEA Rangsit",
+            latitude=13.7563,
+            longitude=100.5018,
+        )
+        second_location = CustomerLocation.objects.create(
+            ca_number="123456789013",
+            fullname="Second Case Customer",
+            pea_area="PEA Rangsit",
+            latitude=13.7564,
+            longitude=100.5019,
+        )
+        case = OutageCase.objects.create(
+            title="Shared CA map case",
+            affected_ca_numbers=[first_location.ca_number, second_location.ca_number],
+            latitude=13.7563,
+            longitude=100.5018,
+        )
+        CustomerReport.objects.create(
+            session_id="session-map-shared",
+            ca_number=first_location.ca_number,
+            related_case=case,
+        )
+        CustomerReport.objects.create(
+            session_id="session-map-shared-second",
+            ca_number=second_location.ca_number,
+            related_case=case,
+        )
+
+        response = self.client.get(
+            "/ops/map/data/",
+            {"search": first_location.ca_number},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            {marker["ca_number"] for marker in response.json()["markers"]},
+            {first_location.ca_number, second_location.ca_number},
+        )
 
     def test_ops_cases_export_csv_uses_current_filters(self):
         matching_case = OutageCase.objects.create(

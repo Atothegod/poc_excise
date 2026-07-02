@@ -35,7 +35,8 @@
         }
 
         button,
-        input {
+        input,
+        select {
             font: inherit;
         }
 
@@ -595,7 +596,37 @@
 
             const bubble = document.createElement("div");
             bubble.className = "chat-bubble-left bubble relative bg-white text-gray-800 text-sm py-2 px-3 rounded-2xl rounded-tl-md max-w-[280px] shadow-sm leading-relaxed whitespace-pre-wrap break-words";
-            bubble.textContent = text;
+            if (options.restorationSelect) {
+                const messageText = document.createElement("div");
+                messageText.textContent = text;
+                bubble.appendChild(messageText);
+
+                const select = document.createElement("select");
+                select.className = "mt-3 w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-800 outline-none focus:border-[#733190] focus:ring-2 focus:ring-[#733190]/20 disabled:bg-gray-100 disabled:text-gray-500";
+                select.setAttribute("aria-label", "เลือกสถานะไฟฟ้าหลังจ่ายไฟคืน");
+
+                [
+                    ["", "เลือกสถานะไฟฟ้า"],
+                    ["ใช้งานได้แล้ว", "ไฟมาแล้ว / ใช้งานได้แล้ว"],
+                    ["ยังไม่มีไฟ", "ยังไม่มีไฟ / เปิดเคสเร่งด่วน"],
+                ].forEach(([value, label]) => {
+                    const option = document.createElement("option");
+                    option.value = value;
+                    option.textContent = label;
+                    select.appendChild(option);
+                });
+
+                select.addEventListener("change", function () {
+                    const selectedText = this.value;
+                    if (!selectedText) return;
+                    this.disabled = true;
+                    sendMessage(selectedText);
+                });
+
+                bubble.appendChild(select);
+            } else {
+                bubble.textContent = text;
+            }
 
             const time = document.createElement("span");
             time.className = "text-[10px] text-white/70 ml-2 mb-1";
@@ -688,7 +719,7 @@
                 </div>
             `);
 
-            chatHistory.forEach((item) => {
+            chatHistory.forEach((item, index) => {
                 const message = item.message || item.content || "";
                 if (!message) return;
 
@@ -696,7 +727,9 @@
                     appendUserMessage(message);
                 } else {
                     appendBotMessage(message, {
-                        label: item.event_type ? "ระบบ OMS" : "ศูนย์รับแจ้งปัญหา"
+                        label: item.event_type ? "ระบบ OMS" : "ศูนย์รับแจ้งปัญหา",
+                        restorationSelect: item.event_type === "closed_loop_prompt"
+                            && index === chatHistory.length - 1
                     });
                 }
             });
@@ -755,7 +788,10 @@
                 const data = await response.json();
                 if (response.ok && Array.isArray(data.notifications)) {
                     data.notifications.forEach((notification) => {
-                        appendBotMessage(notification.message || "");
+                        appendBotMessage(notification.message || "", {
+                            label: notification.event_type ? "ระบบ OMS" : "ศูนย์รับแจ้งปัญหา",
+                            restorationSelect: notification.event_type === "closed_loop_prompt"
+                        });
                     });
                 }
             } catch (error) {
@@ -763,8 +799,9 @@
             }
         }
 
-        async function sendMessage() {
-            const text = messageInput.value.trim();
+        async function sendMessage(textOverride) {
+            const hasPresetText = typeof textOverride === "string";
+            const text = (hasPresetText ? textOverride : messageInput.value).trim();
             if (!text) return;
 
             appendUserMessage(text);

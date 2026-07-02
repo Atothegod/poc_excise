@@ -38,13 +38,6 @@ def _format_time_label(target_time):
     return timezone.localtime(target_time).strftime("%H:%M น.")
 
 
-def _sla_case_start_time(instance, fallback=None):
-    case_start_times = [
-        value for value in [instance.sla_reference_time, instance.created_at] if value
-    ]
-    return min(case_start_times) if case_start_times else fallback
-
-
 @receiver(pre_save, sender=OutageCase)
 def track_eta_changes(sender, instance, **kwargs):
     """
@@ -113,8 +106,6 @@ def process_outage_case_updates(sender, instance, created, **kwargs):
     # --- กรณี OMS/Admin เติมหรือแก้ ETR ---
     if getattr(instance, "_has_new_oms_etr", False):
         etr_updated_at = timezone.now()
-        sla_reference_time = _sla_case_start_time(instance, fallback=etr_updated_at)
-        sla_target_time = sla_reference_time + timedelta(hours=OutageCase.SLA_HOURS)
         old_etr_task_id = getattr(instance, "_old_celery_etr_task_id", None)
         if old_etr_task_id:
             celery_app.control.revoke(old_etr_task_id, terminate=True)
@@ -127,15 +118,9 @@ def process_outage_case_updates(sender, instance, created, **kwargs):
             etr_task_id = task.id
 
         instance.oms_etr_updated_at = etr_updated_at
-        instance.sla_reference_time = sla_reference_time
-        instance.sla_target_time = sla_target_time
-        instance.sla_reason = "oms_etr_update"
         instance.celery_etr_task_id = etr_task_id
         OutageCase.objects.filter(pk=instance.pk).update(
             oms_etr_updated_at=etr_updated_at,
-            sla_reference_time=sla_reference_time,
-            sla_target_time=sla_target_time,
-            sla_reason="oms_etr_update",
             celery_etr_task_id=etr_task_id,
         )
 
@@ -183,7 +168,7 @@ def process_outage_case_updates(sender, instance, created, **kwargs):
             # 3. ส่งข้อความยืนยันไฟมาเชิงรุกไปหาลูกค้า
             message = (
                 "ระบบแจ้งว่าจ่ายไฟคืนแล้วครับ "
-                'หากยังไม่มีไฟ พิมพ์ "ยังไม่มีไฟ" เพื่อเปิดเคสเร่งด่วนครับ'
+                "ไฟกลับมาใช้งานได้แล้วหรือยังครับ"
             )
             send_proactive_alert.delay(
                 report_id=report.id, message=message, event_type="closed_loop_prompt"
