@@ -212,6 +212,24 @@ def _select_fast_track_report(ca_number, session_id=None):
     )
 
 
+def _case_start_reference(case, fallback=None):
+    if not case:
+        return fallback
+
+    case_start_times = [
+        value for value in [case.sla_reference_time, case.created_at] if value
+    ]
+    return min(case_start_times) if case_start_times else fallback
+
+
+def _fast_track_sla_reference(report):
+    reference_time = _case_start_reference(
+        report.related_case if report else None,
+        fallback=None,
+    )
+    return reference_time or timezone.now()
+
+
 def _attach_active_ca_case(report):
     if _has_active_related_case(report):
         return False
@@ -270,6 +288,8 @@ def _latest_outage_for_report(report):
 
     if case.status != "restored" and effective_etr and now >= effective_etr:
         event_type = "etr_timeout_sla"
+    elif case.status != "restored" and case.case_type == "fast_track":
+        event_type = "fast_track_existing"
 
     return {
         "event_type": event_type,
@@ -660,7 +680,7 @@ def fast_track_report(request):
             }
         )
 
-    base_time = timezone.now()
+    base_time = _fast_track_sla_reference(report)
     new_case = OutageCase.objects.create(
         title=f"[ด่วน! ไฟดับซ้ำซ้อน] CA {ca_number}",
         case_type="fast_track",

@@ -691,8 +691,41 @@
             });
         }
 
+        function formatRemainingTime(value) {
+            if (!value) return null;
+            const date = new Date(value);
+            if (Number.isNaN(date.getTime())) return null;
+
+            const remainingMs = date.getTime() - Date.now();
+            if (remainingMs <= 0) return null;
+
+            const totalMinutes = Math.max(1, Math.ceil(remainingMs / 60000));
+            const hours = Math.floor(totalMinutes / 60);
+            const minutes = totalMinutes % 60;
+            if (hours > 0 && minutes > 0) {
+                return `${hours} ชั่วโมง ${minutes} นาที`;
+            }
+            if (hours > 0) {
+                return `${hours} ชั่วโมง`;
+            }
+            return `${minutes} นาที`;
+        }
+
         function latestOutageSummary(outage) {
             if (!outage || outage.event_type === "restored") return null;
+
+            const urgentTime = formatCaseTime(outage.sla_target_time);
+            const urgentRemaining = formatRemainingTime(outage.sla_target_time);
+            const isUrgentCase = outage.case_type === "fast_track"
+                || outage.event_type === "fast_track_created"
+                || outage.event_type === "fast_track_existing"
+                || outage.event_type === "etr_timeout_sla";
+            if (isUrgentCase && urgentTime) {
+                if (urgentRemaining) {
+                    return `พบเคสเร่งด่วนที่เปิดอยู่สำหรับ CA นี้ครับ เหลือเวลาเร่งดำเนินการประมาณ ${urgentRemaining} หรือไม่เกิน ${urgentTime} น.`;
+                }
+                return `พบเคสเร่งด่วนที่เปิดอยู่สำหรับ CA นี้ครับ กรอบเวลาเร่งดำเนินการเดิมคือ ${urgentTime} น. ซึ่งเลยกำหนดแล้ว ระบบกำลังเร่งติดตามระดับสูงสุด`;
+            }
 
             const etrTime = formatCaseTime(outage.etr_target_time || outage.oms_etr);
             if (etrTime) {

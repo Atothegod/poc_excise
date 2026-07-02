@@ -2,10 +2,11 @@
 import config
 import dspy
 from datetime import datetime
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 # 2. Now import your components safely
-from signature import PEA_Assistant
+from signature import PEA_Assistant, PEA_Conversation_State
 
 # นำเข้าตัวแปรทะลุมิติมาด้วยขอรับ!
 from tools import (
@@ -150,6 +151,37 @@ class MemoryAgent:
             "System: If event_type=etr_timeout_sla or fast_track_created, answer naturally using latest_sla_user_label when available.",
         ]
 
+    def _has_closed_loop_prompt(self, history: list) -> bool:
+        return any(item.get("event_type") == "closed_loop_prompt" for item in history)
+
+    def _closed_loop_resolution_response(
+        self, user_input: str, history: list, ca_number: str | None
+    ):
+        if not self._has_closed_loop_prompt(history):
+            return None
+
+        normalized_input = user_input.strip().lower()
+        resolved_keywords = [
+            "ใช้งานได้แล้ว",
+            "ไฟมาแล้ว",
+            "ใช้ได้แล้ว",
+            "มาแล้ว",
+            "เรียบร้อย",
+        ]
+        if not any(keyword in normalized_input for keyword in resolved_keywords):
+            return None
+
+        return SimpleNamespace(
+            answer=(
+                "ขอบคุณที่แจ้งยืนยันครับ ดีใจที่ไฟกลับมาใช้งานได้ตามปกติแล้ว "
+                "หากพบเหตุขัดข้องเพิ่มเติม สามารถแจ้งผ่านช่องทางนี้ได้เลยครับ"
+            ),
+            current_state=PEA_Conversation_State(
+                ca_number=ca_number,
+                flow_step="resolved",
+            ),
+        )
+
     def chat(
         self,
         user_input: str,
@@ -174,9 +206,13 @@ class MemoryAgent:
             pdpa_consent=pdpa_consent,
         )
 
-        response = self.agent(
-            chat_history=history_str, question=user_input, time_stamp=time_stamp
+        response = self._closed_loop_resolution_response(
+            user_input, history_list, ca_number
         )
+        if response is None:
+            response = self.agent(
+                chat_history=history_str, question=user_input, time_stamp=time_stamp
+            )
 
         history_list.append(
             {"role": "user", "content": user_input, "timestamp": time_stamp}

@@ -41,6 +41,35 @@ def format_time_only(value):
     return target_time.astimezone(ZoneInfo("Asia/Bangkok")).strftime("%H:%M น.")
 
 
+def format_remaining_label(target_time):
+    if not target_time:
+        return None
+
+    remaining_seconds = (target_time - current_authoritative_time()).total_seconds()
+    if remaining_seconds <= 0:
+        return None
+
+    total_minutes = max(1, ceil(remaining_seconds / 60))
+    hours, minutes = divmod(total_minutes, 60)
+    if hours and minutes:
+        return f"{hours} ชั่วโมง {minutes} นาที"
+    if hours:
+        return f"{hours} ชั่วโมง"
+    return f"{minutes} นาที"
+
+
+def format_sla_status(value):
+    target_time = parse_iso_datetime(value)
+    if not target_time:
+        return None
+
+    target_label = format_time_only(value)
+    remaining_label = format_remaining_label(target_time)
+    if remaining_label:
+        return f"เหลือเวลาเร่งดำเนินการประมาณ {remaining_label} หรือไม่เกิน {target_label}"
+    return f"กรอบเวลาเร่งดำเนินการเดิมคือ {target_label} ซึ่งเลยกำหนดแล้ว ให้แจ้งว่าระบบกำลังเร่งติดตามระดับสูงสุด"
+
+
 def format_eta_label(eta, eta_formatted=None):
     eta_label = format_time_only(eta)
     if eta_label:
@@ -301,14 +330,14 @@ def Fast_Track_Tool(ca_number: str):
             ca_number=ca_number,
         )
 
-        sla_label = format_time_only(data.get("sla_target_time"))
+        sla_status = format_sla_status(data.get("sla_target_time"))
         action_label = (
             "รับเรื่องไว้ในเคสเร่งด่วนเดิมแล้ว"
             if data.get("event_type") == "fast_track_existing"
             else "เปิดเคสเร่งด่วนแล้ว"
         )
-        if sla_label:
-            return f"[Success] {action_label} แจ้งว่าจะดำเนินการให้ไม่เกิน {sla_label}"
+        if sla_status:
+            return f"[Success] {action_label} แจ้งว่า{sla_status}"
         return f"[Success] {action_label} แจ้งว่าจะเร่งดำเนินการ"
 
     except Exception as e:

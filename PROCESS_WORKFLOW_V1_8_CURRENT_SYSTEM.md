@@ -1,13 +1,14 @@
-# Process Workflow Version 1.8 (Current System / As-Is)
+# Process Workflow Version 1.8 (Updated Current System / As-Is)
 
-เอกสารฉบับนี้อธิบายกระบวนการทำงานของระบบปัจจุบันตามโค้ดที่มีอยู่จริงใน repository นี้ โดยยึดชื่อและแนวคิดจาก `Process Workflow Version 1.8` แต่ปรับเนื้อหาให้ตรงกับพฤติกรรมปัจจุบันของระบบ
+เอกสารฉบับนี้อธิบายกระบวนการทำงานของระบบปัจจุบันตามโค้ดที่มีอยู่จริงใน repository นี้ โดยยึดชื่อและแนวคิดจาก `Process Workflow Version 1.8` แต่ปรับเนื้อหาให้ตรงกับพฤติกรรมปัจจุบันของระบบหลังอัปเดตล่าสุด
 
 หมายเหตุสำคัญ:
 
-- เอกสารนี้เป็น As-Is Workflow ไม่ใช่ Target Workflow
 - การ "ปิดเคส" ในระบบปัจจุบันหมายถึงการตั้งค่า `OutageCase.status = restored`
 - สถานะ `restored` มี display label ว่า `จ่ายไฟคืนกระแสสำเร็จ`
 - หลัง `OutageCase` ถูกปิด ระบบจึงค่อยตั้ง `CustomerReport.is_resolved = True` และส่ง closed-loop prompt ไปหาลูกค้า
+- SLA ของเคสปกติยึดเวลาเปิดเคสเท่านั้น ไม่เลื่อนตามเวลา OMS ETR
+- Fast-track หลังปิดเคสแล้วไฟยังไม่มา จะสืบทอด SLA reference จากเคสเดิม ถ้ามีประวัติเคสเดิมให้สืบทอด
 
 ## 1. ภาพรวมระบบ
 
@@ -69,7 +70,12 @@
 - `sla_target_time`
 - `sla_reason`
 
-โดยทั่วไป SLA จะอิงจากเวลาเริ่มเคสหรือเวลาที่ระบบสร้างเคส
+หลักปัจจุบัน:
+
+- เคสปกติ: SLA อิงจากเวลาเปิดเคส
+- OMS ETR update: ไม่เปลี่ยน SLA reference, SLA target หรือ SLA reason
+- Fast-track หลัง closed-loop: ใช้ SLA reference จากเคสเดิมที่ปิดไปแล้ว ถ้ามี
+- Fast-track ที่ไม่มีประวัติเคสเดิมจริง ๆ: fallback ไปใช้เวลาสร้าง fast-track เป็น SLA reference
 
 ## 4. Login, CA Validation และ Session Registration
 
@@ -100,8 +106,14 @@ DSPy Agent ใช้ `chat_history` และ system context เพื่อค�
 - ไม่ถาม CA หรือ PDPA ซ้ำใน chat
 - ถ้าเจตนาผู้ใช้เกี่ยวกับไฟดับหรือถามสถานะไฟดับ ให้เรียก `Check_Outage_Tool`
 - ไม่ใช้คำว่า ETA, ETR, SLA ในข้อความลูกค้า
-- ถ้ามี `closed_loop_prompt` และลูกค้าเลือก/บอกว่าไฟมาแล้ว ให้ตอบรับและจบ flow
+- ถ้ามี `closed_loop_prompt` และลูกค้าเลือก/บอกว่าไฟมาแล้ว ให้ตอบรับแบบปิดงาน และตั้ง flow เป็น `resolved`
 - ถ้ามี `closed_loop_prompt` และลูกค้าเลือก/บอกว่าไฟยังไม่มา ให้เรียก `Fast_Track_Tool`
+
+ข้อความปิดงานเมื่อผู้ใช้ยืนยันว่าใช้งานได้แล้ว:
+
+```text
+ขอบคุณที่แจ้งยืนยันครับ ดีใจที่ไฟกลับมาใช้งานได้ตามปกติแล้ว หากพบเหตุขัดข้องเพิ่มเติม สามารถแจ้งผ่านช่องทางนี้ได้เลยครับ
+```
 
 ## 6. Sync Report และการสร้าง/ผูกเคส
 
@@ -259,7 +271,8 @@ Agent ถือเป็นเหตุซ้ำ/เหตุบริเวณ�
 
 - ระบบไม่เปลี่ยน `case_type` เป็น `fast_track` อัตโนมัติเมื่อ ETR timeout
 - ระบบไม่เก็บ emergency escalation level แยกต่างหาก
-- ระบบแสดง deadline เป็นเวลา `HH:MM น.` ไม่ได้ส่งค่า remaining duration แบบ `[SLA Remaining]`
+- proactive notification ของ ETR timeout ยังแสดง deadline เป็นเวลา `HH:MM น.`
+- SLA remaining แบบระยะเวลาคงเหลือถูกใช้ใน fast-track response และหน้า chat summary
 - Celery ETR timeout ถูก schedule จาก OMS ETR update เป็นหลัก ส่วน model ETR ที่หมดเวลาอาจถูกสะท้อนผ่าน session context หรือ sync report มากกว่า timer แยก
 
 ## 11. Field Operation Status ปัจจุบัน
@@ -334,6 +347,7 @@ OutageCase.status = restored
 - OutageCase ถูกปิดก่อนด้วย `status = restored`
 - CustomerReport ถูก mark resolved ตามหลัง เพื่อบอกว่า session/report นี้จบจากเคสเดิมแล้ว
 - หน้า chat แสดง dropdown ให้ลูกค้าเลือก `ไฟมาแล้ว / ใช้งานได้แล้ว` หรือ `ยังไม่มีไฟ / เปิดเคสเร่งด่วน`
+- ถ้าลูกค้าเลือกว่าไฟมาแล้ว Agent จะตอบปิดงานและไม่เปิดเคสใหม่
 - ถ้าลูกค้าเลือกว่ายังไม่มีไฟ จะเปิด flow fast-track ใหม่ผ่าน Agent
 
 ## 13. Fast-Track หลังปิดเคสแล้วไฟยังไม่มา
@@ -363,30 +377,39 @@ Backend จะเรียก `POST /api/reports/fast-track/`
    - `status = reported`
    - title เป็น `[ด่วน! ไฟดับซ้ำซ้อน] CA ...`
    - ใช้พิกัดจาก report ถ้ามี ถ้าไม่มีใช้ fallback lat/lon
-   - ตั้ง `sla_reference_time = timezone.now()`
-   - ตั้ง `sla_target_time = now + 4 hours`
+   - ตั้ง `sla_reference_time` จากเวลาเปิดเคสเดิมที่ report ผูกอยู่ ถ้ามี
+   - ตั้ง `sla_target_time = sla_reference_time + 4 hours`
    - ตั้ง `sla_reason = fast_track`
    - ผูก report เข้ากับเคสใหม่
    - ตั้ง `report.is_resolved = False`
    - sync `affected_ca_numbers`
    - คืน `event_type = fast_track_created`
 
+การสื่อสาร SLA ใน Fast-track:
+
+- ถ้า SLA target ยังไม่หมด ระบบจะแจ้งเวลาคงเหลือโดยประมาณและเวลาไม่เกิน เช่น `เหลือเวลาเร่งดำเนินการประมาณ 2 ชั่วโมง 35 นาที หรือไม่เกิน 19:23 น.`
+- ถ้า SLA target เดิมเลยเวลาแล้ว ระบบจะไม่บอกว่า `ไม่เกิน` ใหม่ แต่จะแจ้งว่ากรอบเวลาเดิมเลยกำหนดแล้ว และระบบกำลังเร่งติดตามระดับสูงสุด
+- Fast-track จะไม่สร้างกรอบ SLA ใหม่จากเวลาที่ลูกค้ากดแจ้งหลังปิดเคส ยกเว้นไม่มีประวัติเคสเดิมให้สืบทอดจริง ๆ
+
 ข้อจำกัดปัจจุบัน:
 
-- Fast-track ปัจจุบันตั้ง SLA ใหม่จากเวลาที่สร้าง fast-track
-- ยังไม่ได้ preserve SLA จากเวลาเปิดเคสแรกตาม target v1.8
+- ถ้าไม่มีประวัติเคสเดิมให้สืบทอดจริง ๆ Fast-track จะ fallback ไปใช้เวลาสร้าง fast-track เป็น SLA reference
 - Fast-track ไม่ตั้ง ETA หรือ ETR ใหม่
 
 ## 14. Chat History และ Notification Hydration
 
 ระบบปัจจุบันเก็บ chat history ลง `CustomerReport.chat_history`
 
-เมื่อผู้ใช้กลับเข้า session เดิม:
+เมื่อผู้ใช้กลับเข้า session เดิม หรือสร้าง session ใหม่ด้วย CA เดียวกัน:
 
 1. Agent เรียก session context จาก backend
 2. Backend คืน chat history และ latest outage
-3. Agent hydrate memory จาก DB
-4. Chat UI render ประวัติสนทนาเดิมหรือแสดง summary ของ active case
+3. ถ้ามี active case ของ CA เดียวกัน backend จะผูก session/report ใหม่เข้ากับเคสนั้น
+4. Agent hydrate memory จาก DB
+5. Chat UI render ประวัติสนทนาเดิมหรือแสดง summary ของ active case
+6. ถ้า latest outage เป็น fast-track case ระบบจะแสดงกรอบเวลาเร่งดำเนินการจาก `sla_target_time`
+   - ถ้ายังไม่หมดเวลา จะแสดงเวลาคงเหลือโดยประมาณและเวลาไม่เกิน
+   - ถ้าเลยกรอบเดิมแล้ว จะแสดงว่างานอยู่ในสถานะเร่งติดตามระดับสูงสุด
 
 เมื่อ Celery หรือ signal ส่ง proactive alert:
 
@@ -427,6 +450,7 @@ Backend จะเรียก `POST /api/reports/fast-track/`
 
 - Deduplicate active case ตาม CA เดียวกัน
 - Reuse active fast-track case ของ CA เดียวกัน
+- Fast-track หลัง closed-loop สืบทอด SLA reference จากเคสเดิม
 - Revokes ETA task เมื่อ ETA ถูกแก้
 - Revokes ETR task เก่าเมื่อ OMS ETR ถูกแก้
 - Revokes ETA/ETR task ทั้งหมดเมื่อ OutageCase ถูกปิดเป็น `restored`
@@ -451,7 +475,6 @@ Backend จะเรียก `POST /api/reports/fast-track/`
 - ยังไม่มี Completed state แยกจาก `CustomerReport.is_resolved`
 - ยังไม่มี Grace Period timer หลัง closed-loop prompt
 - ยังไม่มี auto-close fast-track หลังครบ 4 ชั่วโมงแบบ state machine
-- Fast-track ยังใช้ SLA ใหม่จากเวลาสร้าง fast-track ไม่ได้อิงเวลาเปิดเคสแรก
 
 ## 18. Current Workflow Summary
 
@@ -480,8 +503,14 @@ Login with CA + PDPA
       -> revoke timers
       -> CustomerReport.is_resolved = True
       -> notify closed_loop_prompt
+  -> if customer confirms power is available
+      -> Agent responds resolved and stops
   -> if customer says power still unavailable
       -> Fast_Track_Tool
-      -> create/reuse fast_track OutageCase
+      -> create/reuse fast_track OutageCase with original SLA reference
       -> CustomerReport.is_resolved = False
+      -> notify remaining urgent handling window
+  -> new session with same CA
+      -> attach active CA/fast-track case
+      -> show latest outage summary with SLA remaining/deadline
 ```

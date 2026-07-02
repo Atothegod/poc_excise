@@ -472,6 +472,37 @@ class SyncAgentReportTests(TestCase):
         self.assertEqual(outage["event_type"], "etr_timeout_sla")
         self.assertEqual(parse_datetime(outage["sla_target_time"]), sla_target)
 
+    def test_session_context_returns_fast_track_sla_window(self):
+        now = timezone.now()
+        sla_reference = now - timedelta(hours=1)
+        sla_target = sla_reference + timedelta(hours=OutageCase.SLA_HOURS)
+        case = OutageCase.objects.create(
+            title="Active fast-track context",
+            case_type="fast_track",
+            latitude=9.2917,
+            longitude=100.926296,
+            sla_reference_time=sla_reference,
+            sla_target_time=sla_target,
+            sla_reason="fast_track",
+        )
+        CustomerReport.objects.create(
+            session_id="session-fast-track-context",
+            ca_number="123456789012",
+            related_case=case,
+        )
+        case.sync_affected_ca_numbers()
+
+        response = self.client.get(
+            "/api/reports/session-context/session-fast-track-context/"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        outage = response.data["latest_outage"]
+        self.assertEqual(outage["event_type"], "fast_track_existing")
+        self.assertEqual(outage["case_type"], "fast_track")
+        self.assertEqual(parse_datetime(outage["sla_reference_time"]), sla_reference)
+        self.assertEqual(parse_datetime(outage["sla_target_time"]), sla_target)
+
     def test_sync_report_rejects_11_digit_ca_number(self):
         response = self.client.post(
             "/api/reports/sync/",
@@ -511,6 +542,49 @@ class SyncAgentReportTests(TestCase):
         self.assertLessEqual(case.sla_reference_time, after)
         self.assertEqual(
             case.sla_target_time, case.sla_reference_time + timedelta(hours=4)
+        )
+
+    def test_fast_track_preserves_original_restored_case_sla_window(self):
+        original_reference = timezone.now() - timedelta(hours=2)
+        original_case = OutageCase.objects.create(
+            title="Original restored SLA case",
+            status="restored",
+            latitude=9.2917,
+            longitude=100.926296,
+            sla_reference_time=original_reference,
+            sla_target_time=original_reference + timedelta(hours=OutageCase.SLA_HOURS),
+            sla_reason="case_created",
+        )
+        CustomerReport.objects.create(
+            session_id="session-fast-track-original",
+            ca_number="123456789012",
+            latitude=9.2917,
+            longitude=100.926296,
+            related_case=original_case,
+            is_resolved=True,
+        )
+
+        response = self.client.post(
+            "/api/reports/fast-track/",
+            {
+                "ca_number": "123456789012",
+                "session_id": "session-fast-track-original",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["event_type"], "fast_track_created")
+        case = OutageCase.objects.get(case_id=response.data["case_id"])
+        self.assertEqual(case.case_type, "fast_track")
+        self.assertEqual(case.sla_reference_time, original_reference)
+        self.assertEqual(
+            case.sla_target_time,
+            original_reference + timedelta(hours=OutageCase.SLA_HOURS),
+        )
+        self.assertEqual(
+            parse_datetime(response.data["sla_target_time"]),
+            original_reference + timedelta(hours=OutageCase.SLA_HOURS),
         )
 
     def test_fast_track_reuses_active_fast_track_case_for_same_ca(self):
@@ -994,6 +1068,9 @@ class OpsWebhookConsoleTests(TestCase):
         self.assertContains(response, "ไฟมาแล้ว / ใช้งานได้แล้ว")
         self.assertContains(response, "ยังไม่มีไฟ / เปิดเคสเร่งด่วน")
         self.assertContains(response, "closed_loop_prompt")
+        self.assertContains(response, "พบเคสเร่งด่วนที่เปิดอยู่สำหรับ CA นี้ครับ")
+        self.assertContains(response, "เหลือเวลาเร่งดำเนินการประมาณ")
+        self.assertContains(response, "กรอบเวลาเร่งดำเนินการเดิม")
 
     def test_ops_map_page_renders(self):
         response = self.client.get("/ops/map/")
