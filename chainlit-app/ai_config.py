@@ -18,7 +18,7 @@ def init_ai_models():
     llm = LiteLLM(
         model="gemini/gemini-2.5-flash",
         api_key=os.getenv("API_KEY_4"),
-        temperature=0,
+        temperature=0.1,
         request_timeout=60,
     )
     Settings.llm = llm
@@ -28,7 +28,7 @@ def init_ai_models():
     dspy_lm = dspy.LM(
         "gemini/gemini-2.5-flash", 
         api_key=os.getenv("API_KEY_4"), 
-        temperature=0
+        temperature=0.1
     )
     dspy.settings.configure(lm=dspy_lm)
 

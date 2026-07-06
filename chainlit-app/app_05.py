@@ -32,7 +32,6 @@ CHAT_HISTORY_KEY = "chat_history"
 DATA_CONTEXT_KEY = "data_context"
 MAX_CHAT_HISTORY_MESSAGES = 5
 MAX_DATA_CONTEXT_ITEMS = 3
-MAX_DATA_CONTEXT_ROWS = 20
 MAX_MEMORY_CHARS = 1200
 
 # =========================
@@ -256,7 +255,7 @@ def extract_query_used(text: str) -> str:
     match = re.search(r"\*\*🔍 Query Used:\*\*\s*```sql\s*([\s\S]*?)```", text, re.IGNORECASE)
     return clean_sql_output(match.group(1)) if match else ""
 
-def append_data_context(database_question: str, sql: str, df: pd.DataFrame | None = None, answer: str = "") -> None:
+def append_data_context(database_question: str, sql: str, answer: str = "") -> None:
     if not sql:
         return
 
@@ -264,10 +263,7 @@ def append_data_context(database_question: str, sql: str, df: pd.DataFrame | Non
         "question": compact_memory_text(database_question, limit=500),
         "sql": clean_sql_output(sql),
         "answer": compact_memory_text(answer, limit=500) if answer else "",
-        "rows_csv": "",
     }
-    if df is not None and not df.empty:
-        context["rows_csv"] = df.head(MAX_DATA_CONTEXT_ROWS).to_csv(index=False)
 
     contexts = get_data_context()
     contexts.append(context)
@@ -286,8 +282,6 @@ def format_data_context() -> str:
             "SQL:",
             item.get("sql", ""),
         ]
-        if item.get("rows_csv"):
-            block.extend(["Result preview CSV:", item["rows_csv"]])
         if item.get("answer"):
             block.extend(["Assistant summary:", item["answer"]])
         blocks.append("\n".join(block))
@@ -332,7 +326,6 @@ def seed_chat_history_from_thread(thread: Any) -> None:
                     "question": compact_memory_text(last_user_message or "Resumed thread question", limit=500),
                     "sql": sql,
                     "answer": compact_memory_text(content, limit=500),
-                    "rows_csv": "",
                 })
 
     set_chat_history(history)
@@ -478,26 +471,6 @@ async def on_message(message: cl.Message):
     await processing_msg.send()
     append_chat_history("user", clean_query)
 
-    # 1. Intercept Metadata questions first
-    # if is_metadata_question(clean_query):
-    #     _, db_engine = build_query_engine(schema)
-    #     def get_tables(engine, schema):
-    #         query = text("""
-    #             SELECT table_name FROM information_schema.tables 
-    #             WHERE table_schema = :schema AND table_type = 'BASE TABLE'
-    #         """)
-    #         with engine.connect() as conn:
-    #             return [row[0] for row in conn.execute(query, {"schema": schema})]
-        
-    #     tables = get_tables(db_engine, schema)
-    #     if tables:
-    #         table_list = "\n".join([f"- {t}" for t in tables])
-    #         processing_msg.content = f"📁 ตารางใน schema `{schema}`:\n{table_list}"
-    #     else:
-    #         processing_msg.content = "ไม่พบตารางในระบบ"
-    #     await processing_msg.update()
-    #     return
-
     # Variables to hold tool execution results
     final_df = None
     final_sql = ""
@@ -544,7 +517,7 @@ async def on_message(message: cl.Message):
 
             df_display = format_numeric_columns(df)
             final_df = df_display 
-            append_data_context(database_question, sql, df)
+            append_data_context(database_question, sql)
 
             # ใช้ .to_csv() แทน .to_markdown() เพื่อป้องกันปัญหา Library tabulate หาย
             csv_data = df.head(30).to_csv(index=False)
