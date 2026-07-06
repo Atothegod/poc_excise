@@ -18,6 +18,13 @@ from .admin import (
     OutageCaseAdmin,
     OutageRestorationLogAdmin,
 )
+from .case_logic import (
+    CASE_LINK_RADIUS_KM,
+    CASE_TYPE_MASS_OUTAGE,
+    CASE_TYPE_NORMAL,
+    MASS_OUTAGE_CONFIRMATION_COUNT,
+    STATUS_MERGED,
+)
 from .models import CustomerLocation, CustomerReport, OutageCase, OutageRestorationLog
 from .tasks import check_eta_timeout, check_etr_timeout
 from .views_api import calculate_distance
@@ -26,6 +33,24 @@ from .views_api import calculate_distance
 class SyncAgentReportTests(TestCase):
     def setUp(self):
         self.client = APIClient()
+
+    def _assessment_payload(self, eta_minutes=8, etr_minutes=69):
+        return {
+            "fastest_branch": "การไฟฟ้าส่วนภูมิภาค สาขา รังสิต",
+            "eta_formatted": f"~ {eta_minutes} min",
+            "estimated_etr_minutes": float(etr_minutes),
+        }
+
+    def _post_sync(self, session_id, ca_number):
+        return self.client.post(
+            "/api/reports/sync/",
+            {
+                "session_id": session_id,
+                "ca_number": ca_number,
+                "pdpa_consent": True,
+            },
+            format="json",
+        )
 
     @patch("oms.signals.send_proactive_alert.delay")
     @patch("oms.views_api.get_pea_assessment")
@@ -318,72 +343,133 @@ class SyncAgentReportTests(TestCase):
         case = OutageCase.objects.get(case_id=response.data["case_id"])
         self.assertEqual(case.affected_ca_numbers, ["123456789012"])
 
+    @patch("oms.views_api.send_proactive_alert.delay")
     @patch("oms.views_api.get_pea_assessment")
-    def test_sync_report_reuses_active_case_within_five_km(self, mock_assessment):
-        CustomerLocation.objects.create(
-            ca_number="123456789012",
-            fullname="Nearby CA User",
-            latitude=14.0000,
-            longitude=100.0000,
-        )
-        case = OutageCase.objects.create(
-            title="Nearby active case",
-            latitude=14.0100,
-            longitude=100.0000,
-        )
-
-        response = self.client.post(
-            "/api/reports/sync/",
-            {
-                "session_id": "session-nearby-case",
-                "ca_number": "123456789012",
-                "pdpa_consent": True,
-            },
-            format="json",
-        )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["event_type"], "repeated_event")
-        self.assertEqual(str(response.data["case_id"]), str(case.case_id))
-        self.assertEqual(OutageCase.objects.count(), 1)
-        mock_assessment.assert_not_called()
-
-    @patch("oms.views_api.get_pea_assessment")
-    def test_sync_report_uses_nearest_case_when_multiple_active_cases_match(
-        self, mock_assessment
+    @patch("oms.views_api.check_eta_timeout.apply_async")
+    def test_second_nearby_ca_stays_new_event_until_threshold(
+        self, mock_apply_async, mock_assessment, mock_send_alert
     ):
+        mock_apply_async.return_value.id = "eta-task-id"
+        mock_assessment.return_value = self._assessment_payload()
         CustomerLocation.objects.create(
             ca_number="123456789012",
-            fullname="Overlap CA User",
+            fullname="Anchor CA User",
             latitude=14.0000,
             longitude=100.0000,
         )
-        farther_case = OutageCase.objects.create(
-            title="Farther active case",
-            latitude=14.0300,
-            longitude=100.0000,
-        )
-        nearest_case = OutageCase.objects.create(
-            title="Nearest active case",
-            latitude=14.0050,
+        CustomerLocation.objects.create(
+            ca_number="123456789013",
+            fullname="Second Nearby CA User",
+            latitude=14.0030,
             longitude=100.0000,
         )
 
-        response = self.client.post(
-            "/api/reports/sync/",
-            {
-                "session_id": "session-overlap-case",
-                "ca_number": "123456789012",
-                "pdpa_consent": True,
-            },
-            format="json",
+        first_response = self._post_sync("session-anchor", "123456789012")
+        second_response = self._post_sync("session-second", "123456789013")
+
+        self.assertEqual(first_response.status_code, 200)
+        self.assertEqual(second_response.status_code, 200)
+        self.assertEqual(first_response.data["event_type"], "new_event")
+        self.assertEqual(second_response.data["event_type"], "new_event")
+        self.assertNotEqual(first_response.data["case_id"], second_response.data["case_id"])
+        self.assertEqual(OutageCase.objects.count(), 2)
+        self.assertEqual(
+            set(OutageCase.objects.values_list("case_type", flat=True)),
+            {CASE_TYPE_NORMAL},
         )
+        mock_send_alert.assert_not_called()
+
+    @patch("oms.views_api.celery_app.control.revoke")
+    @patch("oms.views_api.send_proactive_alert.delay")
+    @patch("oms.views_api.get_pea_assessment")
+    @patch("oms.views_api.check_eta_timeout.apply_async")
+    def test_third_nearby_ca_promotes_anchor_to_mass_outage(
+        self, mock_apply_async, mock_assessment, mock_send_alert, mock_revoke
+    ):
+        mock_apply_async.return_value.id = "eta-task-id"
+        mock_assessment.return_value = self._assessment_payload()
+        ca_numbers = ["123456789012", "123456789013", "123456789014"]
+        latitudes = [14.0000, 14.0020, 14.0030]
+        for ca_number, latitude in zip(ca_numbers, latitudes):
+            CustomerLocation.objects.create(
+                ca_number=ca_number,
+                fullname=f"Mass CA {ca_number}",
+                latitude=latitude,
+                longitude=100.0000,
+            )
+
+        first_response = self._post_sync("session-a", ca_numbers[0])
+        second_response = self._post_sync("session-b", ca_numbers[1])
+        third_response = self._post_sync("session-c", ca_numbers[2])
+
+        self.assertEqual(first_response.status_code, 200)
+        self.assertEqual(second_response.status_code, 200)
+        self.assertEqual(third_response.status_code, 200)
+        self.assertEqual(first_response.data["event_type"], "new_event")
+        self.assertEqual(second_response.data["event_type"], "new_event")
+        self.assertEqual(third_response.data["event_type"], "mass_outage")
+        self.assertEqual(third_response.data["case_type"], CASE_TYPE_MASS_OUTAGE)
+        self.assertEqual(
+            set(third_response.data["affected_ca_numbers"]),
+            set(ca_numbers),
+        )
+        self.assertEqual(third_response.data["etr_source"], "pluem_model")
+        self.assertEqual(third_response.data["pluem_etr_minutes"], 69.0)
+
+        anchor = OutageCase.objects.get(case_id=first_response.data["case_id"])
+        anchor.refresh_from_db()
+        self.assertEqual(anchor.case_type, CASE_TYPE_MASS_OUTAGE)
+        self.assertEqual(anchor.affected_ca_numbers, sorted(ca_numbers))
+
+        merged_cases = OutageCase.objects.filter(status=STATUS_MERGED)
+        self.assertEqual(merged_cases.count(), 2)
+        for merged_case in merged_cases:
+            self.assertEqual(merged_case.merged_into, anchor)
+            self.assertIsNotNone(merged_case.merged_at)
+            self.assertIsNone(merged_case.celery_eta_task_id)
+            self.assertIsNone(merged_case.celery_etr_task_id)
+
+        for ca_number in ca_numbers:
+            report = CustomerReport.objects.get(ca_number=ca_number)
+            self.assertEqual(report.related_case, anchor)
+
+        notified_reports = [
+            CustomerReport.objects.get(id=call.kwargs["report_id"])
+            for call in mock_send_alert.call_args_list
+        ]
+        self.assertEqual(
+            {report.session_id for report in notified_reports},
+            {"session-a", "session-b"},
+        )
+        self.assertEqual(
+            {call.kwargs["event_type"] for call in mock_send_alert.call_args_list},
+            {"mass_outage"},
+        )
+        self.assertEqual(mock_revoke.call_count, 2)
+
+    @patch("oms.views_api.get_pea_assessment")
+    def test_new_ca_inside_existing_mass_outage_links_to_anchor(self, mock_assessment):
+        CustomerLocation.objects.create(
+            ca_number="123456789012",
+            fullname="Mass Area CA User",
+            latitude=14.0020,
+            longitude=100.0000,
+        )
+        mass_case = OutageCase.objects.create(
+            title="Existing mass outage",
+            case_type=CASE_TYPE_MASS_OUTAGE,
+            latitude=14.0000,
+            longitude=100.0000,
+            pluem_etr_minutes=69.0,
+            pluem_etr_target_time=timezone.now() + timedelta(minutes=69),
+        )
+        response = self._post_sync("session-mass-area", "123456789012")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["event_type"], "repeated_event")
-        self.assertEqual(str(response.data["case_id"]), str(nearest_case.case_id))
-        self.assertNotEqual(str(response.data["case_id"]), str(farther_case.case_id))
-        self.assertEqual(OutageCase.objects.count(), 2)
+        self.assertEqual(response.data["event_type"], "mass_outage")
+        self.assertEqual(str(response.data["case_id"]), str(mass_case.case_id))
+        self.assertEqual(response.data["etr_source"], "pluem_model")
+        self.assertEqual(OutageCase.objects.count(), 1)
         mock_assessment.assert_not_called()
 
     @patch("oms.views_api.get_pea_assessment")
@@ -1088,6 +1174,39 @@ class OutageCaseSignalTests(TestCase):
 
     @patch("oms.signals.check_etr_timeout.apply_async")
     @patch("oms.signals.send_proactive_alert.delay")
+    def test_oms_etr_update_on_mass_outage_anchor_sends_to_active_sessions(
+        self, mock_send_alert, mock_apply_async
+    ):
+        mock_apply_async.return_value.id = "mass-etr-task-id"
+        case = OutageCase.objects.create(
+            title="Mass outage ETR update case",
+            case_type=CASE_TYPE_MASS_OUTAGE,
+            latitude=9.2917,
+            longitude=100.926296,
+        )
+        for session_id, ca_number in [
+            ("session-a", "123456789012"),
+            ("session-b", "123456789013"),
+            ("session-c", "123456789014"),
+        ]:
+            CustomerReport.objects.create(
+                session_id=session_id,
+                ca_number=ca_number,
+                related_case=case,
+            )
+
+        case.oms_etr = timezone.now() + timedelta(hours=1)
+        case.save(update_fields=["oms_etr"])
+
+        self.assertEqual(mock_send_alert.call_count, 3)
+        self.assertEqual(
+            {call.kwargs["event_type"] for call in mock_send_alert.call_args_list},
+            {"etr_update"},
+        )
+        self.assertEqual(case.celery_etr_task_id, "mass-etr-task-id")
+
+    @patch("oms.signals.check_etr_timeout.apply_async")
+    @patch("oms.signals.send_proactive_alert.delay")
     def test_oms_etr_update_after_pluem_etr_sends_replacement_to_sessions(
         self, mock_send_alert, mock_apply_async
     ):
@@ -1193,7 +1312,8 @@ class OpsWebhookConsoleTests(TestCase):
             content,
         )
         self.assertIn('id="radiusKmInput" type="number"', content)
-        self.assertIn('value="5"', content)
+        self.assertIn('value="0.5"', content)
+        self.assertIn('const DEFAULT_RADIUS_KM = Number.parseFloat("0.5")', content)
         self.assertIn("L.featureGroup()", content)
         self.assertNotIn("leaflet.markercluster", content)
         self.assertNotIn("markerClusterGroup", content)
@@ -1224,6 +1344,7 @@ class OpsWebhookConsoleTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
+        self.assertEqual(payload["case_link_radius_km"], CASE_LINK_RADIUS_KM)
         self.assertEqual(payload["summary"]["total_locations"], 1)
         marker = payload["markers"][0]
         self.assertEqual(marker["ca_number"], location.ca_number)
@@ -1393,6 +1514,62 @@ class OpsWebhookConsoleTests(TestCase):
             {first_location.ca_number, second_location.ca_number},
         )
 
+    def test_ops_map_active_view_excludes_merged_child_cases(self):
+        anchor_location = CustomerLocation.objects.create(
+            ca_number="123456789012",
+            fullname="Anchor Mass Map",
+            pea_area="PEA Rangsit",
+            latitude=13.7563,
+            longitude=100.5018,
+        )
+        merged_location = CustomerLocation.objects.create(
+            ca_number="123456789013",
+            fullname="Merged Child Map",
+            pea_area="PEA Rangsit",
+            latitude=13.7564,
+            longitude=100.5019,
+        )
+        anchor_case = OutageCase.objects.create(
+            title="Anchor mass outage map case",
+            case_type=CASE_TYPE_MASS_OUTAGE,
+            latitude=13.7563,
+            longitude=100.5018,
+        )
+        merged_case = OutageCase.objects.create(
+            title="Merged map child case",
+            status=STATUS_MERGED,
+            merged_into=anchor_case,
+            merged_at=timezone.now(),
+            latitude=13.7564,
+            longitude=100.5019,
+        )
+        CustomerReport.objects.create(
+            session_id="session-map-anchor",
+            ca_number=anchor_location.ca_number,
+            related_case=anchor_case,
+        )
+        CustomerReport.objects.create(
+            session_id="session-map-merged",
+            ca_number=merged_location.ca_number,
+            related_case=merged_case,
+        )
+
+        active_response = self.client.get("/ops/map/data/")
+        merged_response = self.client.get("/ops/map/data/", {"status": "merged"})
+
+        self.assertEqual(
+            {marker["ca_number"] for marker in active_response.json()["markers"]},
+            {anchor_location.ca_number},
+        )
+        self.assertEqual(
+            {marker["ca_number"] for marker in merged_response.json()["markers"]},
+            {merged_location.ca_number},
+        )
+        self.assertEqual(
+            merged_response.json()["markers"][0]["case"]["status"],
+            STATUS_MERGED,
+        )
+
     def test_ops_cases_export_csv_uses_current_filters(self):
         matching_case = OutageCase.objects.create(
             title="Matching CSV case",
@@ -1536,6 +1713,12 @@ class OpsWebhookConsoleTests(TestCase):
             latitude=9.2918,
             longitude=100.926396,
         )
+        merged_case = OutageCase.objects.create(
+            title="Merged restore skip case",
+            status=STATUS_MERGED,
+            latitude=9.2919,
+            longitude=100.926496,
+        )
 
         response = self.client.post(
             "/ops/cases/action/",
@@ -1547,8 +1730,10 @@ class OpsWebhookConsoleTests(TestCase):
         self.assertEqual(response.json()["updated_count"], 1)
         active_case.refresh_from_db()
         already_restored_case.refresh_from_db()
+        merged_case.refresh_from_db()
         self.assertEqual(active_case.status, "restored")
         self.assertEqual(already_restored_case.status, "restored")
+        self.assertEqual(merged_case.status, STATUS_MERGED)
 
 
 class CsvExportAdminTests(TestCase):
@@ -1609,18 +1794,22 @@ class CsvExportAdminTests(TestCase):
 
 
 class DistanceLinkingTests(TestCase):
+    def test_case_link_radius_constant_is_half_km(self):
+        self.assertEqual(CASE_LINK_RADIUS_KM, 0.5)
+        self.assertEqual(MASS_OUTAGE_CONFIRMATION_COUNT, 3)
+
     def test_calculate_distance_allows_effectively_same_coordinates(self):
         distance = calculate_distance(14.0626077, 100.6109053, 14.0626077, 100.6109053)
 
         self.assertEqual(distance, 0)
 
-    def test_calculate_distance_returns_finite_inside_five_km_radius(self):
-        distance = calculate_distance(14.0000, 100.0000, 14.0100, 100.0000)
+    def test_calculate_distance_returns_finite_inside_half_km_radius(self):
+        distance = calculate_distance(14.0000, 100.0000, 14.0030, 100.0000)
 
         self.assertFalse(math.isinf(distance))
-        self.assertLessEqual(distance, 5.0)
+        self.assertLessEqual(distance, CASE_LINK_RADIUS_KM)
 
-    def test_calculate_distance_returns_infinite_outside_five_km_radius(self):
-        distance = calculate_distance(14.0000, 100.0000, 14.1000, 100.0000)
+    def test_calculate_distance_returns_infinite_outside_half_km_radius(self):
+        distance = calculate_distance(14.0000, 100.0000, 14.0100, 100.0000)
 
         self.assertTrue(math.isinf(distance))

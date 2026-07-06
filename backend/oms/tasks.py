@@ -1,6 +1,7 @@
 from celery import shared_task
 from django.utils import timezone
 from datetime import timedelta
+from .case_logic import CASE_TYPE_FAST_TRACK, INACTIVE_CASE_STATUSES
 from .models import OutageCase, CustomerReport
 from .services import get_pea_assessment
 import requests
@@ -34,7 +35,7 @@ def _sla_case_start_time(case):
 
 
 def _sla_case_start_reason(case):
-    return "fast_track" if case.case_type == "fast_track" else "case_created"
+    return "fast_track" if case.case_type == CASE_TYPE_FAST_TRACK else "case_created"
 
 
 def _ensure_sla(case, reference_time=None, reason="case_created"):
@@ -139,7 +140,7 @@ def _ensure_pluem_etr(case, report_id=None):
 def check_eta_timeout(case_id, report_id):
     try:
         case = OutageCase.objects.get(case_id=case_id)
-        if case.status == "restored":
+        if case.status in INACTIVE_CASE_STATUSES:
             return
 
         case.sync_affected_ca_numbers()
@@ -173,7 +174,7 @@ def check_eta_timeout(case_id, report_id):
 def check_etr_timeout(case_id):
     try:
         case = OutageCase.objects.get(case_id=case_id)
-        if case.status == "restored":
+        if case.status in INACTIVE_CASE_STATUSES:
             return
 
         etr_target_time = case.oms_etr or case.effective_etr_time()

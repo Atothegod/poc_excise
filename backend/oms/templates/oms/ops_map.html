@@ -511,6 +511,7 @@
                     <option value="investigating">Investigating</option>
                     <option value="repairing">Repairing</option>
                     <option value="restored">Restored</option>
+                    <option value="merged">Merged</option>
                 </select>
             </div>
             <div class="field">
@@ -519,6 +520,7 @@
                     <option value="all">All types</option>
                     <option value="normal">Normal</option>
                     <option value="fast_track">Fast-track</option>
+                    <option value="mass_outage">Mass outage</option>
                 </select>
             </div>
             <div class="field">
@@ -531,7 +533,7 @@
             </div>
             <div class="field">
                 <label for="radiusKmInput">Radius km</label>
-                <input id="radiusKmInput" type="number" min="0.1" step="0.5" value="5">
+                <input id="radiusKmInput" type="number" min="0.1" step="0.1" value="{{ case_link_radius_km|default:'0.5' }}">
             </div>
             <label class="toggle-field">
                 <input id="showAllInput" name="show_all" type="checkbox" checked>
@@ -568,7 +570,7 @@
                     <h2>Radius selection</h2>
                     <div class="radius-summary">
                         <div><span>Center CA</span><strong id="radiusCenter">-</strong></div>
-                        <div><span>Radius</span><strong id="radiusValue">5 km</strong></div>
+                        <div><span>Radius</span><strong id="radiusValue">{{ case_link_radius_km|default:'0.5' }} km</strong></div>
                         <div><span>Inside</span><strong id="radiusCount">0</strong></div>
                     </div>
                     <div class="radius-list" id="radiusList">
@@ -603,7 +605,7 @@
             active: document.getElementById("metricActive"),
             fast: document.getElementById("metricFast")
         };
-        const DEFAULT_RADIUS_KM = 5;
+        const DEFAULT_RADIUS_KM = Number.parseFloat("{{ case_link_radius_km|default:'0.5' }}") || 0.5;
         let markerRegistry = [];
         let currentMarkers = [];
         let selectedEntry = null;

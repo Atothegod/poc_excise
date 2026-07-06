@@ -13,6 +13,13 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 import requests
 
+from .case_logic import (
+    CASE_LINK_RADIUS_KM,
+    CASE_TYPE_FAST_TRACK,
+    CASE_TYPE_MASS_OUTAGE,
+    INACTIVE_CASE_STATUSES,
+    STATUS_RESTORED,
+)
 from .csv_exports import csv_response, write_csv
 from .models import CustomerLocation, CustomerReport, OutageCase
 
@@ -78,6 +85,7 @@ def ops_map_page(request):
         {
             "map_data_url": reverse("ops_map_data_api"),
             "ops_webhook_url": reverse("ops_webhook"),
+            "case_link_radius_km": CASE_LINK_RADIUS_KM,
         },
     )
 
@@ -138,10 +146,10 @@ def _case_queryset_for_request(request):
     status = (request.GET.get("status") or "").strip()
     cases = OutageCase.objects.all().order_by("-created_at")
     if not include_restored:
-        cases = cases.exclude(status="restored")
+        cases = cases.exclude(status__in=INACTIVE_CASE_STATUSES)
 
     if status == "active":
-        cases = cases.exclude(status="restored")
+        cases = cases.exclude(status__in=INACTIVE_CASE_STATUSES)
     elif status and status != "all":
         valid_statuses = {choice[0] for choice in OutageCase.STATUS_CHOICES}
         if status in valid_statuses:
@@ -179,6 +187,7 @@ MAP_STATUS_META = {
     "investigating": {"label": "กำลังตรวจสอบ", "color": "#f59e0b"},
     "repairing": {"label": "กำลังซ่อมแซม", "color": "#2563eb"},
     "restored": {"label": "จ่ายไฟคืนแล้ว", "color": "#16a34a"},
+    "merged": {"label": "ถูกรวมเคส", "color": "#64748b"},
     "no_case": {"label": "ไม่มีเคส", "color": "#94a3b8"},
 }
 
@@ -199,7 +208,7 @@ def _map_case_queryset_for_request(request):
     cases = OutageCase.objects.all().order_by("-created_at")
 
     if status == "active":
-        cases = cases.exclude(status="restored")
+        cases = cases.exclude(status__in=INACTIVE_CASE_STATUSES)
     elif status and status != "all":
         valid_statuses = {choice[0] for choice in OutageCase.STATUS_CHOICES}
         if status in valid_statuses:
@@ -226,7 +235,10 @@ def _case_ca_numbers(case, report_ca_numbers_by_case):
 
 def _report_sort_key(report):
     updated_at = report.updated_at or timezone.now()
-    return (report.related_case.status == "restored", -updated_at.timestamp())
+    return (
+        report.related_case.status in INACTIVE_CASE_STATUSES,
+        -updated_at.timestamp(),
+    )
 
 
 def _case_context_by_ca(cases):
@@ -331,7 +343,8 @@ def _map_marker_payload(location, case):
             "status": marker_status,
             "label": status_meta["label"],
             "color": status_meta["color"],
-            "is_fast_track": bool(case and case.case_type == "fast_track"),
+            "is_fast_track": bool(case and case.case_type == CASE_TYPE_FAST_TRACK),
+            "is_mass_outage": bool(case and case.case_type == CASE_TYPE_MASS_OUTAGE),
         },
         "case": _map_case_payload(case),
     }
@@ -346,17 +359,18 @@ def _map_summary(markers):
     active_case_ids = {
         marker["case"]["case_id"]
         for marker in markers
-        if marker.get("case") and marker["case"]["status"] != "restored"
+        if marker.get("case")
+        and marker["case"]["status"] not in INACTIVE_CASE_STATUSES
     }
     fast_track_case_ids = {
         marker["case"]["case_id"]
         for marker in markers
-        if marker.get("case") and marker["case"]["case_type"] == "fast_track"
+        if marker.get("case") and marker["case"]["case_type"] == CASE_TYPE_FAST_TRACK
     }
     restored_case_ids = {
         marker["case"]["case_id"]
         for marker in markers
-        if marker.get("case") and marker["case"]["status"] == "restored"
+        if marker.get("case") and marker["case"]["status"] == STATUS_RESTORED
     }
 
     return {
@@ -401,6 +415,7 @@ def ops_map_data_api(request):
             "markers": markers,
             "summary": _map_summary(markers),
             "legend": MAP_STATUS_META,
+            "case_link_radius_km": CASE_LINK_RADIUS_KM,
             "filters": {
                 "search": search_term,
                 "status": request.GET.get("status") or "active",
@@ -454,7 +469,9 @@ def _normalize_case_ids(raw_case_ids):
 def _target_cases(data):
     target_mode = data.get("target_mode") or "selected"
     if target_mode == "all_active":
-        return OutageCase.objects.exclude(status="restored").order_by("lv_group_id")
+        return OutageCase.objects.exclude(status__in=INACTIVE_CASE_STATUSES).order_by(
+            "lv_group_id"
+        )
 
     case_ids = _normalize_case_ids(data.get("case_ids") or [])
     if not case_ids:
@@ -512,7 +529,7 @@ def ops_cases_action_api(request):
             return JsonResponse({"status": "error", "message": str(exc)}, status=400)
 
         for case in cases:
-            if case.status == "restored":
+            if case.status in INACTIVE_CASE_STATUSES:
                 skipped_cases.append(_action_case_payload(case))
                 continue
             case.oms_etr = etr_target
@@ -535,7 +552,7 @@ def ops_cases_action_api(request):
         eta_target = timezone.now()
 
         for case in cases:
-            if case.status == "restored":
+            if case.status in INACTIVE_CASE_STATUSES:
                 skipped_cases.append(_action_case_payload(case))
                 continue
             case.eta_target_time = eta_target
@@ -556,10 +573,10 @@ def ops_cases_action_api(request):
 
     if action == "restore":
         for case in cases:
-            if case.status == "restored":
+            if case.status in INACTIVE_CASE_STATUSES:
                 skipped_cases.append(_action_case_payload(case))
                 continue
-            case.status = "restored"
+            case.status = STATUS_RESTORED
             case.save(update_fields=["status", "updated_at"])
             updated_cases.append(_action_case_payload(case))
 

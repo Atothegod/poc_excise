@@ -3,19 +3,32 @@ from django.utils import timezone
 from datetime import timedelta
 import uuid
 
+from .case_logic import (
+    CASE_TYPE_FAST_TRACK,
+    CASE_TYPE_MASS_OUTAGE,
+    CASE_TYPE_NORMAL,
+    STATUS_INVESTIGATING,
+    STATUS_MERGED,
+    STATUS_REPAIRING,
+    STATUS_REPORTED,
+    STATUS_RESTORED,
+)
+
 
 class OutageCase(models.Model):
     SLA_HOURS = 4
 
     STATUS_CHOICES = [
-        ("reported", "ได้รับแจ้งเหตุ"),
-        ("investigating", "กำลังดำเนินการตรวจสอบ"),
-        ("repairing", "กำลังดำเนินการซ่อมแซม"),
-        ("restored", "จ่ายไฟคืนกระแสสำเร็จ"),
+        (STATUS_REPORTED, "ได้รับแจ้งเหตุ"),
+        (STATUS_INVESTIGATING, "กำลังดำเนินการตรวจสอบ"),
+        (STATUS_REPAIRING, "กำลังดำเนินการซ่อมแซม"),
+        (STATUS_RESTORED, "จ่ายไฟคืนกระแสสำเร็จ"),
+        (STATUS_MERGED, "ถูกรวมเข้าเคสอื่น"),
     ]
     CASE_TYPE_CHOICES = [
-        ("normal", "เคสปกติ"),
-        ("fast_track", "เคสเร่งด่วน"),
+        (CASE_TYPE_NORMAL, "เคสปกติ"),
+        (CASE_TYPE_FAST_TRACK, "เคสเร่งด่วน"),
+        (CASE_TYPE_MASS_OUTAGE, "เหตุไฟดับวงกว้าง"),
     ]
 
     case_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -30,11 +43,13 @@ class OutageCase(models.Model):
     case_type = models.CharField(
         max_length=20,
         choices=CASE_TYPE_CHOICES,
-        default="normal",
+        default=CASE_TYPE_NORMAL,
         db_index=True,
-        help_text="ประเภทเคส เช่น normal หรือ fast_track",
+        help_text="ประเภทเคส เช่น normal, fast_track หรือ mass_outage",
     )
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="reported")
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default=STATUS_REPORTED
+    )
     affected_ca_numbers = models.JSONField(
         default=list,
         blank=True,
@@ -42,6 +57,19 @@ class OutageCase(models.Model):
     )
     latitude = models.FloatField()
     longitude = models.FloatField()
+    merged_into = models.ForeignKey(
+        "self",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="merged_cases",
+        help_text="Anchor case ที่รับ reports หลังจากเคสนี้ถูกรวม",
+    )
+    merged_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="เวลาที่เคสนี้ถูกรวมเข้า anchor case",
+    )
 
     eta_target_time = models.DateTimeField(
         null=True, blank=True, help_text="เวลาเป้าหมายที่ช่างจะไปถึงหน้างาน (ETA)"

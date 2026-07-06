@@ -41,12 +41,15 @@ class OutageCaseAdmin(CsvExportAdminMixin, admin.ModelAdmin):
     )
     list_filter = ("status", "case_type", "lv_group_id")
     search_fields = ("case_id", "title", "affected_customers__ca_number")
+    autocomplete_fields = ("merged_into",)
     csv_fields = (
         "case_id",
         "lv_group_id",
         "title",
         "case_type",
         "status",
+        "merged_into",
+        "merged_at",
         "affected_ca_numbers",
         "latitude",
         "longitude",

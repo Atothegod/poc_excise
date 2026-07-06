@@ -2,6 +2,7 @@ from django.db.models.signals import pre_save, post_save
 from django.dispatch import receiver
 from django.utils import timezone
 from datetime import timedelta
+from .case_logic import INACTIVE_CASE_STATUSES
 from .models import OutageCase, CustomerReport, OutageRestorationLog
 from .tasks import check_eta_timeout, check_etr_timeout, send_proactive_alert
 from pea_project.celery import app as celery_app
@@ -111,7 +112,7 @@ def process_outage_case_updates(sender, instance, created, **kwargs):
             celery_app.control.revoke(old_etr_task_id, terminate=True)
 
         etr_task_id = None
-        if instance.status != "restored":
+        if instance.status not in INACTIVE_CASE_STATUSES:
             task = check_etr_timeout.apply_async(
                 args=[instance.case_id], eta=instance.oms_etr
             )
@@ -124,21 +125,22 @@ def process_outage_case_updates(sender, instance, created, **kwargs):
             celery_etr_task_id=etr_task_id,
         )
 
-        instance.sync_affected_ca_numbers()
-        etr_label = _format_time_label(instance.oms_etr)
-        message = f"อัปเดตล่าสุด คาดว่าจะจ่ายไฟคืนประมาณ {etr_label} ครับ"
-        sent_session_ids = set()
-        affected_customers = CustomerReport.objects.filter(
-            related_case=instance, is_resolved=False
-        ).exclude(session_id__isnull=True).exclude(session_id="")
+        if instance.status not in INACTIVE_CASE_STATUSES:
+            instance.sync_affected_ca_numbers()
+            etr_label = _format_time_label(instance.oms_etr)
+            message = f"อัปเดตล่าสุด คาดว่าจะจ่ายไฟคืนประมาณ {etr_label} ครับ"
+            sent_session_ids = set()
+            affected_customers = CustomerReport.objects.filter(
+                related_case=instance, is_resolved=False
+            ).exclude(session_id__isnull=True).exclude(session_id="")
 
-        for report in affected_customers:
-            if report.session_id in sent_session_ids:
-                continue
-            sent_session_ids.add(report.session_id)
-            send_proactive_alert.delay(
-                report_id=report.id, message=message, event_type="etr_update"
-            )
+            for report in affected_customers:
+                if report.session_id in sent_session_ids:
+                    continue
+                sent_session_ids.add(report.session_id)
+                send_proactive_alert.delay(
+                    report_id=report.id, message=message, event_type="etr_update"
+                )
 
         instance._has_new_oms_etr = False
 

@@ -272,7 +272,7 @@ def Check_Outage_Tool(ca_number: str, pdpa_consent: bool = False):
             return f"[เคสเดิมของ CA] แจ้งเวลาช่างถึงหน้างานเดิมประมาณ {eta_label}"
         return "[เคสเดิมของ CA] ระบบพบเคสที่เปิดอยู่แล้ว แต่ยังไม่มีเวลาประเมินล่าสุด"
 
-    if event_type == "repeated_event":
+    if event_type in {"mass_outage", "repeated_event"}:
         if etr_label:
             return f"[เหตุวงกว้าง] แจ้ง {etr_label}"
         else:
