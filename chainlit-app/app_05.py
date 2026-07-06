@@ -2,6 +2,7 @@
 import os
 import re
 import asyncio
+import uuid
 import pandas as pd
 import chainlit as cl
 from typing import Tuple
@@ -149,6 +150,21 @@ def format_numeric_columns(df: pd.DataFrame) -> pd.DataFrame:
         if pd.api.types.is_numeric_dtype(df_display[col]):
             df_display[col] = df_display[col].apply(lambda x: f"{x:,.0f}" if pd.notnull(x) else x)
     return df_display
+
+def ensure_khrap_ending(text: str) -> str:
+    clean_text = text.strip()
+    if not clean_text:
+        return clean_text
+
+    clean_text = re.sub(r"(ค่ะ|คะ)\s*([.!?。！？…]*)$", r"ครับ\2", clean_text)
+    if re.search(r"ครับ\s*[.!?。！？…]*$", clean_text):
+        return clean_text
+
+    trailing_match = re.search(r"([.!?。！？…]*)$", clean_text)
+    trailing = trailing_match.group(1) if trailing_match else ""
+    body = clean_text[:-len(trailing)].rstrip() if trailing else clean_text.rstrip()
+    separator = "" if re.search(r"[\u0E00-\u0E7F]$", body) else " "
+    return f"{body}{separator}ครับ{trailing}"
 
 # =========================
 # BUILD QUERY ENGINE
@@ -358,7 +374,8 @@ async def on_message(message: cl.Message):
         dspy.inspect_history(n=1)
         print("="*50 + "\n")
 
-        response_text = result.answer
+        answer_text = ensure_khrap_ending(result.answer)
+        response_text = answer_text
         if final_sql:
             response_text += f"\n\n**🔍 Query Used:**\n```sql\n{final_sql}\n```"
         
@@ -370,8 +387,9 @@ async def on_message(message: cl.Message):
         # 🔊 TTS: แปลงข้อความตอบกลับของ AI เป็นเสียงพูดภาษาไทย (ใช้ Edge-TTS)
         # ----------------------------------------------------
         try:
-            clean_text_to_speak = result.answer 
-            speech_path = "ai_response.mp3"
+            clean_text_to_speak = answer_text
+            os.makedirs(".files", exist_ok=True)
+            speech_path = os.path.join(".files", f"ai_response_{uuid.uuid4().hex}.mp3")
             
             communicate = edge_tts.Communicate(
                 text=clean_text_to_speak, 

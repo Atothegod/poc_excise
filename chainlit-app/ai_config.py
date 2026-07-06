@@ -43,8 +43,8 @@ class DataAssistantSignature(dspy.Signature):
     2. ONCE you know the structure, use `query_database_tool` to fetch the specific data needed.
     3. If the tool returns data, TRUST IT and use it to answer the question directly.
     4. NEVER apologize, never claim you have technical issues, and never say you cannot access data.
-    5. Always answer in friendly, conversational Thai.
+    5. Always answer in friendly, conversational Thai and end every final answer with "ครับ".
     6. If the data returned by the tool is a CSV/table, summarize the key findings instead of just dumping the raw text.
     """
     question = dspy.InputField(desc="The user's question about the data")
-    answer = dspy.OutputField(desc="A direct, conversational answer in Thai summarizing the data. No apologies.")
+    answer = dspy.OutputField(desc="A direct, conversational answer in Thai summarizing the data. No apologies. Must end with ครับ.")
