@@ -25,18 +25,17 @@ from .services import format_minutes_label, get_pea_assessment, parse_eta_minute
 from .tasks import check_eta_timeout
 
 
+CASE_LINK_RADIUS_KM = 5.0
+
+
 def calculate_distance(lat1, lon1, lat2, lon2):
     """
-    Keep outage cases effectively independent.
-
-    The caller still uses the legacy `dist <= 5.0` check, so this function only
-    returns a finite distance when two reports are within about 10 cm of each
-    other. Anything farther away is treated as outside the linking radius.
+    Return the distance in km only when two points are inside the case-link radius.
+    Anything farther away is treated as outside any existing active case.
     """
     if None in [lat1, lon1, lat2, lon2]:
         return float("inf")
 
-    case_link_radius_km = 0.0001
     R = 6371.0
     lat1_rad = math.radians(lat1)
     lon1_rad = math.radians(lon1)
@@ -50,9 +49,31 @@ def calculate_distance(lat1, lon1, lat2, lon2):
     )
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
     distance_km = R * c
-    if distance_km > case_link_radius_km:
+    if distance_km > CASE_LINK_RADIUS_KM:
         return float("inf")
     return distance_km
+
+
+def _nearby_case_sort_key(candidate):
+    distance, case = candidate
+    created_at = case.created_at or timezone.now()
+    return (distance, created_at, case.lv_group_id or 0, str(case.case_id))
+
+
+def _nearest_active_case(latitude, longitude):
+    candidates = []
+    active_cases = OutageCase.objects.exclude(status="restored").order_by(
+        "created_at", "lv_group_id", "case_id"
+    )
+
+    for case in active_cases:
+        distance = calculate_distance(latitude, longitude, case.latitude, case.longitude)
+        if distance <= CASE_LINK_RADIUS_KM:
+            candidates.append((distance, case))
+
+    if not candidates:
+        return None
+    return min(candidates, key=_nearby_case_sort_key)[1]
 
 
 def _parse_float(value):
@@ -390,21 +411,11 @@ def sync_agent_report(request):
             )
 
         if has_coordinates and not report.related_case:
-            active_cases = OutageCase.objects.exclude(status="restored")
-            nearest_case = None
-
-            for case in active_cases:
-                dist = calculate_distance(
-                    report.latitude, report.longitude, case.latitude, case.longitude
-                )
-                print(f"DEBUG: Checking case {case.case_id}, Distance: {dist}")
-                if dist <= 5.0:
-                    nearest_case = case
-                    event_type = "repeated_event"
-                    break
+            nearest_case = _nearest_active_case(report.latitude, report.longitude)
 
             if nearest_case:
                 report.related_case = nearest_case
+                event_type = "repeated_event"
             else:
                 base_time = report.time_stamp if report.time_stamp else timezone.now()
                 assessment = get_pea_assessment(

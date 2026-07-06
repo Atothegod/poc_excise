@@ -318,6 +318,113 @@ class SyncAgentReportTests(TestCase):
         case = OutageCase.objects.get(case_id=response.data["case_id"])
         self.assertEqual(case.affected_ca_numbers, ["123456789012"])
 
+    @patch("oms.views_api.get_pea_assessment")
+    def test_sync_report_reuses_active_case_within_five_km(self, mock_assessment):
+        CustomerLocation.objects.create(
+            ca_number="123456789012",
+            fullname="Nearby CA User",
+            latitude=14.0000,
+            longitude=100.0000,
+        )
+        case = OutageCase.objects.create(
+            title="Nearby active case",
+            latitude=14.0100,
+            longitude=100.0000,
+        )
+
+        response = self.client.post(
+            "/api/reports/sync/",
+            {
+                "session_id": "session-nearby-case",
+                "ca_number": "123456789012",
+                "pdpa_consent": True,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["event_type"], "repeated_event")
+        self.assertEqual(str(response.data["case_id"]), str(case.case_id))
+        self.assertEqual(OutageCase.objects.count(), 1)
+        mock_assessment.assert_not_called()
+
+    @patch("oms.views_api.get_pea_assessment")
+    def test_sync_report_uses_nearest_case_when_multiple_active_cases_match(
+        self, mock_assessment
+    ):
+        CustomerLocation.objects.create(
+            ca_number="123456789012",
+            fullname="Overlap CA User",
+            latitude=14.0000,
+            longitude=100.0000,
+        )
+        farther_case = OutageCase.objects.create(
+            title="Farther active case",
+            latitude=14.0300,
+            longitude=100.0000,
+        )
+        nearest_case = OutageCase.objects.create(
+            title="Nearest active case",
+            latitude=14.0050,
+            longitude=100.0000,
+        )
+
+        response = self.client.post(
+            "/api/reports/sync/",
+            {
+                "session_id": "session-overlap-case",
+                "ca_number": "123456789012",
+                "pdpa_consent": True,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["event_type"], "repeated_event")
+        self.assertEqual(str(response.data["case_id"]), str(nearest_case.case_id))
+        self.assertNotEqual(str(response.data["case_id"]), str(farther_case.case_id))
+        self.assertEqual(OutageCase.objects.count(), 2)
+        mock_assessment.assert_not_called()
+
+    @patch("oms.views_api.get_pea_assessment")
+    @patch("oms.views_api.check_eta_timeout.apply_async")
+    def test_sync_report_creates_new_case_outside_active_case_radius(
+        self, mock_apply_async, mock_assessment
+    ):
+        mock_apply_async.return_value.id = "eta-task-id"
+        mock_assessment.return_value = {
+            "fastest_branch": "การไฟฟ้าส่วนภูมิภาค สาขา รังสิต",
+            "eta_formatted": "~ 8 min",
+            "estimated_etr_minutes": 69.0,
+        }
+        CustomerLocation.objects.create(
+            ca_number="123456789012",
+            fullname="Outside Radius User",
+            latitude=14.0000,
+            longitude=100.0000,
+        )
+        outside_case = OutageCase.objects.create(
+            title="Outside active case",
+            latitude=14.1000,
+            longitude=100.0000,
+        )
+
+        response = self.client.post(
+            "/api/reports/sync/",
+            {
+                "session_id": "session-outside-radius",
+                "ca_number": "123456789012",
+                "pdpa_consent": True,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["event_type"], "new_event")
+        self.assertNotEqual(str(response.data["case_id"]), str(outside_case.case_id))
+        self.assertEqual(OutageCase.objects.count(), 2)
+        mock_assessment.assert_called_once()
+
     def test_sync_chat_history_stores_dialog_on_latest_report(self):
         report = CustomerReport.objects.create(
             session_id="session-dialog",
@@ -1079,6 +1186,17 @@ class OpsWebhookConsoleTests(TestCase):
         self.assertContains(response, "OMS Location Map")
         self.assertContains(response, "Legend")
         self.assertContains(response, "Filter")
+        self.assertContains(response, "Radius selection")
+        content = response.content.decode()
+        self.assertIn(
+            'id="showAllInput" name="show_all" type="checkbox" checked',
+            content,
+        )
+        self.assertIn('id="radiusKmInput" type="number"', content)
+        self.assertIn('value="5"', content)
+        self.assertIn("L.featureGroup()", content)
+        self.assertNotIn("leaflet.markercluster", content)
+        self.assertNotIn("markerClusterGroup", content)
 
     def test_ops_map_data_returns_customer_location_with_case_metadata(self):
         location = CustomerLocation.objects.create(
@@ -1491,12 +1609,18 @@ class CsvExportAdminTests(TestCase):
 
 
 class DistanceLinkingTests(TestCase):
-    def test_calculate_distance_returns_infinite_outside_tiny_link_radius(self):
-        distance = calculate_distance(14.0626077, 100.6109053, 14.0627077, 100.6109053)
-
-        self.assertTrue(math.isinf(distance))
-
     def test_calculate_distance_allows_effectively_same_coordinates(self):
         distance = calculate_distance(14.0626077, 100.6109053, 14.0626077, 100.6109053)
 
         self.assertEqual(distance, 0)
+
+    def test_calculate_distance_returns_finite_inside_five_km_radius(self):
+        distance = calculate_distance(14.0000, 100.0000, 14.0100, 100.0000)
+
+        self.assertFalse(math.isinf(distance))
+        self.assertLessEqual(distance, 5.0)
+
+    def test_calculate_distance_returns_infinite_outside_five_km_radius(self):
+        distance = calculate_distance(14.0000, 100.0000, 14.1000, 100.0000)
+
+        self.assertTrue(math.isinf(distance))

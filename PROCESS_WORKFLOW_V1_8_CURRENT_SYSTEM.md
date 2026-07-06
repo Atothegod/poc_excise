@@ -147,15 +147,15 @@ DSPy Agent ใช้ `chat_history` และ system context เพื่อค�
 ถ้ามีพิกัด และยังไม่มี related case:
 
 1. Backend loop หา active OutageCase ที่ยังไม่ `restored`
-2. ใช้ `calculate_distance()` ตรวจระยะ
-3. แม้ caller จะเช็ค `dist <= 5.0` แต่ฟังก์ชันปัจจุบันคืนระยะจริงเฉพาะเมื่อจุดอยู่ในรัศมีประมาณ 0.0001 km หรือประมาณ 10 ซม.
+2. ใช้ `calculate_distance()` ตรวจระยะจากพิกัด CA ที่แจ้งไปยัง center ของ active case
+3. ถ้ามี active case center ภายในรัศมี 5 km มากกว่าหนึ่งเคส ระบบเลือกเคสที่อยู่ใกล้ที่สุดก่อน โดยไม่ merge เคส
 4. ถ้าเจอเคสใกล้เคียง:
    - ผูก report เข้ากับเคสนั้น
    - คืน `event_type = repeated_event`
 
 ผลลัพธ์:
 
-- ในทางปฏิบัติ repeated event จะเกิดเมื่อพิกัดแทบตรงกันเท่านั้น
+- repeated event จะเกิดเมื่อ CA ที่แจ้งอยู่ในรัศมี 5 km จาก center ของ active case
 - ระบบยังไม่มี Area Topic หรือ Mass Outage Subscription ตาม target v1.8
 
 ### 6.4 สร้างเคสใหม่
@@ -487,7 +487,7 @@ Login with CA + PDPA
   -> Agent calls Check_Outage_Tool
   -> OMS sync report
       -> existing active CA case: return existing_ca_case
-      -> same/effectively same coordinate case: return repeated_event
+      -> nearest active case center within 5 km: return repeated_event
       -> no related case: call pea-estimated.services and create OutageCase
   -> schedule ETA timer
   -> OMS/Admin may set ETR

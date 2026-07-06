@@ -5,8 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>OMS Location Map</title>
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
-    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css">
     <style>
         :root {
             color-scheme: light;
@@ -117,7 +115,7 @@
 
         .toolbar {
             display: grid;
-            grid-template-columns: minmax(240px, 1.5fr) repeat(2, minmax(140px, 0.7fr)) repeat(2, minmax(145px, 0.8fr)) auto auto;
+            grid-template-columns: minmax(220px, 1.35fr) repeat(3, minmax(120px, 0.7fr)) repeat(2, minmax(145px, 0.8fr)) auto auto auto;
             gap: 10px;
             align-items: end;
             padding: 14px 22px;
@@ -238,12 +236,14 @@
         }
 
         .legend,
+        .radius-selection,
         .location-list {
             padding: 16px;
             border-bottom: 1px solid var(--line);
         }
 
         .legend h2,
+        .radius-selection h2,
         .location-list h2 {
             margin: 0 0 12px;
             font-size: 14px;
@@ -278,11 +278,59 @@
             box-shadow: 0 0 0 2px var(--magenta);
         }
 
+        .radius-summary {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 1px;
+            overflow: hidden;
+            border: 1px solid var(--line);
+            border-radius: 6px;
+            background: var(--line);
+        }
+
+        .radius-summary div {
+            min-width: 0;
+            background: #f8fbff;
+            padding: 10px;
+        }
+
+        .radius-summary span {
+            display: block;
+            color: var(--muted);
+            font-size: 11px;
+            font-weight: 700;
+        }
+
+        .radius-summary strong {
+            display: block;
+            margin-top: 4px;
+            overflow-wrap: anywhere;
+            font-size: 14px;
+            line-height: 1.2;
+        }
+
+        .radius-list {
+            display: grid;
+            gap: 8px;
+            margin-top: 10px;
+        }
+
+        .radius-empty {
+            border: 1px dashed #b7c5d8;
+            border-radius: 6px;
+            padding: 10px 12px;
+            color: var(--muted);
+            background: #f8fbff;
+            font-size: 12px;
+            line-height: 1.4;
+        }
+
         .location-list {
             display: grid;
             gap: 10px;
         }
 
+        .radius-row,
         .location-row {
             border: 1px solid var(--line);
             border-radius: 6px;
@@ -292,10 +340,26 @@
             gap: 4px;
         }
 
+        .radius-row.in-radius,
+        .location-row.in-radius {
+            border-color: rgba(14, 165, 233, 0.58);
+            background: #eff9ff;
+            box-shadow: inset 3px 0 0 #0ea5e9;
+        }
+
+        .radius-row.is-center,
+        .location-row.is-center {
+            border-color: rgba(37, 99, 235, 0.7);
+            background: #eaf3ff;
+            box-shadow: inset 3px 0 0 #2563eb;
+        }
+
+        .radius-row strong,
         .location-row strong {
             font-size: 13px;
         }
 
+        .radius-row span,
         .location-row span {
             color: var(--muted);
             font-size: 12px;
@@ -314,6 +378,26 @@
 
         .case-marker.fast-track {
             box-shadow: 0 0 0 3px rgba(192, 38, 211, 0.48), 0 2px 10px rgba(23, 32, 47, 0.38);
+        }
+
+        .case-marker.in-radius {
+            transform: scale(1.12);
+            transform-origin: center;
+            box-shadow: 0 0 0 4px rgba(14, 165, 233, 0.44), 0 2px 10px rgba(23, 32, 47, 0.38);
+        }
+
+        .case-marker.fast-track.in-radius {
+            box-shadow: 0 0 0 2px rgba(192, 38, 211, 0.48), 0 0 0 6px rgba(14, 165, 233, 0.36), 0 2px 10px rgba(23, 32, 47, 0.38);
+        }
+
+        .case-marker.is-center {
+            transform: scale(1.32);
+            transform-origin: center;
+            box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.5), 0 0 0 8px rgba(125, 211, 252, 0.42), 0 4px 14px rgba(23, 32, 47, 0.42);
+        }
+
+        .case-marker.fast-track.is-center {
+            box-shadow: 0 0 0 2px rgba(192, 38, 211, 0.52), 0 0 0 6px rgba(37, 99, 235, 0.5), 0 0 0 10px rgba(125, 211, 252, 0.38), 0 4px 14px rgba(23, 32, 47, 0.42);
         }
 
         .popup {
@@ -356,7 +440,7 @@
 
         @media (max-width: 1180px) {
             .toolbar {
-                grid-template-columns: minmax(220px, 1fr) repeat(2, minmax(140px, 1fr)) auto auto;
+                grid-template-columns: minmax(220px, 1fr) repeat(3, minmax(120px, 1fr)) auto auto auto;
             }
         }
 
@@ -392,6 +476,10 @@
             }
 
             .summary {
+                grid-template-columns: 1fr;
+            }
+
+            .radius-summary {
                 grid-template-columns: 1fr;
             }
         }
@@ -441,8 +529,12 @@
                 <label for="createdToInput">Created to</label>
                 <input id="createdToInput" name="created_to" type="date">
             </div>
+            <div class="field">
+                <label for="radiusKmInput">Radius km</label>
+                <input id="radiusKmInput" type="number" min="0.1" step="0.5" value="5">
+            </div>
             <label class="toggle-field">
-                <input id="showAllInput" name="show_all" type="checkbox">
+                <input id="showAllInput" name="show_all" type="checkbox" checked>
                 Show all
             </label>
             <button class="primary-button" type="submit">Apply</button>
@@ -472,6 +564,17 @@
                         <div class="legend-item"><span class="dot fast-dot" style="--dot-color:#2563eb"></span>Fast-track</div>
                     </div>
                 </section>
+                <section class="radius-selection" aria-label="Radius selection">
+                    <h2>Radius selection</h2>
+                    <div class="radius-summary">
+                        <div><span>Center CA</span><strong id="radiusCenter">-</strong></div>
+                        <div><span>Radius</span><strong id="radiusValue">5 km</strong></div>
+                        <div><span>Inside</span><strong id="radiusCount">0</strong></div>
+                    </div>
+                    <div class="radius-list" id="radiusList">
+                        <div class="radius-empty">Click a marker to inspect nearby CA.</div>
+                    </div>
+                </section>
                 <section class="location-list">
                     <h2>Visible locations</h2>
                     <div id="locationList"></div>
@@ -481,7 +584,6 @@
     </div>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
     <script>
         const DATA_URL = "{{ map_data_url }}";
         const OPS_WEBHOOK_URL = "{{ ops_webhook_url }}";
@@ -489,12 +591,24 @@
         const resetButton = document.getElementById("resetButton");
         const mapStatus = document.getElementById("mapStatus");
         const locationList = document.getElementById("locationList");
+        const radiusInput = document.getElementById("radiusKmInput");
+        const showAllInput = document.getElementById("showAllInput");
+        const radiusCenter = document.getElementById("radiusCenter");
+        const radiusValue = document.getElementById("radiusValue");
+        const radiusCount = document.getElementById("radiusCount");
+        const radiusList = document.getElementById("radiusList");
         const metrics = {
             locations: document.getElementById("metricLocations"),
             cases: document.getElementById("metricCases"),
             active: document.getElementById("metricActive"),
             fast: document.getElementById("metricFast")
         };
+        const DEFAULT_RADIUS_KM = 5;
+        let markerRegistry = [];
+        let currentMarkers = [];
+        let selectedEntry = null;
+        let radiusCircle = null;
+        let activeRadiusCaNumbers = new Set();
 
         const map = L.map("map", {
             zoomControl: true,
@@ -506,11 +620,8 @@
             attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
         }).addTo(map);
 
-        const clusterLayer = L.markerClusterGroup({
-            showCoverageOnHover: false,
-            maxClusterRadius: 46
-        });
-        map.addLayer(clusterLayer);
+        const markerLayer = L.featureGroup();
+        map.addLayer(markerLayer);
 
         function escapeHtml(value) {
             return String(value ?? "")
@@ -531,11 +642,13 @@
             });
         }
 
-        function markerIcon(marker) {
+        function markerIcon(marker, state = {}) {
             const fastClass = marker.marker.is_fast_track ? " fast-track" : "";
+            const radiusClass = state.inRadius ? " in-radius" : "";
+            const centerClass = state.isCenter ? " is-center" : "";
             return L.divIcon({
                 className: "",
-                html: `<span class="case-marker${fastClass}" style="--marker-color:${marker.marker.color}"></span>`,
+                html: `<span class="case-marker${fastClass}${radiusClass}${centerClass}" style="--marker-color:${marker.marker.color}"></span>`,
                 iconSize: [18, 18],
                 iconAnchor: [9, 9],
                 popupAnchor: [0, -9]
@@ -577,16 +690,21 @@
             metrics.fast.textContent = summary.fast_track_cases ?? 0;
         }
 
+        function caseLine(marker) {
+            return marker.case
+                ? `LV ${escapeHtml(marker.case.lv_group_id || "-")} · ${escapeHtml(marker.case.status_display)} · ${escapeHtml(marker.case.case_type_display)}`
+                : "No case";
+        }
+
         function renderLocationList(markers) {
             const visible = markers.slice(0, 80);
             locationList.innerHTML = visible.map((marker) => {
-                const caseLine = marker.case
-                    ? `LV ${escapeHtml(marker.case.lv_group_id || "-")} · ${escapeHtml(marker.case.status_display)} · ${escapeHtml(marker.case.case_type_display)}`
-                    : "No case";
+                const radiusClass = activeRadiusCaNumbers.has(marker.ca_number) ? " in-radius" : "";
+                const centerClass = selectedEntry && selectedEntry.markerData.ca_number === marker.ca_number ? " is-center" : "";
                 return `
-                    <div class="location-row">
+                    <div class="location-row${radiusClass}${centerClass}">
                         <strong>${escapeHtml(marker.ca_number)} · ${escapeHtml(marker.customer_name || "-")}</strong>
-                        <span>${caseLine}</span>
+                        <span>${caseLine(marker)}</span>
                         <span>${escapeHtml(marker.pea_area || marker.address || "-")}</span>
                     </div>
                 `;
@@ -600,9 +718,128 @@
             }
         }
 
+        function radiusKm() {
+            const parsedRadius = Number.parseFloat(radiusInput.value);
+            if (!Number.isFinite(parsedRadius) || parsedRadius <= 0) {
+                return DEFAULT_RADIUS_KM;
+            }
+            return parsedRadius;
+        }
+
+        function formatKm(value) {
+            const rounded = Math.round(value * 10) / 10;
+            return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+        }
+
+        function formatDistance(meters) {
+            if (meters < 50) return "0 km";
+            const km = meters / 1000;
+            return `${km < 1 ? km.toFixed(2) : formatKm(km)} km`;
+        }
+
+        function updateMarkerIcon(entry) {
+            entry.leafletMarker.setIcon(markerIcon(entry.markerData, {
+                inRadius: activeRadiusCaNumbers.has(entry.markerData.ca_number),
+                isCenter: selectedEntry && selectedEntry.markerData.ca_number === entry.markerData.ca_number
+            }));
+        }
+
+        function renderRadiusSelection(matches = []) {
+            const radius = radiusKm();
+            radiusValue.textContent = `${formatKm(radius)} km`;
+
+            if (!selectedEntry) {
+                radiusCenter.textContent = "-";
+                radiusCount.textContent = "0";
+                radiusList.innerHTML = '<div class="radius-empty">Click a marker to inspect nearby CA.</div>';
+                return;
+            }
+
+            radiusCenter.textContent = selectedEntry.markerData.ca_number;
+            radiusCount.textContent = matches.length;
+
+            const visible = matches.slice(0, 80);
+            radiusList.innerHTML = visible.map(({ entry, distanceMeters }) => {
+                const marker = entry.markerData;
+                const centerClass = entry === selectedEntry ? " is-center" : "";
+                return `
+                    <div class="radius-row in-radius${centerClass}">
+                        <strong>${escapeHtml(marker.ca_number)} · ${escapeHtml(marker.customer_name || "-")}</strong>
+                        <span>${escapeHtml(formatDistance(distanceMeters))} · ${caseLine(marker)}</span>
+                        <span>${escapeHtml(marker.pea_area || marker.address || "-")}</span>
+                    </div>
+                `;
+            }).join("");
+
+            if (matches.length > visible.length) {
+                radiusList.insertAdjacentHTML(
+                    "beforeend",
+                    `<div class="radius-row"><span>Showing first ${visible.length} of ${matches.length} locations in radius</span></div>`
+                );
+            }
+        }
+
+        function clearRadiusSelection() {
+            if (radiusCircle) {
+                map.removeLayer(radiusCircle);
+                radiusCircle = null;
+            }
+
+            selectedEntry = null;
+            activeRadiusCaNumbers = new Set();
+            for (const entry of markerRegistry) {
+                updateMarkerIcon(entry);
+            }
+            renderRadiusSelection();
+            renderLocationList(currentMarkers);
+        }
+
+        function updateRadiusSelection() {
+            if (!selectedEntry) {
+                renderRadiusSelection();
+                return;
+            }
+
+            const radiusMeters = radiusKm() * 1000;
+            if (!radiusCircle) {
+                radiusCircle = L.circle(selectedEntry.latLng, {
+                    radius: radiusMeters,
+                    color: "#0ea5e9",
+                    fillColor: "#7dd3fc",
+                    fillOpacity: 0.18,
+                    opacity: 0.9,
+                    weight: 2
+                }).addTo(map);
+            } else {
+                radiusCircle.setLatLng(selectedEntry.latLng);
+                radiusCircle.setRadius(radiusMeters);
+            }
+
+            const matches = markerRegistry
+                .map((entry) => ({
+                    entry,
+                    distanceMeters: selectedEntry.latLng.distanceTo(entry.latLng)
+                }))
+                .filter(({ distanceMeters }) => distanceMeters <= radiusMeters)
+                .sort((a, b) => a.distanceMeters - b.distanceMeters);
+
+            activeRadiusCaNumbers = new Set(matches.map(({ entry }) => entry.markerData.ca_number));
+            for (const entry of markerRegistry) {
+                updateMarkerIcon(entry);
+            }
+            renderRadiusSelection(matches);
+            renderLocationList(currentMarkers);
+            mapStatus.textContent = `${matches.length} locations within ${formatKm(radiusKm())} km of CA ${selectedEntry.markerData.ca_number}`;
+        }
+
+        function selectRadiusCenter(entry) {
+            selectedEntry = entry;
+            updateRadiusSelection();
+        }
+
         function paramsFromForm() {
             const params = new URLSearchParams(new FormData(form));
-            if (!document.getElementById("showAllInput").checked) {
+            if (!showAllInput.checked) {
                 params.delete("show_all");
             } else {
                 params.set("show_all", "true");
@@ -618,19 +855,25 @@
             }
 
             const data = await response.json();
-            clusterLayer.clearLayers();
+            clearRadiusSelection();
+            markerLayer.clearLayers();
+            markerRegistry = [];
+            currentMarkers = data.markers || [];
 
             const bounds = [];
-            for (const markerData of data.markers) {
-                const latLng = [markerData.latitude, markerData.longitude];
+            for (const markerData of currentMarkers) {
+                const latLng = L.latLng(markerData.latitude, markerData.longitude);
                 bounds.push(latLng);
-                L.marker(latLng, { icon: markerIcon(markerData) })
-                    .bindPopup(popupHtml(markerData), { maxWidth: 360 })
-                    .addTo(clusterLayer);
+                const leafletMarker = L.marker(latLng, { icon: markerIcon(markerData) })
+                    .bindPopup(popupHtml(markerData), { maxWidth: 360 });
+                const entry = { markerData, leafletMarker, latLng };
+                leafletMarker.on("click", () => selectRadiusCenter(entry));
+                markerRegistry.push(entry);
+                leafletMarker.addTo(markerLayer);
             }
 
             renderSummary(data.summary || {});
-            renderLocationList(data.markers || []);
+            renderLocationList(currentMarkers);
 
             if (bounds.length) {
                 map.fitBounds(bounds, { padding: [32, 32], maxZoom: 16 });
@@ -652,9 +895,19 @@
             form.reset();
             document.getElementById("statusSelect").value = "active";
             document.getElementById("caseTypeSelect").value = "all";
+            showAllInput.checked = true;
+            radiusInput.value = DEFAULT_RADIUS_KM;
             loadMarkers().catch((error) => {
                 mapStatus.textContent = error.message;
             });
+        });
+
+        radiusInput.addEventListener("input", () => {
+            if (selectedEntry) {
+                updateRadiusSelection();
+            } else {
+                renderRadiusSelection();
+            }
         });
 
         loadMarkers().catch((error) => {
