@@ -69,6 +69,15 @@ header, nav, [class*="navbar"], [class*="header"] {
    WELCOME SCREEN (chainlit.md content)
    ========================= */
 
+/* Keep the custom login image fully visible instead of cropped. */
+img[src*="w1200-Photoroom_0_0.png"],
+[style*="w1200-Photoroom_0_0.png"] {
+    object-fit: contain !important;
+    background-size: contain !important;
+    background-repeat: no-repeat !important;
+    background-position: center center !important;
+}
+
 /* Make the welcome screen markdown content visible and well-styled */
 .markdown-body {
     max-width: 700px !important;
@@ -163,7 +172,25 @@ textarea[placeholder]:focus {
 
 /* Assistant messages */
 .cl-message-content {
-    line-height: 1.8 !important;
+    line-height: 2.8 !important;
+}
+
+/* Enlarge the assistant avatar configured via default_avatar_file_url */
+*:has(> img[src*="Smit_0_0.png"]) {
+    width: 100px !important;
+    height: 100px !important;
+    min-width: 100px !important;
+    overflow: visible !important;
+}
+
+img[src*="Smit_0_0.png"] {
+    width: 100px !important;
+    height: 100px !important;
+    min-width: 100px !important;
+    min-height: 100px !important;
+    object-fit: contain !important;
+    border-radius: 50% !important;
+    filter: drop-shadow(0 2px 8px rgba(26, 74, 122, 0.16));
 }
 
 /* Code blocks inside messages */
@@ -213,5 +240,13 @@ textarea[placeholder]:focus {
 
     .markdown-body h2 {
         font-size: 1.2rem !important;
+    }
+
+    *:has(> img[src*="Smit_0_0.png"]),
+    img[src*="Smit_0_0.png"] {
+        width: 44px !important;
+        height: 44px !important;
+        min-width: 44px !important;
+        min-height: 44px !important;
     }
 }
