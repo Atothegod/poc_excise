@@ -394,7 +394,6 @@ async def on_message(message: cl.Message):
             communicate = edge_tts.Communicate(
                 text=clean_text_to_speak, 
                 voice="th-TH-NiwatNeural", # เปลี่ยนเป็นเสียงผู้ชายได้
-                rate="+10%" # เร่งความเร็วให้พูดไวขึ้นนิดหน่อย
             )
             
             # บันทึกไฟล์ (edge-tts เป็น async อยู่แล้ว ไม่ต้องใช้ asyncio.to_thread)

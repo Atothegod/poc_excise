@@ -16,12 +16,81 @@
     --excise-text-muted: #6b7c93;
     --excise-border: #e2e8f0;
     --excise-gradient: linear-gradient(135deg, #1a4a7a 0%, #2a6cb0 50%, #3a8cd0 100%);
+    --primary: 207 65% 29%;
+    --primary-foreground: 0 0% 100%;
+    --ring: 208 62% 43%;
+    --accent: 210 40% 96%;
+    --accent-foreground: 207 65% 29%;
 }
 
 /* --- Global Font --- */
 body, 
 * {
     font-family: 'Sarabun', 'Segoe UI', Tahoma, sans-serif !important;
+}
+
+/* =========================
+   PRIMARY BUTTONS - replace Chainlit pink with Excise blue
+   ========================= */
+button[type="submit"],
+button[class*="bg-primary"],
+button[class*="MuiButton-contained"],
+[role="button"][class*="bg-primary"],
+[data-testid*="send-button"],
+[data-testid*="submit"] {
+    background: var(--excise-blue) !important;
+    border-color: var(--excise-blue) !important;
+    color: #ffffff !important;
+}
+
+button[type="submit"]:hover:not(:disabled),
+button[class*="bg-primary"]:hover:not(:disabled),
+button[class*="MuiButton-contained"]:hover:not(:disabled),
+[role="button"][class*="bg-primary"]:hover:not(:disabled),
+[data-testid*="send-button"]:hover:not(:disabled),
+[data-testid*="submit"]:hover:not(:disabled) {
+    background: var(--excise-blue-light) !important;
+    border-color: var(--excise-blue-light) !important;
+}
+
+button[type="submit"]:focus-visible,
+button[class*="bg-primary"]:focus-visible,
+button[class*="MuiButton-contained"]:focus-visible,
+[role="button"][class*="bg-primary"]:focus-visible,
+[data-testid*="send-button"]:focus-visible,
+[data-testid*="submit"]:focus-visible {
+    box-shadow: 0 0 0 3px rgba(42, 108, 176, 0.22) !important;
+    outline: none !important;
+}
+
+button svg,
+[role="button"] svg {
+    color: inherit !important;
+}
+
+/* Top-right logged-in profile menu/avatar */
+header button[aria-haspopup="menu"],
+header button[aria-haspopup="true"],
+header [data-testid*="user"] button,
+header [data-testid*="profile"] button {
+    border-color: var(--excise-blue) !important;
+}
+
+header button[aria-haspopup="menu"] [class*="rounded-full"],
+header button[aria-haspopup="true"] [class*="rounded-full"],
+header [data-testid*="user"] [class*="rounded-full"],
+header [data-testid*="profile"] [class*="rounded-full"],
+header [class*="avatar"] [class*="rounded-full"],
+header [class*="Avatar"] [class*="rounded-full"] {
+    background: var(--excise-blue) !important;
+    color: #ffffff !important;
+}
+
+header button[aria-haspopup="menu"]:hover [class*="rounded-full"],
+header button[aria-haspopup="true"]:hover [class*="rounded-full"],
+header [data-testid*="user"] button:hover [class*="rounded-full"],
+header [data-testid*="profile"] button:hover [class*="rounded-full"] {
+    background: var(--excise-blue-light) !important;
 }
 
 /* =========================
