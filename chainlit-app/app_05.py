@@ -5,7 +5,7 @@ import asyncio
 import uuid
 import pandas as pd
 import chainlit as cl
-from typing import Tuple
+from typing import Any, Tuple
 from chainlit.input_widget import Select
 from sqlalchemy import create_engine, text, Engine
 import google.generativeai as genai
@@ -13,7 +13,7 @@ from gtts import gTTS
 # --- AI & LlamaIndex Imports ---
 import dspy
 from llama_index.core import SQLDatabase
-from llama_index.core.query_engine import NLSQLTableQueryEngine
+from llama_index.core.indices.struct_store.sql_retriever import NLSQLRetriever
 
 # --- Local Configs ---
 from config import SCHEMA_PROMPTS, FALLBACK_MESSAGE
@@ -27,6 +27,13 @@ from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
 from chainlit.context import context # อย่าลืม import ตัวนี้ไว้ด้านบนๆ ของไฟล์ด้วยนะครับ
 # เปิดใช้งาน SQLite
 cl_data._data_layer = SQLAlchemyDataLayer(conninfo="sqlite+aiosqlite:///chainlit_history.db")
+
+CHAT_HISTORY_KEY = "chat_history"
+DATA_CONTEXT_KEY = "data_context"
+MAX_CHAT_HISTORY_MESSAGES = 5
+MAX_DATA_CONTEXT_ITEMS = 3
+MAX_DATA_CONTEXT_ROWS = 20
+MAX_MEMORY_CHARS = 1200
 
 # =========================
 # 🔐 MOCK AUTHENTICATION (เปิดหน้า Login)
@@ -89,6 +96,10 @@ def get_engine(schema_name: str) -> Engine:
 
 def validate_sql(sql: str) -> Tuple[bool, str]:
     clean_sql = sql.lower().strip()
+    if not re.match(r"^(select|with)\b", clean_sql):
+        return False, "อนุญาตเฉพาะคำสั่ง SELECT หรือ WITH เท่านั้น"
+    if ";" in clean_sql.rstrip(";"):
+        return False, "ไม่อนุญาตให้รัน SQL หลายคำสั่งพร้อมกัน"
     danger_keywords = ["drop", "delete", "update", "insert", "truncate", "alter", "grant", "revoke", "create"]
     for word in danger_keywords:
         if re.search(rf'\b{word}\b', clean_sql):
@@ -103,8 +114,6 @@ def clean_sql_output(sql: str) -> str:
 def is_no_data(df: pd.DataFrame) -> bool:
     if df.empty: return True
     if df.isna().all().all(): return True
-    numeric_df = df.select_dtypes(include='number')
-    if not numeric_df.empty and (numeric_df == 0).all().all(): return True
     return False
 
 # def is_metadata_question(query: str) -> bool:
@@ -113,8 +122,7 @@ def is_no_data(df: pd.DataFrame) -> bool:
 #     return any(k in q for k in strong_keywords)
 
 def normalize_sql(sql: str, schema: str) -> str:
-    sql = re.sub(rf'{schema}\.{schema}\.', '', sql, flags=re.IGNORECASE)
-    sql = re.sub(rf'\b{schema}\.', '', sql, flags=re.IGNORECASE)
+    sql = re.sub(rf'\b{schema}\.{schema}\.', f'{schema}.', sql, flags=re.IGNORECASE)
     return sql
 
 def get_table_columns(engine, schema: str, table: str):
@@ -129,9 +137,13 @@ def get_table_columns(engine, schema: str, table: str):
         return [row[0] for row in result]
 
 def auto_quote_columns(sql: str, engine, schema: str) -> str:
-    match = re.search(r'from\s+"?([\wก-๙]+)"?', sql, re.IGNORECASE)
+    match = re.search(
+        r'from\s+(?:(?:"?[\wก-๙_]+"?)\.)?(?:"([^"]+)"|([\wก-๙_]+))',
+        sql,
+        re.IGNORECASE,
+    )
     if not match: return sql
-    table = match.group(1)
+    table = match.group(1) or match.group(2)
     columns = get_table_columns(engine, schema, table)
     for col in columns:
         sql = re.sub(rf'(?<!")\b{col}\b(?!")', f'"{col}"', sql, flags=re.IGNORECASE)
@@ -144,11 +156,46 @@ def fetch_data(engine, query):
     with engine.connect() as conn:
         return pd.read_sql(text(query), conn)
 
+def is_year_identifier_column(column_name: str) -> bool:
+    name = column_name.strip()
+    lower_name = name.lower()
+    if any(marker in name for marker in ["%", "อัตรา", "เติบโต"]):
+        return False
+    if any(marker in lower_name for marker in ["rate", "ratio", "growth", "percent"]):
+        return False
+
+    normalized = re.sub(r"[\s_-]+", "", lower_name)
+    year_names = {
+        "ปี",
+        "ปีงบประมาณ",
+        "ปีเริ่มต้น",
+        "ปีปลายทาง",
+        "year",
+        "budgetyear",
+        "startyear",
+        "endyear",
+    }
+    return normalized in year_names or lower_name.endswith("_year")
+
 def format_numeric_columns(df: pd.DataFrame) -> pd.DataFrame:
     df_display = df.copy()
     for col in df_display.columns:
-        if pd.api.types.is_numeric_dtype(df_display[col]):
-            df_display[col] = df_display[col].apply(lambda x: f"{x:,.0f}" if pd.notnull(x) else x)
+        col_name = str(col)
+        col_name_lower = col_name.lower()
+        if is_year_identifier_column(col_name):
+            continue
+
+        numeric_series = pd.to_numeric(df_display[col], errors="coerce")
+        has_numeric_values = numeric_series.notna().any()
+        is_numeric_column = pd.api.types.is_numeric_dtype(df_display[col])
+        mostly_numeric_text = has_numeric_values and numeric_series.notna().mean() >= 0.8
+        if is_numeric_column or mostly_numeric_text:
+            if "%" in col_name or "rate" in col_name_lower or "ratio" in col_name_lower or "อัตรา" in col_name:
+                df_display[col] = numeric_series.apply(lambda x: f"{x:,.2f}" if pd.notnull(x) else x)
+            elif (numeric_series.dropna() % 1 == 0).all():
+                df_display[col] = numeric_series.apply(lambda x: f"{x:,.0f}" if pd.notnull(x) else x)
+            else:
+                df_display[col] = numeric_series.apply(lambda x: f"{x:,.2f}" if pd.notnull(x) else x)
     return df_display
 
 def ensure_khrap_ending(text: str) -> str:
@@ -165,6 +212,131 @@ def ensure_khrap_ending(text: str) -> str:
     body = clean_text[:-len(trailing)].rstrip() if trailing else clean_text.rstrip()
     separator = "" if re.search(r"[\u0E00-\u0E7F]$", body) else " "
     return f"{body}{separator}ครับ{trailing}"
+
+def strip_query_used(text: str) -> str:
+    return re.sub(r"\n\n\*\*🔍 Query Used:\*\*[\s\S]*$", "", text).strip()
+
+def compact_memory_text(text: str, limit: int = MAX_MEMORY_CHARS) -> str:
+    clean_text = re.sub(r"\s+", " ", strip_query_used(text)).strip()
+    if len(clean_text) <= limit:
+        return clean_text
+    return clean_text[:limit].rstrip() + "..."
+
+def get_chat_history() -> list[dict[str, str]]:
+    return cl.user_session.get(CHAT_HISTORY_KEY, []) or []
+
+def set_chat_history(history: list[dict[str, str]]) -> None:
+    cl.user_session.set(CHAT_HISTORY_KEY, history[-MAX_CHAT_HISTORY_MESSAGES:])
+
+def append_chat_history(role: str, content: str) -> None:
+    if not content:
+        return
+    history = get_chat_history()
+    history.append({"role": role, "content": compact_memory_text(content)})
+    set_chat_history(history)
+
+def format_chat_history() -> str:
+    history = get_chat_history()
+    if not history:
+        return "No previous conversation in this thread."
+
+    lines = []
+    for item in history[-MAX_CHAT_HISTORY_MESSAGES:]:
+        label = "User" if item.get("role") == "user" else "Assistant"
+        lines.append(f"{label}: {item.get('content', '')}")
+    return "\n".join(lines)
+
+def get_data_context() -> list[dict[str, str]]:
+    return cl.user_session.get(DATA_CONTEXT_KEY, []) or []
+
+def set_data_context(contexts: list[dict[str, str]]) -> None:
+    cl.user_session.set(DATA_CONTEXT_KEY, contexts[-MAX_DATA_CONTEXT_ITEMS:])
+
+def extract_query_used(text: str) -> str:
+    match = re.search(r"\*\*🔍 Query Used:\*\*\s*```sql\s*([\s\S]*?)```", text, re.IGNORECASE)
+    return clean_sql_output(match.group(1)) if match else ""
+
+def append_data_context(database_question: str, sql: str, df: pd.DataFrame | None = None, answer: str = "") -> None:
+    if not sql:
+        return
+
+    context = {
+        "question": compact_memory_text(database_question, limit=500),
+        "sql": clean_sql_output(sql),
+        "answer": compact_memory_text(answer, limit=500) if answer else "",
+        "rows_csv": "",
+    }
+    if df is not None and not df.empty:
+        context["rows_csv"] = df.head(MAX_DATA_CONTEXT_ROWS).to_csv(index=False)
+
+    contexts = get_data_context()
+    contexts.append(context)
+    set_data_context(contexts)
+
+def format_data_context() -> str:
+    contexts = get_data_context()
+    if not contexts:
+        return "No verified database query context yet."
+
+    blocks = ["Recent verified database query context. Use this only to resolve follow-up references; run a fresh query for new calculations:"]
+    for index, item in enumerate(contexts[-MAX_DATA_CONTEXT_ITEMS:], start=1):
+        block = [
+            f"Context {index}:",
+            f"User/database question: {item.get('question', '')}",
+            "SQL:",
+            item.get("sql", ""),
+        ]
+        if item.get("rows_csv"):
+            block.extend(["Result preview CSV:", item["rows_csv"]])
+        if item.get("answer"):
+            block.extend(["Assistant summary:", item["answer"]])
+        blocks.append("\n".join(block))
+    return "\n\n".join(blocks)
+
+def build_retriever_question(database_question: str) -> str:
+    data_context = format_data_context()
+    if data_context.startswith("No verified"):
+        return database_question
+
+    return f"""
+Use the verified context below only to resolve follow-up references such as source table, filters, grouping, and metric.
+Generate a fresh SQL query for the current request. Do not answer from the context text alone.
+
+{data_context}
+
+Current request:
+{database_question}
+""".strip()
+
+def seed_chat_history_from_thread(thread: Any) -> None:
+    steps = thread.get("steps", []) if isinstance(thread, dict) else []
+    history: list[dict[str, str]] = []
+    contexts: list[dict[str, str]] = []
+    last_user_message = ""
+
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        step_type = step.get("type")
+        content = step.get("output") or step.get("input") or ""
+        if not content:
+            continue
+        if step_type == "user_message":
+            last_user_message = content
+            history.append({"role": "user", "content": compact_memory_text(content)})
+        elif step_type == "assistant_message":
+            history.append({"role": "assistant", "content": compact_memory_text(content)})
+            sql = extract_query_used(content)
+            if sql:
+                contexts.append({
+                    "question": compact_memory_text(last_user_message or "Resumed thread question", limit=500),
+                    "sql": sql,
+                    "answer": compact_memory_text(content, limit=500),
+                    "rows_csv": "",
+                })
+
+    set_chat_history(history)
+    set_data_context(contexts)
 
 # =========================
 # BUILD QUERY ENGINE
@@ -190,12 +362,13 @@ def build_query_engine(schema_name: str):
     
     formatted_prompt = selected_prompt.partial_format(metadata=metadata_text)
 
-    q_engine = NLSQLTableQueryEngine(
+    sql_retriever = NLSQLRetriever(
         sql_database=sql_database,
         text_to_sql_prompt=formatted_prompt,
-        synthesize_response=False,
+        sql_only=True,
+        handle_sql_errors=False,
     )
-    return q_engine, engine
+    return sql_retriever, engine
 
 # =========================
 # CHAT STARTERS (Welcome Screen)
@@ -243,12 +416,54 @@ async def on_chat_start():
     ]).send()
     schema = settings["schema"] if settings else "public"
     cl.user_session.set("current_schema", schema)
+    cl.user_session.set(CHAT_HISTORY_KEY, [])
+    cl.user_session.set(DATA_CONTEXT_KEY, [])
+
+@cl.on_chat_resume
+async def on_chat_resume(thread):
+    cl.user_session.set("current_schema", cl.user_session.get("current_schema", "production"))
+    seed_chat_history_from_thread(thread)
 
 @cl.on_settings_update
 async def on_settings_update(settings):
     schema = settings["schema"]
     cl.user_session.set("current_schema", schema)
     await cl.Message(content=f"✅ เปลี่ยน Schema เป็น `{schema}` สำเร็จ").send()
+
+async def update_ai_message(
+    processing_msg: cl.Message,
+    answer: str,
+    final_sql: str = "",
+    final_df: pd.DataFrame | None = None,
+) -> None:
+    answer_text = ensure_khrap_ending(answer)
+    response_text = answer_text
+    if final_sql:
+        response_text += f"\n\n**🔍 Query Used:**\n```sql\n{final_sql}\n```"
+
+    processing_msg.content = response_text
+    processing_msg.elements = []
+    if final_df is not None:
+        processing_msg.elements.append(cl.Dataframe(data=final_df, name="Result", display="inline"))
+
+    try:
+        os.makedirs(".files", exist_ok=True)
+        speech_path = os.path.join(".files", f"ai_response_{uuid.uuid4().hex}.mp3")
+
+        communicate = edge_tts.Communicate(
+            text=answer_text,
+            voice="th-TH-NiwatNeural",
+        )
+        await communicate.save(speech_path)
+
+        processing_msg.elements.append(
+            cl.Audio(name="🔊 ฟังเสียงตอบกลับ", path=speech_path, display="inline")
+        )
+    except Exception as e:
+        print(f"TTS Error: {e}")
+
+    await processing_msg.update()
+    append_chat_history("assistant", answer_text)
 
 # =========================
 # MESSAGE HANDLER (DSPy ReAct Agent)
@@ -261,6 +476,7 @@ async def on_message(message: cl.Message):
 
     processing_msg = cl.Message(content="กำลังวิเคราะห์และดึงข้อมูล...")
     await processing_msg.send()
+    append_chat_history("user", clean_query)
 
     # 1. Intercept Metadata questions first
     # if is_metadata_question(clean_query):
@@ -294,15 +510,24 @@ async def on_message(message: cl.Message):
         """
         nonlocal final_df, final_sql
         try:
-            q_engine, db_engine = build_query_engine(schema)
-            response = q_engine.query(database_question)
-            print(q_engine)
-            print(response)
-            raw_sql = response.metadata.get("sql_query", "")
+            sql_retriever, db_engine = build_query_engine(schema)
+            retriever_question = build_retriever_question(database_question)
+            nodes, metadata = sql_retriever.retrieve_with_metadata(retriever_question)
+            raw_sql = metadata.get("sql_query") or metadata.get("result") or ""
+            if not raw_sql and nodes:
+                raw_sql = nodes[0].node.get_content()
+            print(sql_retriever)
+            print(f"Generated SQL: {raw_sql}")
             sql = clean_sql_output(raw_sql)
 
+            if not sql:
+                return "CLARIFICATION_NEEDED: No SQL was generated. Ask a concise clarification question in Thai."
+
             if sql.strip().upper() == "NO_DATA":
-                return "The system could not generate a valid SQL query for this question."
+                return (
+                    "CLARIFICATION_NEEDED: The generated SQL was NO_DATA. "
+                    "Ask the user a concise clarification question in Thai instead of executing SQL."
+                )
 
             sql = normalize_sql(sql, schema)
             sql = auto_quote_columns(sql, db_engine, schema)
@@ -319,9 +544,10 @@ async def on_message(message: cl.Message):
 
             df_display = format_numeric_columns(df)
             final_df = df_display 
+            append_data_context(database_question, sql, df)
 
             # ใช้ .to_csv() แทน .to_markdown() เพื่อป้องกันปัญหา Library tabulate หาย
-            csv_data = df_display.head(30).to_csv(index=False)
+            csv_data = df.head(30).to_csv(index=False)
             return f"✅ SUCCESS: Database query completed. Here is the factual data you must use to answer the user:\n\n{csv_data}"
             
         except Exception as e:
@@ -338,7 +564,9 @@ async def on_message(message: cl.Message):
             query = text("""
                 SELECT t.table_name, c.column_name, c.data_type
                 FROM information_schema.tables t
-                JOIN information_schema.columns c ON t.table_name = c.table_name
+                JOIN information_schema.columns c
+                  ON t.table_schema = c.table_schema
+                 AND t.table_name = c.table_name
                 WHERE t.table_schema = :schema
                 ORDER BY t.table_name, c.ordinal_position;
             """)
@@ -363,8 +591,10 @@ async def on_message(message: cl.Message):
     agent = dspy.ReAct(DataAssistantSignature, tools=[query_database_tool, get_schema_tool])
     # 4. Run the Agent
     try:
+        chat_history = format_chat_history()
+        data_context = format_data_context()
         result = await asyncio.wait_for(
-            asyncio.to_thread(agent, question=clean_query),
+            asyncio.to_thread(agent, question=clean_query, chat_history=chat_history, data_context=data_context),
             timeout=60
         )
 
@@ -374,44 +604,7 @@ async def on_message(message: cl.Message):
         dspy.inspect_history(n=1)
         print("="*50 + "\n")
 
-        answer_text = ensure_khrap_ending(result.answer)
-        response_text = answer_text
-        if final_sql:
-            response_text += f"\n\n**🔍 Query Used:**\n```sql\n{final_sql}\n```"
-        
-        processing_msg.content = response_text
-        if final_df is not None:
-            processing_msg.elements = [cl.Dataframe(data=final_df, name="Result", display="inline")]
-        
-        # ----------------------------------------------------
-        # 🔊 TTS: แปลงข้อความตอบกลับของ AI เป็นเสียงพูดภาษาไทย (ใช้ Edge-TTS)
-        # ----------------------------------------------------
-        try:
-            clean_text_to_speak = answer_text
-            os.makedirs(".files", exist_ok=True)
-            speech_path = os.path.join(".files", f"ai_response_{uuid.uuid4().hex}.mp3")
-            
-            communicate = edge_tts.Communicate(
-                text=clean_text_to_speak, 
-                voice="th-TH-NiwatNeural", # เปลี่ยนเป็นเสียงผู้ชายได้
-            )
-            
-            # บันทึกไฟล์ (edge-tts เป็น async อยู่แล้ว ไม่ต้องใช้ asyncio.to_thread)
-            await communicate.save(speech_path)
-            
-            audio_element = cl.Audio(name="🔊 ฟังเสียงตอบกลับ", path=speech_path, display="inline")
-            
-            if processing_msg.elements:
-                processing_msg.elements.append(audio_element)
-            else:
-                processing_msg.elements = [audio_element]
-                
-        except Exception as e:
-            print(f"TTS Error: {e}")
-        # ----------------------------------------------------
-
-
-        await processing_msg.update()
+        await update_ai_message(processing_msg, result.answer, final_sql, final_df)
 
     except asyncio.TimeoutError:
         processing_msg.content = "⚠️ ประมวลผลนานเกินไป (Agent Timeout)"

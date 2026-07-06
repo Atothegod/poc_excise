@@ -1,5 +1,19 @@
 import sqlite3
 
+def ensure_column(cursor, table_name, column_name, column_definition):
+    cursor.execute(f'PRAGMA table_info("{table_name}")')
+    existing_columns = {row[1] for row in cursor.fetchall()}
+    if column_name not in existing_columns:
+        cursor.execute(
+            f'ALTER TABLE "{table_name}" ADD COLUMN "{column_name}" {column_definition}'
+        )
+        print(f'➕ เพิ่ม column {table_name}.{column_name}')
+
+def migrate_chainlit_schema(cursor):
+    ensure_column(cursor, "steps", "defaultOpen", "INTEGER DEFAULT 0")
+    ensure_column(cursor, "steps", "autoCollapse", "INTEGER DEFAULT 0")
+    ensure_column(cursor, "elements", "props", "TEXT DEFAULT '{}'")
+
 def init_db():
     print("⏳ กำลังสร้างตารางประวัติแชทให้ Chainlit...")
     
@@ -81,6 +95,8 @@ def init_db():
         "value" INTEGER NOT NULL,
         "comment" TEXT
     )''')
+
+    migrate_chainlit_schema(cursor)
 
     conn.commit()
     conn.close()
