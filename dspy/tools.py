@@ -220,6 +220,12 @@ def _format_etr_label(etr, etr_source=None):
     return f"คาดว่าจะจ่ายไฟคืนประมาณ {formatted_etr or etr}"
 
 
+def _format_mass_outage_label(etr_label=None):
+    if etr_label:
+        return f"ขณะนี้เกิดเหตุไฟดับวงกว้างในพื้นที่ค่ะ {etr_label} ค่ะ"
+    return "ขณะนี้เกิดเหตุไฟดับวงกว้างในพื้นที่ค่ะ ระบบกำลังประเมินเวลาไฟกลับล่าสุดค่ะ"
+
+
 def Check_Outage_Tool(ca_number: str, pdpa_consent: bool = False):
     login_ca_number = current_login_ca_number.get()
     if login_ca_number and is_valid_ca_number(login_ca_number):
@@ -273,10 +279,7 @@ def Check_Outage_Tool(ca_number: str, pdpa_consent: bool = False):
         return "[เคสเดิมของ CA] ระบบพบเคสที่เปิดอยู่แล้ว แต่ยังไม่มีเวลาประเมินล่าสุด"
 
     if event_type in {"mass_outage", "repeated_event"}:
-        if etr_label:
-            return f"[เหตุวงกว้าง] แจ้ง {etr_label}"
-        else:
-            return "[เหตุวงกว้าง] ยังไม่มีเวลาไฟกลับล่าสุด ระบบกำลังประเมินเวลาไฟกลับครับ"
+        return f"[เหตุวงกว้าง] {_format_mass_outage_label(etr_label)}"
 
     # เคส 3: แจ้งครั้งแรก (New Event) หรือ เคสเดี่ยว -> บังคับแจ้ง ETA ตาม Rule 7
     # และตรวจสอบ ETR เพิ่มเติม
@@ -294,7 +297,7 @@ def Check_Outage_Tool(ca_number: str, pdpa_consent: bool = False):
                 f"แจ้งว่าช่างจะถึงหน้างานประมาณ {eta_label}"
             )
 
-    return "ขัดข้อง ไม่สามารถระบุประเภทเหตุการณ์ได้"
+    return "ขัดข้อง ไม่สามารถระบุประเภทเหตุการณ์ได้ค่ะ"
 
 
 def Fast_Track_Tool(ca_number: str):

@@ -199,6 +199,7 @@ class SyncAgentReportTests(TestCase):
         case.refresh_from_db()
         self.assertEqual(case.affected_ca_numbers, ["123456789012"])
         self.assertEqual(response.data["latest_outage"]["case_id"], str(case.case_id))
+        self.assertEqual(response.data["customer_name"], "Existing CA User")
 
     def test_validate_ca_login_requires_customer_location(self):
         response = self.client.get(
@@ -221,6 +222,7 @@ class SyncAgentReportTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["status"], "success")
         self.assertEqual(response.data["ca_number"], "123456789012")
+        self.assertEqual(response.data["customer_name"], "Valid CA User")
 
     def test_session_login_rejects_ca_without_customer_location(self):
         response = self.client.post(
@@ -413,6 +415,8 @@ class SyncAgentReportTests(TestCase):
             set(third_response.data["affected_ca_numbers"]),
             set(ca_numbers),
         )
+        self.assertIsNotNone(third_response.data["etr_target_time"])
+        self.assertIsNotNone(parse_datetime(third_response.data["etr_target_time"]))
         self.assertEqual(third_response.data["etr_source"], "pluem_model")
         self.assertEqual(third_response.data["pluem_etr_minutes"], 69.0)
 
@@ -445,6 +449,12 @@ class SyncAgentReportTests(TestCase):
             {call.kwargs["event_type"] for call in mock_send_alert.call_args_list},
             {"mass_outage"},
         )
+        for call in mock_send_alert.call_args_list:
+            self.assertIn(
+                "ขณะนี้เกิดเหตุไฟดับวงกว้างในพื้นที่ค่ะ",
+                call.kwargs["message"],
+            )
+            self.assertIn("คาดว่าจะจ่ายไฟคืนประมาณ", call.kwargs["message"])
         self.assertEqual(mock_revoke.call_count, 2)
 
     @patch("oms.views_api.get_pea_assessment")
@@ -468,6 +478,7 @@ class SyncAgentReportTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["event_type"], "mass_outage")
         self.assertEqual(str(response.data["case_id"]), str(mass_case.case_id))
+        self.assertIsNotNone(response.data["etr_target_time"])
         self.assertEqual(response.data["etr_source"], "pluem_model")
         self.assertEqual(OutageCase.objects.count(), 1)
         mock_assessment.assert_not_called()
@@ -1268,11 +1279,38 @@ class OutageCaseSignalTests(TestCase):
         self.assertIsNotNone(log.etr_delta_minutes)
         call = mock_send_alert.call_args
         self.assertEqual(call.kwargs["event_type"], "closed_loop_prompt")
-        self.assertIn("ไฟกลับมาใช้งานได้แล้วหรือยัง", call.kwargs["message"])
+        self.assertIn("กรุณาเลือกสถานะไฟฟ้า", call.kwargs["message"])
         self.assertNotIn("พิมพ์", call.kwargs["message"])
         self.assertNotIn("เปิดเคสเร่งด่วน", call.kwargs["message"])
         self.assertNotIn("เบรกเกอร์", call.kwargs["message"])
         self.assertNotIn("คัตเอาต์", call.kwargs["message"])
+
+    @patch("oms.signals.send_proactive_alert.delay")
+    def test_restored_status_sends_closed_loop_once_per_session(self, mock_send_alert):
+        case = OutageCase.objects.create(
+            title="Restored duplicate session case",
+            latitude=9.2917,
+            longitude=100.926296,
+        )
+        CustomerReport.objects.create(
+            session_id="session-duplicate",
+            ca_number="123456789012",
+            related_case=case,
+        )
+        CustomerReport.objects.create(
+            session_id="session-duplicate",
+            ca_number="123456789013",
+            related_case=case,
+        )
+
+        case.status = "restored"
+        case.save(update_fields=["status"])
+
+        self.assertEqual(mock_send_alert.call_count, 1)
+        self.assertEqual(
+            mock_send_alert.call_args.kwargs["event_type"],
+            "closed_loop_prompt",
+        )
 
 
 class OpsWebhookConsoleTests(TestCase):
@@ -1286,7 +1324,7 @@ class OpsWebhookConsoleTests(TestCase):
         self.assertContains(response, "OMS Webhook Console")
         self.assertContains(response, "Export")
 
-    def test_chat_page_contains_closed_loop_dropdown_options(self):
+    def test_chat_page_contains_closed_loop_button_options(self):
         response = self.client.get("/chat/")
 
         self.assertEqual(response.status_code, 200)
@@ -1294,9 +1332,12 @@ class OpsWebhookConsoleTests(TestCase):
         self.assertContains(response, "ไฟมาแล้ว / ใช้งานได้แล้ว")
         self.assertContains(response, "ยังไม่มีไฟ / เปิดเคสเร่งด่วน")
         self.assertContains(response, "closed_loop_prompt")
-        self.assertContains(response, "พบเคสเร่งด่วนที่เปิดอยู่สำหรับ CA นี้ครับ")
+        self.assertContains(response, "พบเคสเร่งด่วนที่เปิดอยู่สำหรับ CA นี้ค่ะ")
         self.assertContains(response, "เหลือเวลาเร่งดำเนินการประมาณ")
         self.assertContains(response, "กรอบเวลาเร่งดำเนินการเดิม")
+        content = response.content.decode()
+        self.assertNotIn("<select", content)
+        self.assertNotIn("ระบบ OMS", content)
 
     def test_ops_map_page_renders(self):
         response = self.client.get("/ops/map/")

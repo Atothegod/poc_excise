@@ -151,13 +151,13 @@ def check_eta_timeout(case_id, report_id):
         if etr_target_time:
             etr_label = _format_time_label(etr_target_time)
             message = (
-                "ขออัปเดตสถานะครับ ขณะนี้ทีมงานกำลังดำเนินการอยู่ "
-                f"คาดว่าจะจ่ายไฟคืนประมาณ {etr_label} ครับ"
+                "ขออัปเดตสถานะค่ะ ขณะนี้ทีมงานกำลังดำเนินการอยู่ "
+                f"คาดว่าจะจ่ายไฟคืนประมาณ {etr_label} ค่ะ"
             )
         else:
             message = (
-                "ขออัปเดตสถานะครับ ขณะนี้ทีมงานกำลังดำเนินการอยู่ "
-                "ระบบกำลังประเมินเวลาไฟกลับล่าสุด"
+                "ขออัปเดตสถานะค่ะ ขณะนี้ทีมงานกำลังดำเนินการอยู่ "
+                "ระบบกำลังประเมินเวลาไฟกลับล่าสุดค่ะ"
             )
 
         sent_session_ids = _notify_active_case_sessions(
@@ -192,8 +192,8 @@ def check_etr_timeout(case_id):
 
         sla_label = _format_time_label(case.sla_target_time)
         message = (
-            "เวลาไฟกลับที่ประเมินไว้เลยกำหนดแล้วครับ "
-            f"กฟภ.จะเร่งดำเนินการให้ไม่เกิน {sla_label} ครับ"
+            "เวลาไฟกลับที่ประเมินไว้เลยกำหนดแล้วค่ะ "
+            f"กฟภ.จะเร่งดำเนินการให้ไม่เกิน {sla_label} ค่ะ"
         )
         sent_session_ids = _notify_active_case_sessions(
             case, message, "etr_timeout_sla"

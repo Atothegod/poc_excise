@@ -192,6 +192,12 @@ def _case_response_fields(case, include_model_etr=False):
     }
 
 
+def _include_model_etr_for_response(case, event_type=None):
+    if event_type == "mass_outage":
+        return True
+    return _should_include_model_etr(case)
+
+
 def _get_or_create_active_report(session_id, ca_number):
     report = (
         CustomerReport.objects.filter(
@@ -446,12 +452,12 @@ def _mass_outage_message(case):
     etr_label = _format_time_label(case.effective_etr_time())
     if etr_label:
         return (
-            "เกิดเหตุไฟดับวงกว้างในพื้นที่ครับ "
-            f"คาดว่าจะจ่ายไฟคืนประมาณ {etr_label} ครับ"
+            "ขณะนี้เกิดเหตุไฟดับวงกว้างในพื้นที่ค่ะ "
+            f"คาดว่าจะจ่ายไฟคืนประมาณ {etr_label} ค่ะ"
         )
     return (
-        "เกิดเหตุไฟดับวงกว้างในพื้นที่ครับ "
-        "ระบบกำลังประเมินเวลาไฟกลับล่าสุด"
+        "ขณะนี้เกิดเหตุไฟดับวงกว้างในพื้นที่ค่ะ "
+        "ระบบกำลังประเมินเวลาไฟกลับล่าสุดค่ะ"
     )
 
 
@@ -620,6 +626,7 @@ def _session_context_payload(session_id, report):
         "session_id": session_id,
         "report_id": report.id,
         "ca_number": report.ca_number,
+        "customer_name": report.customer_name,
         "chat_history": report.chat_history or [],
         "latest_outage": _latest_outage_for_report(report),
     }
@@ -698,6 +705,7 @@ def sync_agent_report(request):
                     else None
                 )
                 if promoted_case:
+                    promoted_case.refresh_from_db()
                     report.related_case = promoted_case
                     report.save(update_fields=["related_case", "updated_at"])
                     event_type = "mass_outage"
@@ -721,7 +729,9 @@ def sync_agent_report(request):
             "report_id": report.id,
             **_case_response_fields(
                 report.related_case,
-                include_model_etr=_should_include_model_etr(report.related_case),
+                include_model_etr=_include_model_etr_for_response(
+                    report.related_case, event_type=event_type
+                ),
             ),
         }
         return Response(response_data)
@@ -900,7 +910,7 @@ def fast_track_report(request):
         return Response(
             {
                 "event_type": "fast_track_existing",
-                "message": "รับเรื่องไว้ในเคสเร่งด่วนเดิมแล้วครับ",
+                "message": "รับเรื่องไว้ในเคสเร่งด่วนเดิมแล้วค่ะ",
                 "case_id": str(active_fast_track_case.case_id),
                 "lv_group_id": active_fast_track_case.lv_group_id,
                 "sla_target_time": _datetime_iso(active_fast_track_case.sla_target_time),
@@ -930,7 +940,7 @@ def fast_track_report(request):
     return Response(
         {
             "event_type": "fast_track_created",
-            "message": "เปิดเคสเร่งด่วนให้แล้วครับ",
+            "message": "เปิดเคสเร่งด่วนให้แล้วค่ะ",
             "case_id": str(new_case.case_id),
             "lv_group_id": new_case.lv_group_id,
             "sla_target_time": _datetime_iso(new_case.sla_target_time),

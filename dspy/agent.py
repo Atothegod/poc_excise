@@ -173,14 +173,61 @@ class MemoryAgent:
 
         return SimpleNamespace(
             answer=(
-                "ขอบคุณที่แจ้งยืนยันครับ ดีใจที่ไฟกลับมาใช้งานได้ตามปกติแล้ว "
-                "หากพบเหตุขัดข้องเพิ่มเติม สามารถแจ้งผ่านช่องทางนี้ได้เลยครับ"
+                "ขอบคุณที่แจ้งยืนยันค่ะ ดีใจที่ไฟกลับมาใช้งานได้ตามปกติแล้ว "
+                "หากพบเหตุขัดข้องเพิ่มเติม สามารถแจ้งผ่านช่องทางนี้ได้เลยค่ะ"
             ),
             current_state=PEA_Conversation_State(
                 ca_number=ca_number,
                 flow_step="resolved",
             ),
         )
+
+    def _ensure_feminine_ending(self, response):
+        answer = str(getattr(response, "answer", response) or "").strip()
+        if not answer:
+            answer = "ขออภัยค่ะ ระบบไม่สามารถตอบกลับได้ในขณะนี้ค่ะ"
+
+        answer = answer.rstrip(" .!?…。！？")
+        for suffix in ["ครับ", "คะ"]:
+            if answer.endswith(suffix):
+                answer = answer[: -len(suffix)].rstrip()
+                break
+        if not answer.endswith("ค่ะ"):
+            answer = f"{answer}ค่ะ"
+
+        if hasattr(response, "answer"):
+            response.answer = answer
+            return response
+        return SimpleNamespace(answer=answer, current_state=None)
+
+    def _ensure_mass_outage_wording(self, response, session_id: str):
+        latest_outage = get_latest_outage(session_id)
+        if not latest_outage or latest_outage.get("event_type") != "mass_outage":
+            return response
+
+        answer = str(getattr(response, "answer", response) or "")
+        if "ไฟดับวงกว้าง" in answer:
+            return response
+
+        etr = parse_iso_datetime(
+            latest_outage.get("etr_target_time") or latest_outage.get("oms_etr")
+        )
+        etr_label = self._format_thai_time(etr)
+        if etr_label:
+            answer = (
+                "ขณะนี้เกิดเหตุไฟดับวงกว้างในพื้นที่ค่ะ "
+                f"คาดว่าจะจ่ายไฟคืนประมาณ {etr_label} ค่ะ"
+            )
+        else:
+            answer = (
+                "ขณะนี้เกิดเหตุไฟดับวงกว้างในพื้นที่ค่ะ "
+                "ระบบกำลังประเมินเวลาไฟกลับล่าสุดค่ะ"
+            )
+
+        if hasattr(response, "answer"):
+            response.answer = answer
+            return response
+        return SimpleNamespace(answer=answer, current_state=None)
 
     def chat(
         self,
@@ -213,6 +260,8 @@ class MemoryAgent:
             response = self.agent(
                 chat_history=history_str, question=user_input, time_stamp=time_stamp
             )
+        response = self._ensure_mass_outage_wording(response, session_id)
+        response = self._ensure_feminine_ending(response)
 
         history_list.append(
             {"role": "user", "content": user_input, "timestamp": time_stamp}

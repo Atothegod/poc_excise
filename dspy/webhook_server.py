@@ -56,6 +56,35 @@ def _state_payload(state, ca_number=None):
     return payload
 
 
+def _notification_key(event_type, ca_number, message):
+    return (str(event_type or ""), str(ca_number or ""), str(message or ""))
+
+
+def _has_pending_notification(session_id, data):
+    incoming_key = _notification_key(data.event_type, data.ca_number, data.message)
+    return any(
+        _notification_key(
+            item.get("event_type"), item.get("ca_number"), item.get("message")
+        )
+        == incoming_key
+        for item in pending_notifications[session_id]
+    )
+
+
+def _history_has_recent_notification(history_list, data):
+    incoming_key = _notification_key(data.event_type, data.ca_number, data.message)
+    for item in reversed(history_list[-5:]):
+        item_message = item.get("message") or item.get("content") or ""
+        if str(item_message).startswith(f"event_type={data.event_type};"):
+            item_message = data.message
+        if (
+            _notification_key(item.get("event_type"), data.ca_number, item_message)
+            == incoming_key
+        ):
+            return True
+    return False
+
+
 @app.post("/ask")
 async def ask_agent(data: QuestionRequest):
     try:
@@ -103,27 +132,29 @@ async def receive_proactive_notification(data: NotificationWebhook):
         print(f"💬 ข้อความ: {data.message}")
         print("=" * 50 + "\n")
 
-        pending_notifications[data.session_id].append(
-            {
-                "message": data.message,
-                "event_type": data.event_type,
-                "ca_number": data.ca_number,
-            }
-        )
+        if not _has_pending_notification(data.session_id, data):
+            pending_notifications[data.session_id].append(
+                {
+                    "message": data.message,
+                    "event_type": data.event_type,
+                    "ca_number": data.ca_number,
+                }
+            )
 
         # บันทึกประวัติลง Memory ของ Agent (State Cleansing & Updates)
         # เพื่อให้ AI รู้ว่ามีข้อความระบบส่งหาลูกค้าแล้ว จะได้คุยต่อถูกบริบท
         history_list = chatbot._get_or_create_session(data.session_id)
-        history_list.append(
-            {
-                "role": "System Alert (OMS)",
-                "message": data.message,
-                "timestamp": datetime.now(ZoneInfo("Asia/Bangkok")).isoformat(),
-                "event_type": data.event_type,
-                "content": f"event_type={data.event_type}; ca_number={data.ca_number}; message={data.message}",
-            }
-        )
-        sync_chat_history_to_db(data.session_id, history_list)
+        if not _history_has_recent_notification(history_list, data):
+            history_list.append(
+                {
+                    "role": "System Alert (OMS)",
+                    "message": data.message,
+                    "timestamp": datetime.now(ZoneInfo("Asia/Bangkok")).isoformat(),
+                    "event_type": data.event_type,
+                    "content": f"event_type={data.event_type}; ca_number={data.ca_number}; message={data.message}",
+                }
+            )
+            sync_chat_history_to_db(data.session_id, history_list)
         context = fetch_session_context(data.session_id, ca_number=data.ca_number)
         if context:
             restore_latest_outage(data.session_id, context.get("latest_outage"))

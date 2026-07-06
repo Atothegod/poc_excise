@@ -409,6 +409,7 @@
         endpointLabel.textContent = agentBaseUrl || "Django agent proxy";
 
         const loggedInCaNumber = localStorage.getItem("pea_chat_ca_number") || "";
+        let loggedInCustomerName = localStorage.getItem("pea_chat_customer_name") || "";
         const hasPdpaConsent = localStorage.getItem("pea_chat_pdpa_consent") === "true";
         const loginReady = /^\d{12}$/.test(loggedInCaNumber) && hasPdpaConsent;
 
@@ -436,10 +437,12 @@
         }
 
         let currentSessionId = getOrCreateSessionId();
+        const displayedNotificationKeys = new Set();
 
         function setSessionId(sessionId) {
             currentSessionId = sessionId;
             localStorage.setItem("pea_chat_session_id", sessionId);
+            displayedNotificationKeys.clear();
             displaySessionId.textContent = sessionId;
         }
 
@@ -484,6 +487,24 @@
             });
         }
 
+        function escapeHtml(value) {
+            return String(value ?? "")
+                .replaceAll("&", "&amp;")
+                .replaceAll("<", "&lt;")
+                .replaceAll(">", "&gt;")
+                .replaceAll('"', "&quot;")
+                .replaceAll("'", "&#039;");
+        }
+
+        function notificationKey(eventType, caNumber, message) {
+            return `${eventType || ""}|${caNumber || ""}|${message || ""}`;
+        }
+
+        function greetingMessage() {
+            const greetingName = loggedInCustomerName ? ` คุณ${loggedInCustomerName}` : "";
+            return `สวัสดีค่ะ${greetingName} แอดมินยินดีให้บริการค่ะ\n\nสามารถแจ้งเหตุไฟฟ้าขัดข้องได้เลยค่ะ`;
+        }
+
         function scrollToBottom() {
             chatContainer.scrollTop = chatContainer.scrollHeight;
         }
@@ -511,9 +532,7 @@
                     <div class="flex flex-col min-w-0">
                         <span class="text-xs text-white/80 mb-1 ml-1">ศูนย์รับแจ้งปัญหา</span>
                         <div class="flex items-end">
-                            <div class="chat-bubble-left bubble relative bg-white text-gray-800 text-sm py-2 px-3 rounded-2xl rounded-tl-md max-w-[280px] shadow-sm leading-relaxed whitespace-pre-wrap break-words">สวัสดีครับ แอดมินบอทยินดีให้บริการครับ
-
-แจ้งปัญหาไฟฟ้าขัดข้องได้เลยครับ</div>
+                            <div id="initialGreetingBubble" class="chat-bubble-left bubble relative bg-white text-gray-800 text-sm py-2 px-3 rounded-2xl rounded-tl-md max-w-[280px] shadow-sm leading-relaxed whitespace-pre-wrap break-words">${escapeHtml(greetingMessage())}</div>
                             <span class="text-[10px] text-white/70 ml-2 mb-1">${timeString}</span>
                         </div>
                     </div>
@@ -577,6 +596,12 @@
         }
 
         function appendBotMessage(text, options = {}) {
+            if (options.eventType) {
+                displayedNotificationKeys.add(
+                    notificationKey(options.eventType, options.caNumber, text)
+                );
+            }
+
             const wrapper = document.createElement("div");
             wrapper.className = "flex items-start mt-4";
 
@@ -601,29 +626,28 @@
                 messageText.textContent = text;
                 bubble.appendChild(messageText);
 
-                const select = document.createElement("select");
-                select.className = "mt-3 w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-800 outline-none focus:border-[#733190] focus:ring-2 focus:ring-[#733190]/20 disabled:bg-gray-100 disabled:text-gray-500";
-                select.setAttribute("aria-label", "เลือกสถานะไฟฟ้าหลังจ่ายไฟคืน");
+                const buttonGroup = document.createElement("div");
+                buttonGroup.className = "mt-3 grid gap-2";
+                buttonGroup.setAttribute("aria-label", "เลือกสถานะไฟฟ้า");
 
                 [
-                    ["", "เลือกสถานะไฟฟ้า"],
                     ["ใช้งานได้แล้ว", "ไฟมาแล้ว / ใช้งานได้แล้ว"],
                     ["ยังไม่มีไฟ", "ยังไม่มีไฟ / เปิดเคสเร่งด่วน"],
                 ].forEach(([value, label]) => {
-                    const option = document.createElement("option");
-                    option.value = value;
-                    option.textContent = label;
-                    select.appendChild(option);
+                    const button = document.createElement("button");
+                    button.type = "button";
+                    button.className = "w-full rounded-md border border-[#733190]/25 bg-[#733190]/5 px-3 py-2 text-left text-sm font-semibold text-[#54206c] transition hover:bg-[#733190]/10 disabled:cursor-not-allowed disabled:border-gray-200 disabled:bg-gray-100 disabled:text-gray-500";
+                    button.textContent = label;
+                    button.addEventListener("click", function () {
+                        Array.from(buttonGroup.querySelectorAll("button")).forEach((item) => {
+                            item.disabled = true;
+                        });
+                        sendMessage(value);
+                    });
+                    buttonGroup.appendChild(button);
                 });
 
-                select.addEventListener("change", function () {
-                    const selectedText = this.value;
-                    if (!selectedText) return;
-                    this.disabled = true;
-                    sendMessage(selectedText);
-                });
-
-                bubble.appendChild(select);
+                bubble.appendChild(buttonGroup);
             } else {
                 bubble.textContent = text;
             }
@@ -722,22 +746,22 @@
                 || outage.event_type === "etr_timeout_sla";
             if (isUrgentCase && urgentTime) {
                 if (urgentRemaining) {
-                    return `พบเคสเร่งด่วนที่เปิดอยู่สำหรับ CA นี้ครับ เหลือเวลาเร่งดำเนินการประมาณ ${urgentRemaining} หรือไม่เกิน ${urgentTime} น.`;
+                    return `พบเคสเร่งด่วนที่เปิดอยู่สำหรับ CA นี้ค่ะ เหลือเวลาเร่งดำเนินการประมาณ ${urgentRemaining} หรือไม่เกิน ${urgentTime} น.`;
                 }
-                return `พบเคสเร่งด่วนที่เปิดอยู่สำหรับ CA นี้ครับ กรอบเวลาเร่งดำเนินการเดิมคือ ${urgentTime} น. ซึ่งเลยกำหนดแล้ว ระบบกำลังเร่งติดตามระดับสูงสุด`;
+                return `พบเคสเร่งด่วนที่เปิดอยู่สำหรับ CA นี้ค่ะ กรอบเวลาเร่งดำเนินการเดิมคือ ${urgentTime} น. ซึ่งเลยกำหนดแล้ว ระบบกำลังเร่งติดตามระดับสูงสุดค่ะ`;
             }
 
             const etrTime = formatCaseTime(outage.etr_target_time || outage.oms_etr);
             if (etrTime) {
-                return `พบเคสที่เปิดอยู่สำหรับ CA นี้ครับ คาดว่าจะจ่ายไฟคืนประมาณ ${etrTime} น.`;
+                return `พบเคสที่เปิดอยู่สำหรับ CA นี้ค่ะ คาดว่าจะจ่ายไฟคืนประมาณ ${etrTime} น.`;
             }
 
             const etaTime = formatCaseTime(outage.eta_target_time);
             if (etaTime) {
-                return `พบเคสที่เปิดอยู่สำหรับ CA นี้ครับ ช่างจะถึงหน้างานประมาณ ${etaTime} น.`;
+                return `พบเคสที่เปิดอยู่สำหรับ CA นี้ค่ะ ช่างจะถึงหน้างานประมาณ ${etaTime} น.`;
             }
 
-            return "พบเคสที่เปิดอยู่สำหรับ CA นี้ครับ ระบบกำลังรอข้อมูลเวลาอัปเดตล่าสุด";
+            return "พบเคสที่เปิดอยู่สำหรับ CA นี้ค่ะ ระบบกำลังรอข้อมูลเวลาอัปเดตล่าสุดค่ะ";
         }
 
         function renderChatHistory(chatHistory) {
@@ -760,7 +784,9 @@
                     appendUserMessage(message);
                 } else {
                     appendBotMessage(message, {
-                        label: item.event_type ? "ระบบ OMS" : "ศูนย์รับแจ้งปัญหา",
+                        label: "ศูนย์รับแจ้งปัญหา",
+                        eventType: item.event_type,
+                        caNumber: item.ca_number || loggedInCaNumber,
                         restorationSelect: item.event_type === "closed_loop_prompt"
                             && index === chatHistory.length - 1
                     });
@@ -770,6 +796,14 @@
         }
 
         function applySessionContext(data) {
+            if (data.customer_name) {
+                loggedInCustomerName = data.customer_name;
+                localStorage.setItem("pea_chat_customer_name", data.customer_name);
+                const initialGreetingBubble = document.getElementById("initialGreetingBubble");
+                if (initialGreetingBubble) {
+                    initialGreetingBubble.textContent = greetingMessage();
+                }
+            }
             const hasHistory = renderChatHistory(data.chat_history);
             if (!hasHistory) {
                 const summary = latestOutageSummary(data.latest_outage);
@@ -821,8 +855,19 @@
                 const data = await response.json();
                 if (response.ok && Array.isArray(data.notifications)) {
                     data.notifications.forEach((notification) => {
-                        appendBotMessage(notification.message || "", {
-                            label: notification.event_type ? "ระบบ OMS" : "ศูนย์รับแจ้งปัญหา",
+                        const message = notification.message || "";
+                        const key = notificationKey(
+                            notification.event_type,
+                            notification.ca_number,
+                            message
+                        );
+                        if (displayedNotificationKeys.has(key)) {
+                            return;
+                        }
+                        appendBotMessage(message, {
+                            label: "ศูนย์รับแจ้งปัญหา",
+                            eventType: notification.event_type,
+                            caNumber: notification.ca_number,
                             restorationSelect: notification.event_type === "closed_loop_prompt"
                         });
                     });
@@ -859,7 +904,7 @@
                 removeLoadingMessage(loadingMessage);
 
                 if (response.ok) {
-                    appendBotMessage(data.answer || "ระบบตอบกลับว่างเปล่าครับ");
+                    appendBotMessage(data.answer || "ระบบตอบกลับว่างเปล่าค่ะ");
                     stateBox.textContent = data.state ? JSON.stringify(data.state, null, 2) : "ไม่พบข้อมูล State";
                 } else {
                     appendBotMessage(`Error: ${data.detail || "ไม่สามารถติดต่อระบบได้"}`);

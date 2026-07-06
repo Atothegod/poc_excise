@@ -128,7 +128,7 @@ def process_outage_case_updates(sender, instance, created, **kwargs):
         if instance.status not in INACTIVE_CASE_STATUSES:
             instance.sync_affected_ca_numbers()
             etr_label = _format_time_label(instance.oms_etr)
-            message = f"อัปเดตล่าสุด คาดว่าจะจ่ายไฟคืนประมาณ {etr_label} ครับ"
+            message = f"อัปเดตล่าสุด คาดว่าจะจ่ายไฟคืนประมาณ {etr_label} ค่ะ"
             sent_session_ids = set()
             affected_customers = CustomerReport.objects.filter(
                 related_case=instance, is_resolved=False
@@ -162,15 +162,20 @@ def process_outage_case_updates(sender, instance, created, **kwargs):
         affected_customers = CustomerReport.objects.filter(
             related_case=instance, is_resolved=False
         )
+        sent_session_ids = set()
 
         for report in affected_customers:
             report.is_resolved = True
             report.save()
 
+            if not report.session_id or report.session_id in sent_session_ids:
+                continue
+            sent_session_ids.add(report.session_id)
+
             # 3. ส่งข้อความยืนยันไฟมาเชิงรุกไปหาลูกค้า
             message = (
-                "ระบบแจ้งว่าจ่ายไฟคืนแล้วครับ "
-                "ไฟกลับมาใช้งานได้แล้วหรือยังครับ"
+                "ระบบแจ้งว่าจ่ายไฟคืนแล้วค่ะ "
+                "กรุณาเลือกสถานะไฟฟ้าด้านล่างค่ะ"
             )
             send_proactive_alert.delay(
                 report_id=report.id, message=message, event_type="closed_loop_prompt"

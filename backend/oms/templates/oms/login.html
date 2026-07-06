@@ -172,6 +172,7 @@
                 }
 
                 localStorage.setItem("pea_chat_ca_number", caNumber);
+                localStorage.setItem("pea_chat_customer_name", data.customer_name || "");
                 localStorage.setItem("pea_chat_pdpa_consent", "true");
                 window.location.href = "/chat/";
             } catch (error) {
