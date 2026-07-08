@@ -16,5 +16,4 @@ urlpatterns = [
         name="session_context",
     ),
     path("reports/status/", views_api.get_action_status, name="get_status"),
-    path("reports/fast-track/", views_api.fast_track_report, name="fast_track"),
 ]

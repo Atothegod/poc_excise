@@ -11,7 +11,6 @@ from signature import PEA_Assistant, PEA_Conversation_State
 # นำเข้าตัวแปรทะลุมิติมาด้วยขอรับ!
 from tools import (
     Check_Outage_Tool,
-    Fast_Track_Tool,
     current_login_ca_number,
     current_pdpa_consent,
     current_session_id,
@@ -26,7 +25,7 @@ from tools import (
 # 3. Initialize your ReAct agent
 base_react_agent = dspy.ReAct(
     signature=PEA_Assistant,
-    tools=[Check_Outage_Tool, Fast_Track_Tool],
+    tools=[Check_Outage_Tool],
     max_iters=5,
 )
 
@@ -148,16 +147,31 @@ class MemoryAgent:
             "System: If asked about current time, answer naturally using current_time_thai_label.",
             "System: If asked about technician arrival before eta_timeout event, answer naturally using latest_eta_user_label.",
             "System: If asked about restoration time, answer naturally using latest_etr_user_label only if it is available; do not mention the ETR source.",
-            "System: If event_type=etr_timeout_sla or fast_track_created, answer naturally using latest_sla_user_label when available.",
+            "System: If event_type=etr_timeout_sla, answer naturally using latest_sla_user_label when available.",
         ]
 
-    def _has_closed_loop_prompt(self, history: list) -> bool:
-        return any(item.get("event_type") == "closed_loop_prompt" for item in history)
+    def _has_pending_closed_loop_prompt(self, history: list) -> bool:
+        for index in range(len(history) - 1, -1, -1):
+            if history[index].get("event_type") == "closed_loop_prompt":
+                return index == len(history) - 1
+        return False
+
+    def _is_still_without_power(self, user_input: str) -> bool:
+        normalized_input = user_input.strip().lower()
+        still_out_keywords = [
+            "ยังไม่มีไฟ",
+            "ไฟยังไม่มา",
+            "ยังใช้งานไม่ได้",
+            "ไฟไม่มา",
+            "ไฟยังดับ",
+            "ยังดับ",
+        ]
+        return any(keyword in normalized_input for keyword in still_out_keywords)
 
     def _closed_loop_resolution_response(
         self, user_input: str, history: list, ca_number: str | None
     ):
-        if not self._has_closed_loop_prompt(history):
+        if not self._has_pending_closed_loop_prompt(history):
             return None
 
         normalized_input = user_input.strip().lower()
@@ -181,6 +195,55 @@ class MemoryAgent:
                 flow_step="resolved",
             ),
         )
+
+    def _response_from_check_outage_result(
+        self, tool_result: str, ca_number: str | None
+    ):
+        result = str(tool_result or "").strip()
+        flow_step = "checking_outage"
+
+        if result.startswith("[เหตุแจ้งใหม่]"):
+            detail = (
+                result.split("แจ้งว่า", 1)[1].strip()
+                if "แจ้งว่า" in result
+                else result.split("]", 1)[-1].strip()
+            )
+            answer = f"รับทราบค่ะ เปิดใบงานใหม่ให้แล้วค่ะ {detail}"
+            flow_step = "providing_eta_first"
+        elif result.startswith("[เคสเดิมของ CA]"):
+            detail = result.split("]", 1)[-1].strip()
+            if detail.startswith("แจ้งว่า"):
+                detail = detail[len("แจ้งว่า") :].strip()
+            elif detail.startswith("แจ้ง"):
+                detail = detail[len("แจ้ง") :].strip()
+            answer = f"พบเคสที่เปิดอยู่สำหรับ CA นี้ค่ะ {detail}"
+            flow_step = "existing_case_providing_eta"
+        elif result.startswith("[เหตุวงกว้าง]"):
+            answer = result.split("]", 1)[-1].strip()
+            flow_step = "mass_outage_providing_etr"
+        elif result.startswith("[CA_INVALID]") or result.startswith("[CONSENT_REQUIRED]"):
+            answer = result.split("]", 1)[-1].strip()
+            flow_step = "fallback_to_human"
+        elif result.startswith("[FallBack]") or result.startswith("ขัดข้อง"):
+            answer = (
+                "ขออภัยในความไม่สะดวกค่ะ ระบบขัดข้องไม่สามารถดำเนินการต่อได้ "
+                "กำลังโอนสายให้เจ้าหน้าที่เพื่อช่วยเหลือต่อไปค่ะ"
+            )
+            flow_step = "fallback_to_human"
+        else:
+            answer = result
+
+        return SimpleNamespace(
+            answer=answer,
+            current_state=PEA_Conversation_State(
+                ca_number=ca_number,
+                flow_step=flow_step,
+            ),
+        )
+
+    def _closed_loop_still_out_response(self, ca_number: str | None):
+        tool_result = Check_Outage_Tool(ca_number or "", pdpa_consent=True)
+        return self._response_from_check_outage_result(tool_result, ca_number)
 
     def _ensure_feminine_ending(self, response):
         answer = str(getattr(response, "answer", response) or "").strip()
@@ -229,6 +292,45 @@ class MemoryAgent:
             return response
         return SimpleNamespace(answer=answer, current_state=None)
 
+    def _ensure_branch_wording(self, response, session_id: str):
+        latest_outage = get_latest_outage(session_id)
+        if not latest_outage:
+            return response
+
+        branch = latest_outage.get("fastest_branch")
+        if not branch or latest_outage.get("event_type") not in {
+            "new_event",
+            "existing_ca_case",
+            "active_case_exists",
+        }:
+            return response
+
+        answer = str(getattr(response, "answer", response) or "").strip()
+        if not answer or branch in answer:
+            return response
+
+        current_state = getattr(response, "current_state", None)
+        flow_step = getattr(current_state, "flow_step", None)
+        if flow_step not in {
+            "providing_eta_first",
+            "existing_case_providing_eta",
+            "checking_outage",
+        } and not any(
+            keyword in answer
+            for keyword in ["ช่างจะถึงหน้างาน", "เปิดใบงาน", "เคสที่เปิดอยู่"]
+        ):
+            return response
+
+        branch_sentence = f"สาขาที่ประเมินว่าไปถึงเร็วที่สุดคือ {branch}"
+        if "สาขาที่ประเมินว่าไปถึงเร็วที่สุด" in answer:
+            return response
+
+        answer = f"{branch_sentence}ค่ะ {answer}"
+        if hasattr(response, "answer"):
+            response.answer = answer
+            return response
+        return SimpleNamespace(answer=answer, current_state=None)
+
     def chat(
         self,
         user_input: str,
@@ -244,6 +346,8 @@ class MemoryAgent:
         current_pdpa_consent.set(bool(pdpa_consent))
 
         history_list = self._hydrate_session_from_db(session_id, ca_number=ca_number)
+        pending_closed_loop = self._has_pending_closed_loop_prompt(history_list)
+        still_without_power = self._is_still_without_power(user_input)
 
         history_str = self._format_history(
             history_list,
@@ -257,10 +361,14 @@ class MemoryAgent:
             user_input, history_list, ca_number
         )
         if response is None:
-            response = self.agent(
-                chat_history=history_str, question=user_input, time_stamp=time_stamp
-            )
+            if pending_closed_loop and still_without_power:
+                response = self._closed_loop_still_out_response(ca_number)
+            else:
+                response = self.agent(
+                    chat_history=history_str, question=user_input, time_stamp=time_stamp
+                )
         response = self._ensure_mass_outage_wording(response, session_id)
+        response = self._ensure_branch_wording(response, session_id)
         response = self._ensure_feminine_ending(response)
 
         history_list.append(

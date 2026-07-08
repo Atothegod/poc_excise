@@ -82,7 +82,6 @@ Stores:
 - `related_case`
 - `pdpa_consent`
 - `pdpa_consent_at`
-- `fast_track_quota`
 - `is_resolved`
 
 Purpose:
@@ -205,7 +204,6 @@ Expected source priority:
 | Method | Endpoint | Called by | Purpose |
 |---|---|---|---|
 | `POST` | `/api/reports/sync/` | `Check_Outage_Tool` | Create/link report and outage case |
-| `POST` | `/api/reports/fast-track/` | `Fast_Track_Tool` | Open urgent repeat outage ticket |
 | `GET` | `/api/action-status/` | Optional agent/status flow | Check latest active case status |
 | `POST` | `/webhook/notify` | Django/Celery | Push proactive alerts to DSPy agent |
 | `GET` | `/notifications/{session_id}` | Chat UI | Poll pending proactive notifications |
@@ -502,43 +500,16 @@ User:
 
 Expected Agent:
 
-> รบกวนตรวจสอบสวิตช์เบรกเกอร์เมนภายในบ้านว่าทริปหรือตกลงมาหรือไม่ครับ หากตรวจสอบแล้วปกติ กรุณาพิมพ์ว่า "ปกติ" เพื่อยืนยันให้ช่างเข้าตรวจสอบซ้ำครับ
+> รับทราบค่ะ ระบบจะเปิดใบงานใหม่ให้ตรวจสอบอีกครั้งค่ะ ช่างจะถึงหน้างานประมาณ {time} ค่ะ
 
 Expected tool call:
 
-- No `Fast_Track_Tool` yet
+- `Check_Outage_Tool(logged_in_ca_number, pdpa_consent=True)`
+- Backend uses normal `/api/reports/sync/` flow
 
-### Scenario 18: Breaker normal, create fast track
+### Scenario 18: Re-report duplicate click
 
-User:
-
-> ปกติ เช็คแล้ว
-
-Tool result:
-
-```text
-[Success] สร้างตั๋ว Fast-track สำเร็จ ให้ตอบลูกค้าว่าประสานงานด่วนแล้ว
-```
-
-Expected Agent:
-
-> รับทราบครับ ผมสร้างใบงานตรวจสอบซ้ำแบบเร่งด่วนให้แล้ว เจ้าหน้าที่จะประสานช่างเข้าตรวจสอบอีกครั้งครับ
-
-Expected tool call:
-
-- `Fast_Track_Tool(ca_number)`
-
-### Scenario 19: Fast track quota exhausted
-
-Tool result:
-
-```text
-[FallBack] โควต้าแจ้งซ้ำหมดแล้ว ให้ตอบว่ากำลังโอนสายให้เจ้าหน้าที่ (Force Fallback)
-```
-
-Expected Agent:
-
-> เคสนี้มีการตรวจสอบซ้ำครบโควต้าแล้วครับ ผมจะส่งต่อให้เจ้าหน้าที่รับช่วงตรวจสอบโดยตรงครับ
+If the same session sends the closed-loop still-out action again after the new normal case exists, backend returns the active case for that session instead of creating another duplicate case.
 
 ## 11. Developer Test Checklist
 

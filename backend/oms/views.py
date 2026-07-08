@@ -15,7 +15,6 @@ import requests
 
 from .case_logic import (
     CASE_LINK_RADIUS_KM,
-    CASE_TYPE_FAST_TRACK,
     CASE_TYPE_MASS_OUTAGE,
     INACTIVE_CASE_STATUSES,
     STATUS_RESTORED,
@@ -343,7 +342,6 @@ def _map_marker_payload(location, case):
             "status": marker_status,
             "label": status_meta["label"],
             "color": status_meta["color"],
-            "is_fast_track": bool(case and case.case_type == CASE_TYPE_FAST_TRACK),
             "is_mass_outage": bool(case and case.case_type == CASE_TYPE_MASS_OUTAGE),
         },
         "case": _map_case_payload(case),
@@ -362,11 +360,6 @@ def _map_summary(markers):
         if marker.get("case")
         and marker["case"]["status"] not in INACTIVE_CASE_STATUSES
     }
-    fast_track_case_ids = {
-        marker["case"]["case_id"]
-        for marker in markers
-        if marker.get("case") and marker["case"]["case_type"] == CASE_TYPE_FAST_TRACK
-    }
     restored_case_ids = {
         marker["case"]["case_id"]
         for marker in markers
@@ -379,7 +372,6 @@ def _map_summary(markers):
         "no_case_locations": sum(1 for marker in markers if not marker.get("case")),
         "cases": len(case_ids),
         "active_cases": len(active_case_ids),
-        "fast_track_cases": len(fast_track_case_ids),
         "restored_cases": len(restored_case_ids),
     }
 

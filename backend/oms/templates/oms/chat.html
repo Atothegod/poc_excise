@@ -632,7 +632,7 @@
 
                 [
                     ["ใช้งานได้แล้ว", "ไฟมาแล้ว / ใช้งานได้แล้ว"],
-                    ["ยังไม่มีไฟ", "ยังไม่มีไฟ / เปิดเคสเร่งด่วน"],
+                    ["ยังไม่มีไฟ", "ยังไม่มีไฟ / แจ้งเหตุใหม่"],
                 ].forEach(([value, label]) => {
                     const button = document.createElement("button");
                     button.type = "button";
@@ -737,19 +737,6 @@
 
         function latestOutageSummary(outage) {
             if (!outage || outage.event_type === "restored") return null;
-
-            const urgentTime = formatCaseTime(outage.sla_target_time);
-            const urgentRemaining = formatRemainingTime(outage.sla_target_time);
-            const isUrgentCase = outage.case_type === "fast_track"
-                || outage.event_type === "fast_track_created"
-                || outage.event_type === "fast_track_existing"
-                || outage.event_type === "etr_timeout_sla";
-            if (isUrgentCase && urgentTime) {
-                if (urgentRemaining) {
-                    return `พบเคสเร่งด่วนที่เปิดอยู่สำหรับ CA นี้ค่ะ เหลือเวลาเร่งดำเนินการประมาณ ${urgentRemaining} หรือไม่เกิน ${urgentTime} น.`;
-                }
-                return `พบเคสเร่งด่วนที่เปิดอยู่สำหรับ CA นี้ค่ะ กรอบเวลาเร่งดำเนินการเดิมคือ ${urgentTime} น. ซึ่งเลยกำหนดแล้ว ระบบกำลังเร่งติดตามระดับสูงสุดค่ะ`;
-            }
 
             const etrTime = formatCaseTime(outage.etr_target_time || outage.oms_etr);
             if (etrTime) {

@@ -4,7 +4,6 @@ from datetime import timedelta
 import uuid
 
 from .case_logic import (
-    CASE_TYPE_FAST_TRACK,
     CASE_TYPE_MASS_OUTAGE,
     CASE_TYPE_NORMAL,
     STATUS_INVESTIGATING,
@@ -27,7 +26,6 @@ class OutageCase(models.Model):
     ]
     CASE_TYPE_CHOICES = [
         (CASE_TYPE_NORMAL, "เคสปกติ"),
-        (CASE_TYPE_FAST_TRACK, "เคสเร่งด่วน"),
         (CASE_TYPE_MASS_OUTAGE, "เหตุไฟดับวงกว้าง"),
     ]
 
@@ -45,7 +43,7 @@ class OutageCase(models.Model):
         choices=CASE_TYPE_CHOICES,
         default=CASE_TYPE_NORMAL,
         db_index=True,
-        help_text="ประเภทเคส เช่น normal, fast_track หรือ mass_outage",
+        help_text="ประเภทเคส เช่น normal หรือ mass_outage",
     )
     status = models.CharField(
         max_length=20, choices=STATUS_CHOICES, default=STATUS_REPORTED

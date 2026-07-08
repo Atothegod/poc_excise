@@ -15,7 +15,6 @@ from pea_project.celery import app as celery_app
 
 from .case_logic import (
     CASE_LINK_RADIUS_KM,
-    CASE_TYPE_FAST_TRACK,
     CASE_TYPE_MASS_OUTAGE,
     CASE_TYPE_NORMAL,
     INACTIVE_CASE_STATUSES,
@@ -259,55 +258,6 @@ def _latest_active_report_for_ca(ca_number, exclude_report_id=None):
     return reports.first()
 
 
-def _active_fast_track_case_for_ca(ca_number):
-    report = (
-        _active_reports_for_ca(ca_number)
-        .filter(related_case__case_type=CASE_TYPE_FAST_TRACK)
-        .first()
-    )
-    return report.related_case if report else None
-
-
-def _select_fast_track_report(ca_number, session_id=None):
-    if session_id:
-        report = (
-            CustomerReport.objects.filter(session_id=session_id, ca_number=ca_number)
-            .order_by("-updated_at")
-            .first()
-        )
-        if report:
-            return report
-
-        report = CustomerReport(session_id=session_id, ca_number=ca_number)
-        _apply_customer_location(report, ca_number)
-        report.save()
-        return report
-
-    return (
-        CustomerReport.objects.filter(ca_number=ca_number)
-        .order_by("-updated_at")
-        .first()
-    )
-
-
-def _case_start_reference(case, fallback=None):
-    if not case:
-        return fallback
-
-    case_start_times = [
-        value for value in [case.sla_reference_time, case.created_at] if value
-    ]
-    return min(case_start_times) if case_start_times else fallback
-
-
-def _fast_track_sla_reference(report):
-    reference_time = _case_start_reference(
-        report.related_case if report else None,
-        fallback=None,
-    )
-    return reference_time or timezone.now()
-
-
 def _attach_active_ca_case(report):
     if _has_active_related_case(report):
         return False
@@ -351,22 +301,21 @@ def _create_case_for_report(report, ca_number):
             "lat": report.latitude,
             "lon": report.longitude,
         }
+    ) or {}
+    assessment_error = assessment.get("error")
+    eta_minutes = None if assessment_error else parse_eta_minutes(
+        assessment.get("eta_formatted")
     )
-    if assessment.get("error"):
-        return None, {
-            "status": "assessment_error",
-            "event_type": "assessment_error",
-            "message": assessment["error"],
-            "report_id": report.id,
-            **_case_response_fields(None),
-        }
 
-    eta_minutes = parse_eta_minutes(assessment.get("eta_formatted"))
     if eta_minutes is None:
+        message = (
+            assessment_error
+            or "assessment response does not contain a usable ETA"
+        )
         return None, {
             "status": "assessment_error",
             "event_type": "assessment_error",
-            "message": "assessment response does not contain a usable ETA",
+            "message": message,
             "report_id": report.id,
             **_case_response_fields(None),
         }
@@ -582,8 +531,6 @@ def _latest_outage_for_report(report):
 
     if is_active and effective_etr and now >= effective_etr:
         event_type = "etr_timeout_sla"
-    elif is_active and case.case_type == CASE_TYPE_FAST_TRACK:
-        event_type = "fast_track_existing"
 
     return {
         "event_type": event_type,
@@ -876,75 +823,3 @@ def get_session_context(request, session_id):
 
     report = _select_session_report(session_id, ca_number=ca_number)
     return Response(_session_context_payload(session_id, report))
-
-
-# --- API ใหม่สำหรับ Anti-Loop (Fast Track) ---
-@api_view(["POST"])
-def fast_track_report(request):
-    """
-    เปิดเคสเร่งด่วนเมื่อลูกค้ายังไม่มีไฟหลังระบบปิดเคสเดิมแล้ว
-    """
-    ca_number = request.data.get("ca_number")
-    session_id = str(request.data.get("session_id") or "").strip() or None
-    if session_id == "unknown":
-        session_id = None
-    try:
-        ca_number = validate_ca_number_format(ca_number)
-    except serializers.ValidationError as e:
-        return Response({"error": str(e)}, status=400)
-
-    report = _select_fast_track_report(ca_number, session_id=session_id)
-
-    if not report:
-        return Response({"event_type": "fallback", "message": "ไม่พบข้อมูลประวัติ"})
-
-    _apply_customer_location(report, ca_number)
-
-    active_fast_track_case = _active_fast_track_case_for_ca(ca_number)
-    if active_fast_track_case:
-        report.is_resolved = False
-        report.related_case = active_fast_track_case
-        report.save()
-        _attach_waiting_same_ca_reports(report)
-        active_fast_track_case.sync_affected_ca_numbers()
-        return Response(
-            {
-                "event_type": "fast_track_existing",
-                "message": "รับเรื่องไว้ในเคสเร่งด่วนเดิมแล้วค่ะ",
-                "case_id": str(active_fast_track_case.case_id),
-                "lv_group_id": active_fast_track_case.lv_group_id,
-                "sla_target_time": _datetime_iso(active_fast_track_case.sla_target_time),
-                "sla_reference_time": _datetime_iso(
-                    active_fast_track_case.sla_reference_time
-                ),
-                "sla_reason": active_fast_track_case.sla_reason,
-            }
-        )
-
-    base_time = _fast_track_sla_reference(report)
-    new_case = OutageCase.objects.create(
-        title=f"[ด่วน! ไฟดับซ้ำซ้อน] CA {ca_number}",
-        case_type=CASE_TYPE_FAST_TRACK,
-        status="reported",
-        latitude=report.latitude or 13.0,
-        longitude=report.longitude or 100.0,
-        sla_reference_time=base_time,
-        sla_target_time=base_time + timedelta(hours=OutageCase.SLA_HOURS),
-        sla_reason="fast_track",
-    )
-    report.is_resolved = False
-    report.related_case = new_case
-    report.save()
-    new_case.sync_affected_ca_numbers()
-
-    return Response(
-        {
-            "event_type": "fast_track_created",
-            "message": "เปิดเคสเร่งด่วนให้แล้วค่ะ",
-            "case_id": str(new_case.case_id),
-            "lv_group_id": new_case.lv_group_id,
-            "sla_target_time": _datetime_iso(new_case.sla_target_time),
-            "sla_reference_time": _datetime_iso(new_case.sla_reference_time),
-            "sla_reason": new_case.sla_reason,
-        }
-    )

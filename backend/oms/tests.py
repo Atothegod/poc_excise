@@ -676,34 +676,33 @@ class SyncAgentReportTests(TestCase):
         self.assertEqual(outage["event_type"], "etr_timeout_sla")
         self.assertEqual(parse_datetime(outage["sla_target_time"]), sla_target)
 
-    def test_session_context_returns_fast_track_sla_window(self):
+    def test_session_context_returns_active_normal_case_sla_window(self):
         now = timezone.now()
         sla_reference = now - timedelta(hours=1)
         sla_target = sla_reference + timedelta(hours=OutageCase.SLA_HOURS)
         case = OutageCase.objects.create(
-            title="Active fast-track context",
-            case_type="fast_track",
+            title="Active normal context",
             latitude=9.2917,
             longitude=100.926296,
             sla_reference_time=sla_reference,
             sla_target_time=sla_target,
-            sla_reason="fast_track",
+            sla_reason="case_created",
         )
         CustomerReport.objects.create(
-            session_id="session-fast-track-context",
+            session_id="session-normal-context",
             ca_number="123456789012",
             related_case=case,
         )
         case.sync_affected_ca_numbers()
 
         response = self.client.get(
-            "/api/reports/session-context/session-fast-track-context/"
+            "/api/reports/session-context/session-normal-context/"
         )
 
         self.assertEqual(response.status_code, 200)
         outage = response.data["latest_outage"]
-        self.assertEqual(outage["event_type"], "fast_track_existing")
-        self.assertEqual(outage["case_type"], "fast_track")
+        self.assertEqual(outage["event_type"], "active_case_exists")
+        self.assertEqual(outage["case_type"], CASE_TYPE_NORMAL)
         self.assertEqual(parse_datetime(outage["sla_reference_time"]), sla_reference)
         self.assertEqual(parse_datetime(outage["sla_target_time"]), sla_target)
 
@@ -720,119 +719,199 @@ class SyncAgentReportTests(TestCase):
 
         self.assertEqual(response.status_code, 400)
 
-    def test_fast_track_creates_sla_case(self):
-        CustomerReport.objects.create(
-            session_id="session-fast-track",
-            ca_number="123456789012",
-            latitude=9.2917,
-            longitude=100.926296,
-            is_resolved=True,
-        )
-
-        before = timezone.now()
-        response = self.client.post(
-            "/api/reports/fast-track/",
-            {"ca_number": "123456789012", "session_id": "session-fast-track"},
-            format="json",
-        )
-        after = timezone.now()
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["event_type"], "fast_track_created")
-        case = OutageCase.objects.get(case_id=response.data["case_id"])
-        self.assertEqual(case.case_type, "fast_track")
-        self.assertEqual(case.sla_reason, "fast_track")
-        self.assertGreaterEqual(case.sla_reference_time, before)
-        self.assertLessEqual(case.sla_reference_time, after)
-        self.assertEqual(
-            case.sla_target_time, case.sla_reference_time + timedelta(hours=4)
-        )
-
-    def test_fast_track_preserves_original_restored_case_sla_window(self):
-        original_reference = timezone.now() - timedelta(hours=2)
+    @patch("oms.views_api.get_pea_assessment")
+    @patch("oms.views_api.check_eta_timeout.apply_async")
+    def test_sync_report_after_restored_case_creates_normal_case_with_eta(
+        self, mock_apply_async, mock_assessment
+    ):
+        mock_apply_async.return_value.id = "restored-new-eta-task-id"
+        mock_assessment.return_value = self._assessment_payload(eta_minutes=12)
         original_case = OutageCase.objects.create(
-            title="Original restored SLA case",
+            title="Original restored case",
             status="restored",
             latitude=9.2917,
             longitude=100.926296,
-            sla_reference_time=original_reference,
-            sla_target_time=original_reference + timedelta(hours=OutageCase.SLA_HOURS),
-            sla_reason="case_created",
         )
         CustomerReport.objects.create(
-            session_id="session-fast-track-original",
+            session_id="session-restored-new",
             ca_number="123456789012",
             latitude=9.2917,
             longitude=100.926296,
             related_case=original_case,
             is_resolved=True,
         )
+        CustomerLocation.objects.create(
+            ca_number="123456789012",
+            fullname="Restored New User",
+            latitude=9.2917,
+            longitude=100.926296,
+        )
 
+        base_time = timezone.now()
         response = self.client.post(
-            "/api/reports/fast-track/",
+            "/api/reports/sync/",
             {
                 "ca_number": "123456789012",
-                "session_id": "session-fast-track-original",
+                "session_id": "session-restored-new",
+                "time_stamp": base_time.isoformat(),
+                "pdpa_consent": True,
             },
             format="json",
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["event_type"], "fast_track_created")
+        self.assertEqual(response.data["event_type"], "new_event")
         case = OutageCase.objects.get(case_id=response.data["case_id"])
-        self.assertEqual(case.case_type, "fast_track")
-        self.assertEqual(case.sla_reference_time, original_reference)
+        self.assertNotEqual(case.case_id, original_case.case_id)
+        self.assertEqual(case.case_type, CASE_TYPE_NORMAL)
+        self.assertEqual(case.sla_reason, "case_created")
+        self.assertEqual(case.sla_reference_time, base_time)
+        self.assertEqual(case.sla_target_time, base_time + timedelta(hours=4))
+        self.assertEqual(case.eta_target_time, base_time + timedelta(minutes=12))
         self.assertEqual(
-            case.sla_target_time,
-            original_reference + timedelta(hours=OutageCase.SLA_HOURS),
+            response.data["fastest_branch"], "การไฟฟ้าส่วนภูมิภาค สาขา รังสิต"
         )
-        self.assertEqual(
-            parse_datetime(response.data["sla_target_time"]),
-            original_reference + timedelta(hours=OutageCase.SLA_HOURS),
+        self.assertEqual(response.data["affected_ca_numbers"], ["123456789012"])
+        mock_assessment.assert_called_once_with(
+            {
+                "ca_number": "123456789012",
+                "lat": 9.2917,
+                "lon": 100.926296,
+            }
+        )
+        mock_apply_async.assert_called_once_with(
+            args=[case.case_id, response.data["report_id"]],
+            eta=case.eta_target_time,
         )
 
-    def test_fast_track_reuses_active_fast_track_case_for_same_ca(self):
-        CustomerReport.objects.create(
-            session_id="session-b",
+    @patch("oms.views_api.get_pea_assessment")
+    def test_sync_report_does_not_use_customer_location_eta_when_assessment_errors(
+        self, mock_assessment
+    ):
+        mock_assessment.return_value = {"error": "assessment unavailable"}
+        CustomerLocation.objects.create(
             ca_number="123456789012",
+            fullname="No Customer ETA Fallback User",
             latitude=9.2917,
             longitude=100.926296,
-            is_resolved=True,
+            eta_result=14.0,
         )
-        CustomerReport.objects.create(
-            session_id="session-a",
+
+        base_time = timezone.now()
+        response = self.client.post(
+            "/api/reports/sync/",
+            {
+                "ca_number": "123456789012",
+                "session_id": "session-fallback-eta",
+                "time_stamp": base_time.isoformat(),
+                "pdpa_consent": True,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["event_type"], "assessment_error")
+        self.assertEqual(response.data["message"], "assessment unavailable")
+        self.assertEqual(OutageCase.objects.count(), 0)
+        report = CustomerReport.objects.get(session_id="session-fallback-eta")
+        self.assertIsNone(report.related_case)
+        self.assertEqual(report.latitude, 9.2917)
+        self.assertEqual(report.longitude, 100.926296)
+        mock_assessment.assert_called_once_with(
+            {
+                "ca_number": "123456789012",
+                "lat": 9.2917,
+                "lon": 100.926296,
+            }
+        )
+
+    @patch("oms.views_api.get_pea_assessment")
+    def test_sync_report_returns_assessment_error_without_usable_eta(
+        self, mock_assessment
+    ):
+        mock_assessment.return_value = {"error": "assessment unavailable"}
+        CustomerLocation.objects.create(
             ca_number="123456789012",
+            fullname="No Fallback ETA User",
             latitude=9.2917,
             longitude=100.926296,
-            is_resolved=True,
+        )
+
+        response = self.client.post(
+            "/api/reports/sync/",
+            {
+                "ca_number": "123456789012",
+                "session_id": "session-no-fallback-eta",
+                "pdpa_consent": True,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["event_type"], "assessment_error")
+        self.assertEqual(OutageCase.objects.count(), 0)
+        mock_assessment.assert_called_once_with(
+            {
+                "ca_number": "123456789012",
+                "lat": 9.2917,
+                "lon": 100.926296,
+            }
+        )
+
+    @patch("oms.views_api.get_pea_assessment")
+    @patch("oms.views_api.check_eta_timeout.apply_async")
+    def test_sync_report_reuses_same_session_active_case_on_repeat(
+        self, mock_apply_async, mock_assessment
+    ):
+        mock_apply_async.return_value.id = "sync-repeat-task-id"
+        mock_assessment.return_value = self._assessment_payload()
+        CustomerLocation.objects.create(
+            ca_number="123456789012",
+            fullname="Sync Repeat User",
+            latitude=9.2917,
+            longitude=100.926296,
         )
 
         first_response = self.client.post(
-            "/api/reports/fast-track/",
-            {"ca_number": "123456789012", "session_id": "session-b"},
+            "/api/reports/sync/",
+            {
+                "ca_number": "123456789012",
+                "session_id": "session-sync-repeat",
+                "pdpa_consent": True,
+            },
             format="json",
         )
         second_response = self.client.post(
-            "/api/reports/fast-track/",
-            {"ca_number": "123456789012", "session_id": "session-a"},
+            "/api/reports/sync/",
+            {
+                "ca_number": "123456789012",
+                "session_id": "session-sync-repeat",
+                "pdpa_consent": True,
+            },
             format="json",
         )
 
         self.assertEqual(first_response.status_code, 200)
         self.assertEqual(second_response.status_code, 200)
-        self.assertEqual(first_response.data["event_type"], "fast_track_created")
-        self.assertEqual(second_response.data["event_type"], "fast_track_existing")
+        self.assertEqual(first_response.data["event_type"], "new_event")
+        self.assertEqual(second_response.data["event_type"], "existing_ca_case")
         self.assertEqual(first_response.data["case_id"], second_response.data["case_id"])
-        self.assertEqual(OutageCase.objects.filter(case_type="fast_track").count(), 1)
+        self.assertEqual(OutageCase.objects.count(), 1)
+        mock_assessment.assert_called_once()
+        mock_apply_async.assert_called_once()
 
-        fast_track_case = OutageCase.objects.get(case_id=first_response.data["case_id"])
-        session_a_report = CustomerReport.objects.get(session_id="session-a")
-        session_b_report = CustomerReport.objects.get(session_id="session-b")
-        self.assertFalse(session_a_report.is_resolved)
-        self.assertFalse(session_b_report.is_resolved)
-        self.assertEqual(session_a_report.related_case, fast_track_case)
-        self.assertEqual(session_b_report.related_case, fast_track_case)
-        self.assertEqual(fast_track_case.affected_ca_numbers, ["123456789012"])
+    def test_fast_track_route_is_removed(self):
+        response = self.client.post(
+            "/api/reports/fast-track/",
+            {"ca_number": "123456789012", "session_id": "session-removed"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_fast_track_case_type_choice_removed(self):
+        case_type_values = {choice[0] for choice in OutageCase.CASE_TYPE_CHOICES}
+        self.assertNotIn("fast_track", case_type_values)
 
 
 class CheckEtaTimeoutTests(TestCase):
@@ -1107,8 +1186,8 @@ class CheckEtaTimeoutTests(TestCase):
 
         payload = mock_post.call_args.kwargs["json"]
         self.assertEqual(payload["event_type"], "etr_timeout_sla")
-        self.assertIn("เวลาไฟกลับที่ประเมินไว้เลยกำหนด", payload["message"])
-        self.assertIn("กฟภ.", payload["message"])
+        self.assertIn("ขออัปเดต", payload["message"])
+        self.assertIn("การจ่ายไฟจะไม่เกินเวลา", payload["message"])
         self.assertEqual(case.sla_reference_time, case.created_at)
         self.assertEqual(case.sla_target_time, expected_sla_target)
         self.assertEqual(case.sla_reason, "case_created")
@@ -1116,6 +1195,9 @@ class CheckEtaTimeoutTests(TestCase):
             timezone.localtime(expected_sla_target).strftime("%H:%M น."),
             payload["message"],
         )
+        self.assertNotIn("เหลือเวลา", payload["message"])
+        self.assertNotIn("เร่งดำเนินการให้ไม่เกิน", payload["message"])
+        self.assertNotIn("เวลาไฟกลับที่ประเมินไว้เลยกำหนด", payload["message"])
         self.assertNotIn("ภายในประมาณ", payload["message"])
         self.assertNotIn("ETA", payload["message"])
         self.assertNotIn("ETR", payload["message"])
@@ -1330,14 +1412,13 @@ class OpsWebhookConsoleTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "เลือกสถานะไฟฟ้า")
         self.assertContains(response, "ไฟมาแล้ว / ใช้งานได้แล้ว")
-        self.assertContains(response, "ยังไม่มีไฟ / เปิดเคสเร่งด่วน")
+        self.assertContains(response, "ยังไม่มีไฟ / แจ้งเหตุใหม่")
         self.assertContains(response, "closed_loop_prompt")
-        self.assertContains(response, "พบเคสเร่งด่วนที่เปิดอยู่สำหรับ CA นี้ค่ะ")
-        self.assertContains(response, "เหลือเวลาเร่งดำเนินการประมาณ")
-        self.assertContains(response, "กรอบเวลาเร่งดำเนินการเดิม")
         content = response.content.decode()
         self.assertNotIn("<select", content)
         self.assertNotIn("ระบบ OMS", content)
+        self.assertNotIn("เปิดเคสเร่งด่วน", content)
+        self.assertNotIn("เคสเร่งด่วน", content)
 
     def test_ops_map_page_renders(self):
         response = self.client.get("/ops/map/")
@@ -1368,8 +1449,7 @@ class OpsWebhookConsoleTests(TestCase):
             longitude=100.5018,
         )
         case = OutageCase.objects.create(
-            title="Map fast-track case",
-            case_type="fast_track",
+            title="Map normal case",
             status="reported",
             affected_ca_numbers=[location.ca_number],
             latitude=13.7563,
@@ -1391,9 +1471,9 @@ class OpsWebhookConsoleTests(TestCase):
         self.assertEqual(marker["ca_number"], location.ca_number)
         self.assertEqual(marker["customer_name"], "Somchai Map")
         self.assertEqual(marker["case"]["case_id"], str(case.case_id))
-        self.assertEqual(marker["case"]["case_type"], "fast_track")
+        self.assertEqual(marker["case"]["case_type"], CASE_TYPE_NORMAL)
         self.assertEqual(marker["marker"]["status"], "reported")
-        self.assertTrue(marker["marker"]["is_fast_track"])
+        self.assertNotIn("is_fast_track", marker["marker"])
 
     def test_ops_map_show_all_controls_locations_without_cases(self):
         assigned_location = CustomerLocation.objects.create(
@@ -1442,9 +1522,9 @@ class OpsWebhookConsoleTests(TestCase):
         self.assertEqual(no_case_marker["marker"]["status"], "no_case")
 
     def test_ops_map_data_filters_by_status_type_date_and_text(self):
-        fast_location = CustomerLocation.objects.create(
+        normal_location = CustomerLocation.objects.create(
             ca_number="123456789012",
-            fullname="Fast Track Customer",
+            fullname="Normal Customer",
             pea_area="PEA Rangsit",
             latitude=13.7563,
             longitude=100.5018,
@@ -1456,11 +1536,11 @@ class OpsWebhookConsoleTests(TestCase):
             latitude=14.0081,
             longitude=100.5247,
         )
-        fast_case = OutageCase.objects.create(
-            title="Fast Track Search Case",
-            case_type="fast_track",
+        normal_case = OutageCase.objects.create(
+            title="Normal Search Case",
+            case_type=CASE_TYPE_NORMAL,
             status="repairing",
-            affected_ca_numbers=[fast_location.ca_number],
+            affected_ca_numbers=[normal_location.ca_number],
             latitude=13.7563,
             longitude=100.5018,
         )
@@ -1472,9 +1552,9 @@ class OpsWebhookConsoleTests(TestCase):
             longitude=100.5247,
         )
         CustomerReport.objects.create(
-            session_id="session-map-fast",
-            ca_number=fast_location.ca_number,
-            related_case=fast_case,
+            session_id="session-map-normal",
+            ca_number=normal_location.ca_number,
+            related_case=normal_case,
         )
         CustomerReport.objects.create(
             session_id="session-map-restored",
@@ -1483,7 +1563,7 @@ class OpsWebhookConsoleTests(TestCase):
         )
 
         text_response = self.client.get("/ops/map/data/", {"search": "rangsit"})
-        type_response = self.client.get("/ops/map/data/", {"case_type": "fast_track"})
+        type_response = self.client.get("/ops/map/data/", {"case_type": "normal"})
         status_response = self.client.get("/ops/map/data/", {"status": "restored"})
         date_response = self.client.get(
             "/ops/map/data/",
@@ -1496,18 +1576,18 @@ class OpsWebhookConsoleTests(TestCase):
 
         self.assertEqual(
             {marker["ca_number"] for marker in text_response.json()["markers"]},
-            {fast_location.ca_number},
+            {normal_location.ca_number},
         )
         self.assertEqual(
             {marker["ca_number"] for marker in type_response.json()["markers"]},
-            {fast_location.ca_number},
+            {normal_location.ca_number},
         )
         self.assertEqual(
             {marker["ca_number"] for marker in status_response.json()["markers"]},
             {restored_location.ca_number},
         )
         self.assertIn(
-            fast_location.ca_number,
+            normal_location.ca_number,
             {marker["ca_number"] for marker in date_response.json()["markers"]},
         )
         self.assertEqual(future_response.json()["markers"], [])

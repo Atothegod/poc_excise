@@ -376,28 +376,16 @@
             box-shadow: 0 2px 10px rgba(23, 32, 47, 0.38);
         }
 
-        .case-marker.fast-track {
-            box-shadow: 0 0 0 3px rgba(192, 38, 211, 0.48), 0 2px 10px rgba(23, 32, 47, 0.38);
-        }
-
         .case-marker.in-radius {
             transform: scale(1.12);
             transform-origin: center;
             box-shadow: 0 0 0 4px rgba(14, 165, 233, 0.44), 0 2px 10px rgba(23, 32, 47, 0.38);
         }
 
-        .case-marker.fast-track.in-radius {
-            box-shadow: 0 0 0 2px rgba(192, 38, 211, 0.48), 0 0 0 6px rgba(14, 165, 233, 0.36), 0 2px 10px rgba(23, 32, 47, 0.38);
-        }
-
         .case-marker.is-center {
             transform: scale(1.32);
             transform-origin: center;
             box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.5), 0 0 0 8px rgba(125, 211, 252, 0.42), 0 4px 14px rgba(23, 32, 47, 0.42);
-        }
-
-        .case-marker.fast-track.is-center {
-            box-shadow: 0 0 0 2px rgba(192, 38, 211, 0.52), 0 0 0 6px rgba(37, 99, 235, 0.5), 0 0 0 10px rgba(125, 211, 252, 0.38), 0 4px 14px rgba(23, 32, 47, 0.42);
         }
 
         .popup {
@@ -490,7 +478,7 @@
         <header class="topbar">
             <div class="brand">
                 <h1>OMS Location Map</h1>
-                <p>Customer locations, outage cases, and fast-track visibility</p>
+                <p>Customer locations and outage case visibility</p>
             </div>
             <div class="top-actions">
                 <a class="link-button" href="{{ ops_webhook_url }}">Webhook Console</a>
@@ -519,7 +507,6 @@
                 <select id="caseTypeSelect" name="case_type">
                     <option value="all">All types</option>
                     <option value="normal">Normal</option>
-                    <option value="fast_track">Fast-track</option>
                     <option value="mass_outage">Mass outage</option>
                 </select>
             </div>
@@ -553,7 +540,6 @@
                     <div class="metric"><span>Locations</span><strong id="metricLocations">0</strong></div>
                     <div class="metric"><span>Cases</span><strong id="metricCases">0</strong></div>
                     <div class="metric"><span>Active</span><strong id="metricActive">0</strong></div>
-                    <div class="metric"><span>Fast-track</span><strong id="metricFast">0</strong></div>
                 </section>
                 <section class="legend">
                     <h2>Legend</h2>
@@ -563,7 +549,6 @@
                         <div class="legend-item"><span class="dot" style="--dot-color:#2563eb"></span>Repairing</div>
                         <div class="legend-item"><span class="dot" style="--dot-color:#16a34a"></span>Restored</div>
                         <div class="legend-item"><span class="dot" style="--dot-color:#94a3b8"></span>No case</div>
-                        <div class="legend-item"><span class="dot fast-dot" style="--dot-color:#2563eb"></span>Fast-track</div>
                     </div>
                 </section>
                 <section class="radius-selection" aria-label="Radius selection">
@@ -602,8 +587,7 @@
         const metrics = {
             locations: document.getElementById("metricLocations"),
             cases: document.getElementById("metricCases"),
-            active: document.getElementById("metricActive"),
-            fast: document.getElementById("metricFast")
+            active: document.getElementById("metricActive")
         };
         const DEFAULT_RADIUS_KM = Number.parseFloat("{{ case_link_radius_km|default:'0.5' }}") || 0.5;
         let markerRegistry = [];
@@ -645,12 +629,11 @@
         }
 
         function markerIcon(marker, state = {}) {
-            const fastClass = marker.marker.is_fast_track ? " fast-track" : "";
             const radiusClass = state.inRadius ? " in-radius" : "";
             const centerClass = state.isCenter ? " is-center" : "";
             return L.divIcon({
                 className: "",
-                html: `<span class="case-marker${fastClass}${radiusClass}${centerClass}" style="--marker-color:${marker.marker.color}"></span>`,
+                html: `<span class="case-marker${radiusClass}${centerClass}" style="--marker-color:${marker.marker.color}"></span>`,
                 iconSize: [18, 18],
                 iconAnchor: [9, 9],
                 popupAnchor: [0, -9]
@@ -689,7 +672,6 @@
             metrics.locations.textContent = summary.total_locations ?? 0;
             metrics.cases.textContent = summary.cases ?? 0;
             metrics.active.textContent = summary.active_cases ?? 0;
-            metrics.fast.textContent = summary.fast_track_cases ?? 0;
         }
 
         function caseLine(marker) {

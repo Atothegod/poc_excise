@@ -1,7 +1,7 @@
 from celery import shared_task
 from django.utils import timezone
 from datetime import timedelta
-from .case_logic import CASE_TYPE_FAST_TRACK, INACTIVE_CASE_STATUSES
+from .case_logic import INACTIVE_CASE_STATUSES
 from .models import OutageCase, CustomerReport
 from .services import get_pea_assessment
 import requests
@@ -32,10 +32,6 @@ def _sla_case_start_time(case):
         value for value in [case.sla_reference_time, case.created_at] if value
     ]
     return min(case_start_times) if case_start_times else None
-
-
-def _sla_case_start_reason(case):
-    return "fast_track" if case.case_type == CASE_TYPE_FAST_TRACK else "case_created"
 
 
 def _ensure_sla(case, reference_time=None, reason="case_created"):
@@ -187,13 +183,12 @@ def check_etr_timeout(case_id):
         case = _ensure_sla(
             case,
             reference_time=_sla_case_start_time(case),
-            reason=_sla_case_start_reason(case),
+            reason="case_created",
         )
 
         sla_label = _format_time_label(case.sla_target_time)
         message = (
-            "เวลาไฟกลับที่ประเมินไว้เลยกำหนดแล้วค่ะ "
-            f"กฟภ.จะเร่งดำเนินการให้ไม่เกิน {sla_label} ค่ะ"
+            f"ขออัปเดตค่ะ การจ่ายไฟจะไม่เกินเวลา {sla_label} ค่ะ"
         )
         sent_session_ids = _notify_active_case_sessions(
             case, message, "etr_timeout_sla"

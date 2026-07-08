@@ -41,35 +41,6 @@ def format_time_only(value):
     return target_time.astimezone(ZoneInfo("Asia/Bangkok")).strftime("%H:%M น.")
 
 
-def format_remaining_label(target_time):
-    if not target_time:
-        return None
-
-    remaining_seconds = (target_time - current_authoritative_time()).total_seconds()
-    if remaining_seconds <= 0:
-        return None
-
-    total_minutes = max(1, ceil(remaining_seconds / 60))
-    hours, minutes = divmod(total_minutes, 60)
-    if hours and minutes:
-        return f"{hours} ชั่วโมง {minutes} นาที"
-    if hours:
-        return f"{hours} ชั่วโมง"
-    return f"{minutes} นาที"
-
-
-def format_sla_status(value):
-    target_time = parse_iso_datetime(value)
-    if not target_time:
-        return None
-
-    target_label = format_time_only(value)
-    remaining_label = format_remaining_label(target_time)
-    if remaining_label:
-        return f"เหลือเวลาเร่งดำเนินการประมาณ {remaining_label} หรือไม่เกิน {target_label}"
-    return f"กรอบเวลาเร่งดำเนินการเดิมคือ {target_label} ซึ่งเลยกำหนดแล้ว ให้แจ้งว่าระบบกำลังเร่งติดตามระดับสูงสุด"
-
-
 def format_eta_label(eta, eta_formatted=None):
     eta_label = format_time_only(eta)
     if eta_label:
@@ -226,6 +197,12 @@ def _format_mass_outage_label(etr_label=None):
     return "ขณะนี้เกิดเหตุไฟดับวงกว้างในพื้นที่ค่ะ ระบบกำลังประเมินเวลาไฟกลับล่าสุดค่ะ"
 
 
+def _format_branch_label(fastest_branch):
+    if not fastest_branch:
+        return None
+    return f"สาขาที่ประเมินว่าไปถึงเร็วที่สุดคือ {fastest_branch}"
+
+
 def Check_Outage_Tool(ca_number: str, pdpa_consent: bool = False):
     login_ca_number = current_login_ca_number.get()
     if login_ca_number and is_valid_ca_number(login_ca_number):
@@ -266,16 +243,22 @@ def Check_Outage_Tool(ca_number: str, pdpa_consent: bool = False):
 
     if event_type == "etr_timeout_sla":
         if sla_label:
-            return f"[กำหนดเวลาเร่งดำเนินการ] เวลาไฟกลับที่ประเมินไว้เลยกำหนดแล้ว แจ้งว่าจะเร่งดำเนินการให้ไม่เกิน {sla_label}"
-        return "[กำหนดเวลาเร่งดำเนินการ] เวลาไฟกลับที่ประเมินไว้เลยกำหนดแล้ว แจ้งว่าระบบกำลังเร่งดำเนินการ"
+            return f"[อัปเดตการจ่ายไฟ] แจ้งว่า ขออัปเดตค่ะ การจ่ายไฟจะไม่เกินเวลา {sla_label} ค่ะ"
+        return "[อัปเดตการจ่ายไฟ] แจ้งว่า ขออัปเดตค่ะ ระบบกำลังเร่งดำเนินการจ่ายไฟคืนค่ะ"
 
     # เคส 2: เกิดเหตุวงกว้าง (Mass Outage) -> บังคับแจ้ง ETR ตาม Rule 6
     if event_type == "existing_ca_case":
         eta_label = format_eta_label(eta, db_response.get("eta_formatted")) or eta
-        if etr_label:
-            return f"[เคสเดิมของ CA] แจ้ง {etr_label}"
+        branch_label = _format_branch_label(fastest_branch)
         if eta_label:
-            return f"[เคสเดิมของ CA] แจ้งเวลาช่างถึงหน้างานเดิมประมาณ {eta_label}"
+            eta_detail = f"ช่างจะถึงหน้างานประมาณ {eta_label}"
+            if branch_label:
+                eta_detail = f"{branch_label} และ{eta_detail}"
+            if etr_label:
+                eta_detail = f"{eta_detail} และ{etr_label}"
+            return f"[เคสเดิมของ CA] แจ้งว่า {eta_detail}"
+        if etr_label:
+            return f"[เคสเดิมของ CA] แจ้งว่า {etr_label}"
         return "[เคสเดิมของ CA] ระบบพบเคสที่เปิดอยู่แล้ว แต่ยังไม่มีเวลาประเมินล่าสุด"
 
     if event_type in {"mass_outage", "repeated_event"}:
@@ -285,63 +268,17 @@ def Check_Outage_Tool(ca_number: str, pdpa_consent: bool = False):
     # และตรวจสอบ ETR เพิ่มเติม
     elif event_type == "new_event":
         eta_label = format_eta_label(eta, db_response.get("eta_formatted")) or eta
-        branch_label = f" สาขาที่ประเมินว่าไปถึงเร็วที่สุดคือ {fastest_branch}" if fastest_branch else ""
+        branch_label = _format_branch_label(fastest_branch)
+        details = []
+        if branch_label:
+            details.append(branch_label)
+        if eta_label:
+            details.append(f"ช่างจะถึงหน้างานประมาณ {eta_label}")
         if etr_label:
-            return (
-                f"[เหตุแจ้งใหม่] เปิดใบงานแล้ว{branch_label} "
-                f"แจ้งว่าช่างจะถึงหน้างานประมาณ {eta_label} และ {etr_label}"
-            )
-        else:
-            return (
-                f"[เหตุแจ้งใหม่] เปิดใบงานแล้ว{branch_label} "
-                f"แจ้งว่าช่างจะถึงหน้างานประมาณ {eta_label}"
-            )
+            details.append(etr_label)
+        detail_text = " และ".join(details)
+        if not detail_text:
+            detail_text = "ระบบกำลังประเมินเวลาช่างเข้าหน้างานล่าสุด"
+        return f"[เหตุแจ้งใหม่] เปิดใบงานแล้ว แจ้งว่า {detail_text}"
 
     return "ขัดข้อง ไม่สามารถระบุประเภทเหตุการณ์ได้ค่ะ"
-
-
-def Fast_Track_Tool(ca_number: str):
-    """
-    เครื่องมือสำหรับเปิดเคสเร่งด่วนเมื่อลูกค้ายังไม่มีไฟหลังระบบปิดเคสแล้ว
-    """
-    login_ca_number = current_login_ca_number.get()
-    if login_ca_number and is_valid_ca_number(login_ca_number):
-        ca_number = login_ca_number
-    else:
-        ca_number = str(ca_number).strip()
-    if not is_valid_ca_number(ca_number):
-        return "[CA_INVALID] หมายเลขผู้ใช้ไฟต้องเป็นตัวเลข 12 หลักเท่านั้น ห้ามมีตัวอักษรหรืออักขระอื่นปน"
-
-    endpoint = f"{DJANGO_API_URL}/reports/fast-track/"
-    payload = {"ca_number": ca_number, "session_id": current_session_id.get()}
-
-    try:
-        response = requests.post(endpoint, json=payload, timeout=5)
-        response.raise_for_status()
-        data = response.json()
-
-        remember_latest_outage(
-            {
-                "event_type": data.get("event_type"),
-                "ca_number": ca_number,
-                "case_id": data.get("case_id"),
-                "lv_group_id": data.get("lv_group_id"),
-                "sla_target_time": data.get("sla_target_time"),
-                "sla_reference_time": data.get("sla_reference_time"),
-                "sla_reason": data.get("sla_reason"),
-            },
-            ca_number=ca_number,
-        )
-
-        sla_status = format_sla_status(data.get("sla_target_time"))
-        action_label = (
-            "รับเรื่องไว้ในเคสเร่งด่วนเดิมแล้ว"
-            if data.get("event_type") == "fast_track_existing"
-            else "เปิดเคสเร่งด่วนแล้ว"
-        )
-        if sla_status:
-            return f"[Success] {action_label} แจ้งว่า{sla_status}"
-        return f"[Success] {action_label} แจ้งว่าจะเร่งดำเนินการ"
-
-    except Exception as e:
-        return "[FallBack] ระบบขัดข้อง ให้ตอบว่ากำลังโอนสายให้เจ้าหน้าที่ (Force Fallback)"
