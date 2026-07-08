@@ -126,3 +126,4 @@ CELERY_TASK_SERIALIZER = "json"
 
 DSPY_AGENT_PUBLIC_URL = os.getenv("DSPY_AGENT_PUBLIC_URL", "")
 DSPY_AGENT_INTERNAL_URL = os.getenv("DSPY_AGENT_INTERNAL_URL", "http://dspy-agent:8000")
+OMS_API_URL = os.getenv("OMS_API_URL", "http://oms:8000")

@@ -123,13 +123,10 @@ def _ensure_pluem_etr(case, report_id=None):
     if report_id:
         report = CustomerReport.objects.filter(id=report_id).first()
 
-    payload = {
-        "lat": case.latitude,
-        "lon": case.longitude,
-    }
-    if report and report.ca_number:
-        payload["ca_number"] = report.ca_number
+    if not report or not report.ca_number:
+        return case
 
+    payload = {"ca_number": report.ca_number}
     assessment = get_pea_assessment(payload)
     etr_minutes = _parse_float(assessment.get("estimated_etr_minutes"))
     if assessment.get("error") or etr_minutes is None:

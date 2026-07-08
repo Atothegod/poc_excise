@@ -53,8 +53,8 @@ class OutageCase(models.Model):
         blank=True,
         help_text="Snapshot รายการ CA ที่ผูกกับเคสนี้",
     )
-    latitude = models.FloatField()
-    longitude = models.FloatField()
+    latitude = models.FloatField(null=True, blank=True)
+    longitude = models.FloatField(null=True, blank=True)
     merged_into = models.ForeignKey(
         "self",
         on_delete=models.SET_NULL,
@@ -162,7 +162,8 @@ class OutageCase(models.Model):
         if not self.pk:
             return []
 
-        ca_numbers = (
+        ca_numbers = set(self.affected_ca_numbers or [])
+        ca_numbers.update(
             self.affected_customers.exclude(ca_number__isnull=True)
             .exclude(ca_number="")
             .values_list("ca_number", flat=True)

@@ -16,4 +16,5 @@ urlpatterns = [
         name="session_context",
     ),
     path("reports/status/", views_api.get_action_status, name="get_status"),
+    path("oms/events/", views_api.oms_event_callback, name="oms_event_callback"),
 ]
