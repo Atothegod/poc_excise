@@ -39,6 +39,23 @@ def _format_time_label(target_time):
     return timezone.localtime(target_time).strftime("%H:%M น.")
 
 
+def _closed_loop_recipient_reports(case):
+    case_ids = [case.pk]
+    if case.pk:
+        case_ids.extend(
+            OutageCase.objects.filter(merged_into=case).values_list("pk", flat=True)
+        )
+
+    return (
+        CustomerReport.objects.filter(
+            related_case_id__in=case_ids,
+            is_resolved=False,
+        )
+        .select_related("related_case")
+        .order_by("created_at", "id")
+    )
+
+
 @receiver(pre_save, sender=OutageCase)
 def track_eta_changes(sender, instance, **kwargs):
     """
@@ -158,10 +175,8 @@ def process_outage_case_updates(sender, instance, created, **kwargs):
             celery_eta_task_id=None, celery_etr_task_id=None
         )
 
-        # 2. ค้นหาลูกค้าทุกคนในเคสนี้
-        affected_customers = CustomerReport.objects.filter(
-            related_case=instance, is_resolved=False
-        )
+        # 2. ค้นหาลูกค้าทุกคนในเคสนี้ รวมเคสย่อยที่เคยถูก merge เข้า anchor
+        affected_customers = _closed_loop_recipient_reports(instance)
         sent_session_ids = set()
 
         for report in affected_customers:

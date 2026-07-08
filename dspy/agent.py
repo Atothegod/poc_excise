@@ -64,6 +64,10 @@ class MemoryAgent:
                         "content": message,
                         "timestamp": item.get("timestamp"),
                         "event_type": item.get("event_type"),
+                        "ca_number": item.get("ca_number"),
+                        "report_id": item.get("report_id"),
+                        "case_id": item.get("case_id"),
+                        "notification_key": item.get("notification_key"),
                     }
                 )
             if restored_history:
@@ -306,8 +310,27 @@ class MemoryAgent:
             return response
 
         answer = str(getattr(response, "answer", response) or "").strip()
-        if not answer or branch in answer:
+        if not answer:
             return response
+
+        legacy_branch_prefix = "สาขาที่ประเมินว่าไปถึงเร็วที่สุด" + "คือ"
+        legacy_branch_sentence = f"{legacy_branch_prefix} {branch}"
+        if legacy_branch_sentence in answer:
+            answer = answer.replace(
+                legacy_branch_sentence,
+                f"{branch} รับเรื่องแล้วค่ะ",
+            )
+            answer = answer.replace("ค่ะค่ะ", "ค่ะ")
+        elif legacy_branch_prefix in answer:
+            answer = answer.replace(legacy_branch_prefix, "")
+
+        if branch in answer:
+            if "รับเรื่องแล้ว" not in answer:
+                answer = answer.replace(branch, f"{branch} รับเรื่องแล้วค่ะ", 1)
+            if hasattr(response, "answer"):
+                response.answer = answer
+                return response
+            return SimpleNamespace(answer=answer, current_state=None)
 
         current_state = getattr(response, "current_state", None)
         flow_step = getattr(current_state, "flow_step", None)
@@ -321,11 +344,9 @@ class MemoryAgent:
         ):
             return response
 
-        branch_sentence = f"สาขาที่ประเมินว่าไปถึงเร็วที่สุดคือ {branch}"
-        if "สาขาที่ประเมินว่าไปถึงเร็วที่สุด" in answer:
-            return response
+        branch_sentence = f"{branch} รับเรื่องแล้วค่ะ"
 
-        answer = f"{branch_sentence}ค่ะ {answer}"
+        answer = f"{branch_sentence} {answer}"
         if hasattr(response, "answer"):
             response.answer = answer
             return response

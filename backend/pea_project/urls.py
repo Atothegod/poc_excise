@@ -19,6 +19,16 @@ urlpatterns = [
         views.agent_notifications_proxy,
         name="agent_notifications_proxy",
     ),
+    path(
+        "agent/notifications/<str:session_id>/ack/",
+        views.agent_notifications_ack_proxy,
+        name="agent_notifications_ack_proxy",
+    ),
+    path(
+        "agent/notifications/<str:session_id>/latest-closed-loop/",
+        views.agent_latest_closed_loop_proxy,
+        name="agent_latest_closed_loop_proxy",
+    ),
     path("admin/", admin.site.urls),
     path("api/", include("oms.router")),
 ]

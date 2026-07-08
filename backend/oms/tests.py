@@ -26,7 +26,7 @@ from .case_logic import (
     STATUS_MERGED,
 )
 from .models import CustomerLocation, CustomerReport, OutageCase, OutageRestorationLog
-from .tasks import check_eta_timeout, check_etr_timeout
+from .tasks import check_eta_timeout, check_etr_timeout, send_proactive_alert
 from .views_api import calculate_distance
 
 
@@ -457,6 +457,74 @@ class SyncAgentReportTests(TestCase):
             self.assertIn("คาดว่าจะจ่ายไฟคืนประมาณ", call.kwargs["message"])
         self.assertEqual(mock_revoke.call_count, 2)
 
+    @patch("oms.signals.celery_app.control.revoke")
+    @patch("oms.views_api.send_proactive_alert.delay")
+    @patch("oms.views_api.get_pea_assessment")
+    @patch("oms.views_api.check_eta_timeout.apply_async")
+    def test_restored_re_report_mass_outage_sends_closed_loop_to_all_sessions(
+        self, mock_apply_async, mock_assessment, mock_send_alert, _mock_revoke
+    ):
+        mock_apply_async.return_value.id = "eta-task-id"
+        mock_assessment.return_value = self._assessment_payload()
+        ca_numbers = ["123456789012", "123456789013", "123456789014"]
+        sessions = ["session-a", "session-b", "session-c"]
+        for ca_number, latitude in zip(ca_numbers, [14.0000, 14.0020, 14.0030]):
+            CustomerLocation.objects.create(
+                ca_number=ca_number,
+                fullname=f"Mass restore CA {ca_number}",
+                latitude=latitude,
+                longitude=100.0000,
+            )
+
+        original_case = OutageCase.objects.create(
+            title="Original restored A case",
+            status="restored",
+            latitude=14.0000,
+            longitude=100.0000,
+        )
+        original_report = CustomerReport.objects.create(
+            session_id=sessions[0],
+            ca_number=ca_numbers[0],
+            related_case=original_case,
+            is_resolved=True,
+        )
+
+        first_response = self._post_sync(sessions[0], ca_numbers[0])
+        self._post_sync(sessions[1], ca_numbers[1])
+        third_response = self._post_sync(sessions[2], ca_numbers[2])
+
+        self.assertEqual(first_response.data["event_type"], "new_event")
+        self.assertEqual(third_response.data["event_type"], "mass_outage")
+        anchor = OutageCase.objects.get(case_id=first_response.data["case_id"])
+        self.assertEqual(anchor.case_type, CASE_TYPE_MASS_OUTAGE)
+        self.assertNotEqual(anchor.case_id, original_case.case_id)
+
+        mock_send_alert.reset_mock()
+        anchor.status = "restored"
+        anchor.save(update_fields=["status"])
+
+        self.assertEqual(mock_send_alert.call_count, 3)
+        alerted_reports = [
+            CustomerReport.objects.get(id=call.kwargs["report_id"])
+            for call in mock_send_alert.call_args_list
+        ]
+        self.assertEqual({report.session_id for report in alerted_reports}, set(sessions))
+        self.assertNotIn(
+            original_report.id,
+            {report.id for report in alerted_reports},
+        )
+        self.assertEqual(
+            {call.kwargs["event_type"] for call in mock_send_alert.call_args_list},
+            {"closed_loop_prompt"},
+        )
+        self.assertFalse(
+            CustomerReport.objects.filter(
+                session_id__in=sessions,
+                related_case=anchor,
+                is_resolved=False,
+            ).exists()
+        )
+
     @patch("oms.views_api.get_pea_assessment")
     def test_new_ca_inside_existing_mass_outage_links_to_anchor(self, mock_assessment):
         CustomerLocation.objects.create(
@@ -783,6 +851,71 @@ class SyncAgentReportTests(TestCase):
             args=[case.case_id, response.data["report_id"]],
             eta=case.eta_target_time,
         )
+
+    @patch("oms.signals.send_proactive_alert.delay")
+    @patch("oms.views_api.get_pea_assessment")
+    @patch("oms.views_api.check_eta_timeout.apply_async")
+    def test_repeated_restored_cases_send_new_closed_loop_prompt_for_same_session(
+        self, mock_apply_async, mock_assessment, mock_send_alert
+    ):
+        mock_apply_async.return_value.id = "repeated-restored-eta-task-id"
+        mock_assessment.return_value = self._assessment_payload(eta_minutes=12)
+        session_id = "session-repeated-restored"
+        ca_number = "123456789012"
+        CustomerLocation.objects.create(
+            ca_number=ca_number,
+            fullname="Repeated Restored User",
+            latitude=9.2917,
+            longitude=100.926296,
+        )
+        current_case = OutageCase.objects.create(
+            title="Initial repeated restored case",
+            latitude=9.2917,
+            longitude=100.926296,
+        )
+        CustomerReport.objects.create(
+            session_id=session_id,
+            ca_number=ca_number,
+            latitude=9.2917,
+            longitude=100.926296,
+            related_case=current_case,
+        )
+
+        cycles = 4
+        seen_case_ids = {current_case.case_id}
+        seen_report_ids = set()
+        message = None
+
+        for cycle_index in range(cycles):
+            current_case.status = "restored"
+            current_case.save(update_fields=["status"])
+
+            call = mock_send_alert.call_args_list[-1]
+            self.assertEqual(call.kwargs["event_type"], "closed_loop_prompt")
+            if message is None:
+                message = call.kwargs["message"]
+            self.assertEqual(call.kwargs["message"], message)
+            self.assertNotIn(call.kwargs["report_id"], seen_report_ids)
+            seen_report_ids.add(call.kwargs["report_id"])
+
+            report = CustomerReport.objects.get(id=call.kwargs["report_id"])
+            self.assertTrue(report.is_resolved)
+            self.assertEqual(report.session_id, session_id)
+            self.assertEqual(report.related_case_id, current_case.case_id)
+
+            if cycle_index == cycles - 1:
+                continue
+
+            response = self._post_sync(session_id, ca_number)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.data["event_type"], "new_event")
+            current_case = OutageCase.objects.get(case_id=response.data["case_id"])
+            self.assertNotIn(current_case.case_id, seen_case_ids)
+            seen_case_ids.add(current_case.case_id)
+
+        self.assertEqual(mock_send_alert.call_count, cycles)
+        self.assertEqual(len(seen_case_ids), cycles)
+        self.assertEqual(len(seen_report_ids), cycles)
 
     @patch("oms.views_api.get_pea_assessment")
     def test_sync_report_does_not_use_customer_location_eta_when_assessment_errors(
@@ -1204,6 +1337,40 @@ class CheckEtaTimeoutTests(TestCase):
         self.assertNotIn("SLA", payload["message"])
 
 
+class ProactiveAlertTaskTests(TestCase):
+    @patch("oms.tasks.requests.post")
+    def test_send_proactive_alert_includes_notification_identity(self, mock_post):
+        case = OutageCase.objects.create(
+            title="Notification identity case",
+            latitude=9.2917,
+            longitude=100.926296,
+        )
+        report = CustomerReport.objects.create(
+            session_id="session-notification-identity",
+            ca_number="123456789012",
+            related_case=case,
+        )
+        message = "ระบบแจ้งว่าจ่ายไฟคืนแล้วค่ะ กรุณาเลือกสถานะไฟฟ้าด้านล่างค่ะ"
+
+        send_proactive_alert(report.id, message, "closed_loop_prompt")
+
+        mock_post.assert_called_once()
+        payload = mock_post.call_args.kwargs["json"]
+        self.assertEqual(payload["session_id"], report.session_id)
+        self.assertEqual(payload["ca_number"], report.ca_number)
+        self.assertEqual(payload["message"], message)
+        self.assertEqual(payload["event_type"], "closed_loop_prompt")
+        self.assertEqual(payload["report_id"], report.id)
+        self.assertEqual(payload["case_id"], str(case.case_id))
+        self.assertEqual(
+            payload["notification_key"],
+            (
+                f"closed_loop_prompt|123456789012|{report.id}|"
+                f"{case.case_id}|{message}"
+            ),
+        )
+
+
 class OutageCaseSignalTests(TestCase):
     @patch("oms.signals.check_etr_timeout.apply_async")
     @patch("oms.signals.send_proactive_alert.delay")
@@ -1394,6 +1561,51 @@ class OutageCaseSignalTests(TestCase):
             "closed_loop_prompt",
         )
 
+    @patch("oms.signals.send_proactive_alert.delay")
+    def test_restored_mass_outage_includes_reports_on_merged_children(
+        self, mock_send_alert
+    ):
+        anchor = OutageCase.objects.create(
+            title="Mass outage anchor",
+            case_type=CASE_TYPE_MASS_OUTAGE,
+            latitude=9.2917,
+            longitude=100.926296,
+        )
+        merged_child = OutageCase.objects.create(
+            title="Merged child with stale report",
+            status=STATUS_MERGED,
+            merged_into=anchor,
+            merged_at=timezone.now(),
+            latitude=9.2918,
+            longitude=100.926396,
+        )
+        anchor_report = CustomerReport.objects.create(
+            session_id="session-anchor",
+            ca_number="123456789012",
+            related_case=anchor,
+        )
+        child_report = CustomerReport.objects.create(
+            session_id="session-child",
+            ca_number="123456789013",
+            related_case=merged_child,
+        )
+
+        anchor.status = "restored"
+        anchor.save(update_fields=["status"])
+
+        self.assertEqual(mock_send_alert.call_count, 2)
+        self.assertEqual(
+            {
+                CustomerReport.objects.get(id=call.kwargs["report_id"]).session_id
+                for call in mock_send_alert.call_args_list
+            },
+            {"session-anchor", "session-child"},
+        )
+        anchor_report.refresh_from_db()
+        child_report.refresh_from_db()
+        self.assertTrue(anchor_report.is_resolved)
+        self.assertTrue(child_report.is_resolved)
+
 
 class OpsWebhookConsoleTests(TestCase):
     def setUp(self):
@@ -1415,6 +1627,18 @@ class OpsWebhookConsoleTests(TestCase):
         self.assertContains(response, "ยังไม่มีไฟ / แจ้งเหตุใหม่")
         self.assertContains(response, "closed_loop_prompt")
         content = response.content.decode()
+        self.assertIn(
+            "notificationKey(eventType, caNumber, message, reportId, caseId, explicitKey)",
+            content,
+        )
+        self.assertIn("notification.report_id", content)
+        self.assertIn("notification.case_id", content)
+        self.assertIn("notification.notification_key", content)
+        self.assertIn('notificationUrl("/ack")', content)
+        self.assertIn('notificationUrl("/latest-closed-loop")', content)
+        self.assertIn("acknowledgeNotification(key)", content)
+        self.assertIn("recoverLatestClosedLoopPrompt", content)
+        self.assertIn("if (document.hidden) return;", content)
         self.assertNotIn("<select", content)
         self.assertNotIn("ระบบ OMS", content)
         self.assertNotIn("เปิดเคสเร่งด่วน", content)
@@ -1691,6 +1915,51 @@ class OpsWebhookConsoleTests(TestCase):
             STATUS_MERGED,
         )
 
+    def test_ops_cases_payload_marks_merged_target_and_action_skips_child(self):
+        anchor_case = OutageCase.objects.create(
+            title="Ops merged anchor",
+            case_type=CASE_TYPE_MASS_OUTAGE,
+            latitude=13.7563,
+            longitude=100.5018,
+        )
+        merged_case = OutageCase.objects.create(
+            title="Ops merged child",
+            status=STATUS_MERGED,
+            merged_into=anchor_case,
+            merged_at=timezone.now(),
+            latitude=13.7564,
+            longitude=100.5019,
+        )
+
+        response = self.client.get(
+            "/ops/cases/",
+            {"include_restored": "true", "status": "merged"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        cases = response.json()["cases"]
+        self.assertEqual(len(cases), 1)
+        self.assertEqual(cases[0]["case_id"], str(merged_case.case_id))
+        self.assertEqual(cases[0]["merged_into_case_id"], str(anchor_case.case_id))
+        self.assertEqual(cases[0]["merged_into_lv_group_id"], anchor_case.lv_group_id)
+        self.assertIsNotNone(cases[0]["merged_at"])
+
+        action_response = self.client.post(
+            "/ops/cases/action/",
+            {
+                "action": "restore",
+                "target_mode": "selected",
+                "case_ids": [str(merged_case.case_id)],
+            },
+            format="json",
+        )
+
+        self.assertEqual(action_response.status_code, 200)
+        self.assertEqual(action_response.json()["updated_count"], 0)
+        self.assertEqual(action_response.json()["skipped_count"], 1)
+        merged_case.refresh_from_db()
+        self.assertEqual(merged_case.status, STATUS_MERGED)
+
     def test_ops_cases_export_csv_uses_current_filters(self):
         matching_case = OutageCase.objects.create(
             title="Matching CSV case",
@@ -1731,7 +2000,8 @@ class OpsWebhookConsoleTests(TestCase):
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[1][1], str(matching_case.case_id))
         self.assertEqual(rows[1][2], "Matching CSV case")
-        self.assertIn("123456789012", rows[1][6])
+        affected_ca_index = rows[0].index("Affected CA")
+        self.assertIn("123456789012", rows[1][affected_ca_index])
 
     @patch("oms.signals.check_etr_timeout.apply_async")
     @patch("oms.signals.send_proactive_alert.delay")
@@ -1887,6 +2157,51 @@ class CsvExportAdminTests(TestCase):
 
         self.assertIn("เหลือ", str(model_admin.countdown_sla(future_case)))
         self.assertIn("เลย SLA", str(model_admin.countdown_sla(expired_case)))
+
+    def test_outage_admin_merged_row_only_shows_merge_target(self):
+        model_admin = OutageCaseAdmin(OutageCase, AdminSite())
+        anchor_case = OutageCase.objects.create(
+            title="Admin merged anchor",
+            case_type=CASE_TYPE_MASS_OUTAGE,
+            latitude=9.2917,
+            longitude=100.926296,
+        )
+        merged_case = OutageCase.objects.create(
+            title="Admin merged child",
+            status=STATUS_MERGED,
+            merged_into=anchor_case,
+            merged_at=timezone.now(),
+            affected_ca_numbers=["123456789012"],
+            eta_target_time=timezone.now() + timedelta(minutes=20),
+            oms_etr=timezone.now() + timedelta(hours=1),
+            sla_target_time=timezone.now() + timedelta(hours=2),
+            assessment_fastest_branch="การไฟฟ้าส่วนภูมิภาค สาขา รังสิต",
+            assessment_eta_formatted="~ 20 min",
+            pluem_etr_minutes=60,
+            latitude=9.2918,
+            longitude=100.926396,
+        )
+
+        merged_target = str(model_admin.merged_into_display(merged_case))
+        self.assertIn(f"LV {anchor_case.lv_group_id}", merged_target)
+        self.assertIn(str(anchor_case.case_id)[:8], merged_target)
+        self.assertEqual(model_admin.status_display(merged_case), "ถูกรวมเข้าเคสอื่น")
+
+        blank_columns = [
+            model_admin.lv_group(merged_case),
+            model_admin.case_id_display(merged_case),
+            model_admin.case_type_display(merged_case),
+            model_admin.affected_CA(merged_case),
+            model_admin.countdown_eta(merged_case),
+            model_admin.countdown_etr(merged_case),
+            model_admin.countdown_sla(merged_case),
+            model_admin.fastest_branch_display(merged_case),
+            model_admin.eta_formatted_display(merged_case),
+            model_admin.pluem_etr_minutes_display(merged_case),
+            model_admin.created_at_display(merged_case),
+        ]
+        for rendered in blank_columns:
+            self.assertIn("&mdash;", str(rendered))
 
     def test_admin_export_selected_csv_returns_model_rows(self):
         location = CustomerLocation.objects.create(

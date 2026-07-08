@@ -1,6 +1,8 @@
 from django.contrib import admin
+from django.urls import reverse
 from django.utils import timezone
 from django.utils.html import format_html, format_html_join
+from .case_logic import STATUS_MERGED
 from .csv_exports import csv_response, write_csv
 from .models import CustomerLocation, OutageCase, CustomerReport, OutageRestorationLog
 
@@ -26,18 +28,19 @@ class CsvExportAdminMixin:
 class OutageCaseAdmin(CsvExportAdminMixin, admin.ModelAdmin):
     # นำ countdown_eta และ countdown_etr มาแสดงคู่กันในหน้าตาราง
     list_display = (
-        "lv_group_id",
-        "case_id",
-        "case_type",
-        "status",
+        "lv_group",
+        "case_id_display",
+        "case_type_display",
+        "status_display",
+        "merged_into_display",
         "affected_CA",
         "countdown_eta",
         "countdown_etr",
         "countdown_sla",
-        "assessment_fastest_branch",
-        "assessment_eta_formatted",
-        "pluem_etr_minutes",
-        "created_at",
+        "fastest_branch_display",
+        "eta_formatted_display",
+        "pluem_etr_minutes_display",
+        "created_at_display",
     )
     list_filter = ("status", "case_type", "lv_group_id")
     search_fields = ("case_id", "title", "affected_customers__ca_number")
@@ -70,7 +73,68 @@ class OutageCaseAdmin(CsvExportAdminMixin, admin.ModelAdmin):
         "updated_at",
     )
 
+    def _is_merged(self, obj):
+        return obj.status == STATUS_MERGED
+
+    def _muted_dash(self):
+        return format_html('<span style="color: #9ca3af;">&mdash;</span>')
+
+    def lv_group(self, obj):
+        if self._is_merged(obj):
+            return self._muted_dash()
+        return obj.lv_group_id or self._muted_dash()
+
+    lv_group.short_description = "LV"
+    lv_group.admin_order_field = "lv_group_id"
+
+    def case_id_display(self, obj):
+        if self._is_merged(obj):
+            return self._muted_dash()
+        return obj.case_id
+
+    case_id_display.short_description = "Case ID"
+    case_id_display.admin_order_field = "case_id"
+
+    def case_type_display(self, obj):
+        if self._is_merged(obj):
+            return self._muted_dash()
+        return obj.get_case_type_display()
+
+    case_type_display.short_description = "Case Type"
+    case_type_display.admin_order_field = "case_type"
+
+    def status_display(self, obj):
+        return obj.get_status_display()
+
+    status_display.short_description = "Status"
+    status_display.admin_order_field = "status"
+
+    def merged_into_display(self, obj):
+        if not self._is_merged(obj):
+            return self._muted_dash()
+        if not obj.merged_into_id or not obj.merged_into:
+            return format_html(
+                '<span style="color: #b45309; font-weight: 600;">ไม่พบ anchor</span>'
+            )
+
+        url = reverse("admin:oms_outagecase_change", args=[obj.merged_into_id])
+        anchor_label = f"LV {obj.merged_into.lv_group_id or '-'}"
+        short_case_id = str(obj.merged_into.case_id)[:8]
+        return format_html(
+            '<a href="{}" style="font-weight: 700;">{}</a>'
+            '<div style="color: #6b7280; font-size: 12px;">{}</div>',
+            url,
+            anchor_label,
+            short_case_id,
+        )
+
+    merged_into_display.short_description = "Merged into"
+    merged_into_display.admin_order_field = "merged_into__lv_group_id"
+
     def affected_CA(self, obj):
+        if self._is_merged(obj):
+            return self._muted_dash()
+
         ca_numbers = obj.affected_ca_numbers or []
         if not ca_numbers:
             return format_html('<span style="color: gray;">ยังไม่มี CA</span>')
@@ -87,6 +151,9 @@ class OutageCaseAdmin(CsvExportAdminMixin, admin.ModelAdmin):
         คำนวณเวลาที่เหลือจาก eta_target_time แบบ Real-time
         แสดงผลเป็นสีต่างๆ ตามความเร่งด่วน
         """
+        if self._is_merged(obj):
+            return self._muted_dash()
+
         if not obj.eta_target_time:
             return format_html('<span style="color: gray;">ยังไม่กำหนด ETA</span>')
 
@@ -121,6 +188,9 @@ class OutageCaseAdmin(CsvExportAdminMixin, admin.ModelAdmin):
         คำนวณเวลาที่เหลือจาก ETR แบบ Real-time (OMS มาก่อน, ถ้าไม่มีใช้โมเดลพี่ปลื้ม)
         แสดงผลเป็นสีต่างๆ ตามความเร่งด่วน
         """
+        if self._is_merged(obj):
+            return self._muted_dash()
+
         etr_target_time = obj.effective_etr_time()
         if not etr_target_time:
             return format_html('<span style="color: gray;">ยังไม่ประเมิน ETR</span>')
@@ -157,6 +227,9 @@ class OutageCaseAdmin(CsvExportAdminMixin, admin.ModelAdmin):
     countdown_etr.short_description = "ETR Countdown"
 
     def countdown_sla(self, obj):
+        if self._is_merged(obj):
+            return self._muted_dash()
+
         if not obj.sla_target_time:
             return format_html('<span style="color: gray;">ยังไม่กำหนด SLA</span>')
 
@@ -181,6 +254,38 @@ class OutageCaseAdmin(CsvExportAdminMixin, admin.ModelAdmin):
         return format_html('<span style="color: green;">เหลือ {}</span>', label)
 
     countdown_sla.short_description = "SLA Countdown"
+
+    def fastest_branch_display(self, obj):
+        if self._is_merged(obj):
+            return self._muted_dash()
+        return obj.assessment_fastest_branch or self._muted_dash()
+
+    fastest_branch_display.short_description = "Fastest Branch"
+    fastest_branch_display.admin_order_field = "assessment_fastest_branch"
+
+    def eta_formatted_display(self, obj):
+        if self._is_merged(obj):
+            return self._muted_dash()
+        return obj.assessment_eta_formatted or self._muted_dash()
+
+    eta_formatted_display.short_description = "Assessment ETA"
+    eta_formatted_display.admin_order_field = "assessment_eta_formatted"
+
+    def pluem_etr_minutes_display(self, obj):
+        if self._is_merged(obj):
+            return self._muted_dash()
+        return obj.pluem_etr_minutes if obj.pluem_etr_minutes is not None else self._muted_dash()
+
+    pluem_etr_minutes_display.short_description = "Pluem ETR"
+    pluem_etr_minutes_display.admin_order_field = "pluem_etr_minutes"
+
+    def created_at_display(self, obj):
+        if self._is_merged(obj):
+            return self._muted_dash()
+        return obj.created_at
+
+    created_at_display.short_description = "Created at"
+    created_at_display.admin_order_field = "created_at"
 
 
 @admin.register(CustomerLocation)

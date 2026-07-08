@@ -496,8 +496,18 @@
                 .replaceAll("'", "&#039;");
         }
 
-        function notificationKey(eventType, caNumber, message) {
-            return `${eventType || ""}|${caNumber || ""}|${message || ""}`;
+        function notificationKey(eventType, caNumber, message, reportId, caseId, explicitKey) {
+            if (explicitKey) return explicitKey;
+            const parts = reportId || caseId
+                ? [eventType, caNumber, reportId, caseId, message]
+                : [eventType, caNumber, message];
+            return parts.map((part) => part || "").join("|");
+        }
+
+        function notificationUrl(pathSuffix = "") {
+            const baseUrl = `${NOTIFICATIONS_URL}/${encodeURIComponent(currentSessionId)}`;
+            if (!pathSuffix) return baseUrl;
+            return agentBaseUrl ? `${baseUrl}${pathSuffix}` : `${baseUrl}${pathSuffix}/`;
         }
 
         function greetingMessage() {
@@ -598,7 +608,14 @@
         function appendBotMessage(text, options = {}) {
             if (options.eventType) {
                 displayedNotificationKeys.add(
-                    notificationKey(options.eventType, options.caNumber, text)
+                    notificationKey(
+                        options.eventType,
+                        options.caNumber,
+                        text,
+                        options.reportId,
+                        options.caseId,
+                        options.notificationKey
+                    )
                 );
             }
 
@@ -774,6 +791,9 @@
                         label: "ศูนย์รับแจ้งปัญหา",
                         eventType: item.event_type,
                         caNumber: item.ca_number || loggedInCaNumber,
+                        reportId: item.report_id,
+                        caseId: item.case_id,
+                        notificationKey: item.notification_key,
                         restorationSelect: item.event_type === "closed_loop_prompt"
                             && index === chatHistory.length - 1
                     });
@@ -837,28 +857,73 @@
         }
 
         async function pollNotifications() {
+            if (document.hidden) return;
+
             try {
-                const response = await fetch(`${NOTIFICATIONS_URL}/${encodeURIComponent(currentSessionId)}`);
+                const response = await fetch(notificationUrl());
                 const data = await response.json();
                 if (response.ok && Array.isArray(data.notifications)) {
                     data.notifications.forEach((notification) => {
-                        const message = notification.message || "";
-                        const key = notificationKey(
-                            notification.event_type,
-                            notification.ca_number,
-                            message
-                        );
-                        if (displayedNotificationKeys.has(key)) {
-                            return;
-                        }
-                        appendBotMessage(message, {
-                            label: "ศูนย์รับแจ้งปัญหา",
-                            eventType: notification.event_type,
-                            caNumber: notification.ca_number,
-                            restorationSelect: notification.event_type === "closed_loop_prompt"
-                        });
+                        appendNotification(notification);
                     });
                 }
+            } catch (error) {
+                console.error(error);
+            }
+        }
+
+        async function recoverLatestClosedLoopPrompt() {
+            if (document.hidden) return;
+
+            try {
+                const response = await fetch(notificationUrl("/latest-closed-loop"));
+                const data = await response.json();
+                if (response.ok && Array.isArray(data.notifications)) {
+                    data.notifications.forEach((notification) => {
+                        appendNotification(notification);
+                    });
+                }
+            } catch (error) {
+                console.error(error);
+            }
+        }
+
+        function appendNotification(notification) {
+            const message = notification.message || "";
+            const key = notificationKey(
+                notification.event_type,
+                notification.ca_number,
+                message,
+                notification.report_id,
+                notification.case_id,
+                notification.notification_key
+            );
+            if (displayedNotificationKeys.has(key)) {
+                return false;
+            }
+
+            appendBotMessage(message, {
+                label: "ศูนย์รับแจ้งปัญหา",
+                eventType: notification.event_type,
+                caNumber: notification.ca_number,
+                reportId: notification.report_id,
+                caseId: notification.case_id,
+                notificationKey: notification.notification_key,
+                restorationSelect: notification.event_type === "closed_loop_prompt"
+            });
+            acknowledgeNotification(key);
+            return true;
+        }
+
+        async function acknowledgeNotification(notificationKeyValue) {
+            if (!notificationKeyValue) return;
+
+            try {
+                await fetch(notificationUrl("/ack"), {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ notification_key: notificationKeyValue })
+                });
             } catch (error) {
                 console.error(error);
             }
@@ -920,6 +985,12 @@
         editSessionButton.addEventListener("click", beginSessionEdit);
         saveSessionButton.addEventListener("click", saveEditedSession);
         cancelSessionButton.addEventListener("click", cancelSessionEdit);
+        document.addEventListener("visibilitychange", function () {
+            if (!document.hidden) {
+                pollNotifications();
+                recoverLatestClosedLoopPrompt();
+            }
+        });
 
         sessionIdInput.addEventListener("keydown", function (event) {
             if (event.key === "Enter") {
@@ -935,7 +1006,7 @@
         applyStatePanelPreference();
         if (loginReady) {
             initChat();
-            registerCurrentSession();
+            registerCurrentSession().then(recoverLatestClosedLoopPrompt);
             setInterval(pollNotifications, 2000);
         }
     </script>

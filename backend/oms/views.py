@@ -94,6 +94,7 @@ def _isoformat(value):
 
 
 def _case_payload(case):
+    merged_into = case.merged_into
     return {
         "case_id": str(case.case_id),
         "lv_group_id": case.lv_group_id,
@@ -101,6 +102,9 @@ def _case_payload(case):
         "case_type": case.case_type,
         "status": case.status,
         "status_display": case.get_status_display(),
+        "merged_into_case_id": str(merged_into.case_id) if merged_into else None,
+        "merged_into_lv_group_id": merged_into.lv_group_id if merged_into else None,
+        "merged_at": _isoformat(case.merged_at),
         "latitude": case.latitude,
         "longitude": case.longitude,
         "affected_ca_numbers": case.affected_ca_numbers or [],
@@ -124,6 +128,9 @@ OPS_CASE_CSV_COLUMNS = (
     ("case_type", "Case Type"),
     ("status", "Status"),
     ("status_display", "Status Label"),
+    ("merged_into_case_id", "Merged Into Case ID"),
+    ("merged_into_lv_group_id", "Merged Into LV"),
+    ("merged_at", "Merged At"),
     ("affected_ca_numbers", "Affected CA"),
     ("latitude", "Latitude"),
     ("longitude", "Longitude"),
@@ -143,7 +150,7 @@ OPS_CASE_CSV_COLUMNS = (
 def _case_queryset_for_request(request):
     include_restored = request.GET.get("include_restored") == "true"
     status = (request.GET.get("status") or "").strip()
-    cases = OutageCase.objects.all().order_by("-created_at")
+    cases = OutageCase.objects.select_related("merged_into").order_by("-created_at")
     if not include_restored:
         cases = cases.exclude(status__in=INACTIVE_CASE_STATUSES)
 
@@ -497,6 +504,12 @@ def _action_case_payload(case):
         "lv_group_id": case.lv_group_id,
         "status": case.status,
         "status_display": case.get_status_display(),
+        "merged_into_case_id": (
+            str(case.merged_into_id) if case.merged_into_id else None
+        ),
+        "merged_into_lv_group_id": (
+            case.merged_into.lv_group_id if case.merged_into_id else None
+        ),
     }
 
 
@@ -594,6 +607,39 @@ def agent_notifications_proxy(request, session_id):
     try:
         response = requests.get(
             _agent_url(f"/notifications/{session_id}"),
+            timeout=10,
+        )
+        return _proxy_agent_response(response)
+    except requests.exceptions.RequestException as exc:
+        return JsonResponse(
+            {"detail": f"Cannot connect to DSPy agent: {exc}"},
+            status=502,
+        )
+
+
+@csrf_exempt
+@require_POST
+def agent_notifications_ack_proxy(request, session_id):
+    try:
+        response = requests.post(
+            _agent_url(f"/notifications/{session_id}/ack"),
+            data=request.body,
+            headers={"Content-Type": request.headers.get("Content-Type", "application/json")},
+            timeout=10,
+        )
+        return _proxy_agent_response(response)
+    except requests.exceptions.RequestException as exc:
+        return JsonResponse(
+            {"detail": f"Cannot connect to DSPy agent: {exc}"},
+            status=502,
+        )
+
+
+@require_GET
+def agent_latest_closed_loop_proxy(request, session_id):
+    try:
+        response = requests.get(
+            _agent_url(f"/notifications/{session_id}/latest-closed-loop"),
             timeout=10,
         )
         return _proxy_agent_response(response)

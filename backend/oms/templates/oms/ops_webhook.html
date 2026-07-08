@@ -165,6 +165,15 @@
             background: #f5f7fb;
         }
 
+        tbody tr.merged-row {
+            background: #f8fafc;
+            color: #667085;
+        }
+
+        tbody tr.merged-row:hover {
+            background: #eef2f7;
+        }
+
         .check-cell {
             width: 44px;
             text-align: center;
@@ -202,6 +211,15 @@
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
+        }
+
+        .merged-target {
+            color: #344054;
+            font-weight: 700;
+        }
+
+        .empty-cell {
+            color: var(--muted);
         }
 
         .side-panel {
@@ -388,6 +406,11 @@
         .status-restored {
             background: #e7f7ed;
             color: var(--green);
+        }
+
+        .status-merged {
+            background: #eef2f7;
+            color: #475467;
         }
 
         .result-box {
@@ -663,6 +686,7 @@
             selectedIds: new Set(),
             loading: false,
         };
+        const inactiveStatuses = new Set(["restored", "merged"]);
 
         const els = {
             searchInput: document.getElementById("searchInput"),
@@ -729,6 +753,24 @@
             return caNumbers.length > 3 ? `${preview}, ... (${caNumbers.length})` : preview;
         }
 
+        function isInactiveCase(caseItem) {
+            return inactiveStatuses.has(caseItem.status);
+        }
+
+        function isSelectableCase(caseItem) {
+            return !isInactiveCase(caseItem);
+        }
+
+        function mergedTargetLabel(caseItem) {
+            if (caseItem.merged_into_lv_group_id) {
+                return `Merged into LV ${caseItem.merged_into_lv_group_id}`;
+            }
+            if (caseItem.merged_into_case_id) {
+                return `Merged into ${caseItem.merged_into_case_id.slice(0, 8)}`;
+            }
+            return "Merged target missing";
+        }
+
         function setResult(payload) {
             els.resultBox.textContent = typeof payload === "string"
                 ? payload
@@ -752,6 +794,8 @@
                 caseItem.case_id,
                 caseItem.title,
                 caseItem.status_display,
+                caseItem.merged_into_lv_group_id,
+                caseItem.merged_into_case_id,
                 ...(caseItem.affected_ca_numbers || []),
             ].join(" ").toLowerCase();
             return haystack.includes(searchTerm);
@@ -763,7 +807,7 @@
 
             state.filteredCases = state.cases.filter((caseItem) => {
                 const statusMatch = status === "all"
-                    || (status === "active" && caseItem.status !== "restored")
+                    || (status === "active" && !isInactiveCase(caseItem))
                     || caseItem.status === status;
                 return statusMatch && caseMatchesSearch(caseItem, searchTerm);
             });
@@ -772,19 +816,20 @@
         function targetCases() {
             const scopeMode = getScopeMode();
             if (scopeMode === "all_active") {
-                return state.cases.filter((caseItem) => caseItem.status !== "restored");
+                return state.cases.filter(isSelectableCase);
             }
             if (scopeMode === "filtered") {
-                return state.filteredCases;
+                return state.filteredCases.filter(isSelectableCase);
             }
-            return state.cases.filter((caseItem) => state.selectedIds.has(caseItem.case_id));
+            return state.cases.filter((caseItem) => state.selectedIds.has(caseItem.case_id) && isSelectableCase(caseItem));
         }
 
         function updateSummary() {
-            const visibleIds = new Set(state.filteredCases.map((caseItem) => caseItem.case_id));
+            const selectableVisibleCases = state.filteredCases.filter(isSelectableCase);
+            const visibleIds = new Set(selectableVisibleCases.map((caseItem) => caseItem.case_id));
             const selectedVisibleCount = [...state.selectedIds].filter((caseId) => visibleIds.has(caseId)).length;
-            const allVisibleSelected = state.filteredCases.length > 0
-                && selectedVisibleCount === state.filteredCases.length;
+            const allVisibleSelected = selectableVisibleCases.length > 0
+                && selectedVisibleCount === selectableVisibleCases.length;
 
             els.visibleCount.textContent = state.filteredCases.length;
             els.selectedCount.textContent = state.selectedIds.size;
@@ -809,11 +854,37 @@
             }
 
             els.caseTableBody.innerHTML = state.filteredCases.map((caseItem) => {
-                const checked = state.selectedIds.has(caseItem.case_id) ? "checked" : "";
+                const isMerged = caseItem.status === "merged";
+                const selectable = isSelectableCase(caseItem);
+                const checked = state.selectedIds.has(caseItem.case_id) && selectable ? "checked" : "";
+                const disabled = selectable ? "" : "disabled";
+
+                if (isMerged) {
+                    return `
+                        <tr class="merged-row">
+                            <td class="check-cell">
+                                <input type="checkbox" data-case-id="${escapeHtml(caseItem.case_id)}" disabled aria-label="Merged case cannot be selected">
+                            </td>
+                            <td class="lv-cell"><span class="empty-cell">-</span></td>
+                            <td>
+                                <div class="merged-target">${escapeHtml(mergedTargetLabel(caseItem))}</div>
+                                <div class="case-id">${escapeHtml(caseItem.merged_into_case_id || "")}</div>
+                            </td>
+                            <td class="status-cell">
+                                <span class="${statusClass(caseItem.status)}">${escapeHtml(caseItem.status_display)}</span>
+                            </td>
+                            <td class="ca-cell"><span class="empty-cell">-</span></td>
+                            <td class="time-cell"><span class="empty-cell">-</span></td>
+                            <td class="time-cell"><span class="empty-cell">-</span></td>
+                            <td class="time-cell"><span class="empty-cell">-</span></td>
+                        </tr>
+                    `;
+                }
+
                 return `
                     <tr>
                         <td class="check-cell">
-                            <input type="checkbox" data-case-id="${escapeHtml(caseItem.case_id)}" ${checked} aria-label="Select case ${escapeHtml(caseItem.lv_group_id || caseItem.case_id)}">
+                            <input type="checkbox" data-case-id="${escapeHtml(caseItem.case_id)}" ${checked} ${disabled} aria-label="Select case ${escapeHtml(caseItem.lv_group_id || caseItem.case_id)}">
                         </td>
                         <td class="lv-cell">${escapeHtml(caseItem.lv_group_id || "-")}</td>
                         <td>
@@ -985,7 +1056,7 @@
             renderCases();
         });
         els.selectFilteredBtn.addEventListener("click", () => {
-            state.filteredCases.forEach((caseItem) => state.selectedIds.add(caseItem.case_id));
+            state.filteredCases.filter(isSelectableCase).forEach((caseItem) => state.selectedIds.add(caseItem.case_id));
             renderCases();
         });
         els.clearSelectedBtn.addEventListener("click", () => {
@@ -994,9 +1065,9 @@
         });
         els.selectVisibleToggle.addEventListener("change", () => {
             if (els.selectVisibleToggle.checked) {
-                state.filteredCases.forEach((caseItem) => state.selectedIds.add(caseItem.case_id));
+                state.filteredCases.filter(isSelectableCase).forEach((caseItem) => state.selectedIds.add(caseItem.case_id));
             } else {
-                state.filteredCases.forEach((caseItem) => state.selectedIds.delete(caseItem.case_id));
+                state.filteredCases.filter(isSelectableCase).forEach((caseItem) => state.selectedIds.delete(caseItem.case_id));
             }
             renderCases();
         });

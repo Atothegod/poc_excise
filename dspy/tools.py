@@ -136,6 +136,10 @@ def _normalize_dialog_history(history):
                 "message": str(message),
                 "timestamp": item.get("timestamp"),
                 "event_type": item.get("event_type"),
+                "ca_number": item.get("ca_number"),
+                "report_id": item.get("report_id"),
+                "case_id": item.get("case_id"),
+                "notification_key": item.get("notification_key"),
             }
         )
     return dialog
@@ -200,7 +204,30 @@ def _format_mass_outage_label(etr_label=None):
 def _format_branch_label(fastest_branch):
     if not fastest_branch:
         return None
-    return f"สาขาที่ประเมินว่าไปถึงเร็วที่สุดคือ {fastest_branch}"
+    return f"{fastest_branch} รับเรื่องแล้วค่ะ"
+
+
+def _format_eta_detail(eta_label):
+    if not eta_label:
+        return None
+    return f"ช่างจะถึงหน้างานประมาณ {eta_label}"
+
+
+def _join_branch_eta_etr(branch_label=None, eta_label=None, etr_label=None):
+    eta_detail = _format_eta_detail(eta_label)
+    details = []
+
+    if branch_label and eta_detail:
+        details.append(f"{branch_label} {eta_detail}")
+    elif branch_label:
+        details.append(branch_label)
+    elif eta_detail:
+        details.append(eta_detail)
+
+    if etr_label:
+        details.append(etr_label)
+
+    return " และ".join(details)
 
 
 def Check_Outage_Tool(ca_number: str, pdpa_consent: bool = False):
@@ -250,15 +277,9 @@ def Check_Outage_Tool(ca_number: str, pdpa_consent: bool = False):
     if event_type == "existing_ca_case":
         eta_label = format_eta_label(eta, db_response.get("eta_formatted")) or eta
         branch_label = _format_branch_label(fastest_branch)
-        if eta_label:
-            eta_detail = f"ช่างจะถึงหน้างานประมาณ {eta_label}"
-            if branch_label:
-                eta_detail = f"{branch_label} และ{eta_detail}"
-            if etr_label:
-                eta_detail = f"{eta_detail} และ{etr_label}"
-            return f"[เคสเดิมของ CA] แจ้งว่า {eta_detail}"
-        if etr_label:
-            return f"[เคสเดิมของ CA] แจ้งว่า {etr_label}"
+        detail_text = _join_branch_eta_etr(branch_label, eta_label, etr_label)
+        if detail_text:
+            return f"[เคสเดิมของ CA] แจ้งว่า {detail_text}"
         return "[เคสเดิมของ CA] ระบบพบเคสที่เปิดอยู่แล้ว แต่ยังไม่มีเวลาประเมินล่าสุด"
 
     if event_type in {"mass_outage", "repeated_event"}:
@@ -269,14 +290,7 @@ def Check_Outage_Tool(ca_number: str, pdpa_consent: bool = False):
     elif event_type == "new_event":
         eta_label = format_eta_label(eta, db_response.get("eta_formatted")) or eta
         branch_label = _format_branch_label(fastest_branch)
-        details = []
-        if branch_label:
-            details.append(branch_label)
-        if eta_label:
-            details.append(f"ช่างจะถึงหน้างานประมาณ {eta_label}")
-        if etr_label:
-            details.append(etr_label)
-        detail_text = " และ".join(details)
+        detail_text = _join_branch_eta_etr(branch_label, eta_label, etr_label)
         if not detail_text:
             detail_text = "ระบบกำลังประเมินเวลาช่างเข้าหน้างานล่าสุด"
         return f"[เหตุแจ้งใหม่] เปิดใบงานแล้ว แจ้งว่า {detail_text}"

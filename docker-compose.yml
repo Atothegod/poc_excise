@@ -20,7 +20,7 @@ services:
   backend:
     build:
       context: ./backend
-      dockerfile: dockerfile # ตัวพิมพ์เล็กตามที่คุณเขียนไว้
+      dockerfile: dockerfile
     env_file:
       - .env
     container_name: backend

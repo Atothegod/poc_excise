@@ -27,6 +27,34 @@ def _format_time_label(target_time):
     return timezone.localtime(target_time).strftime("%H:%M น.")
 
 
+def _notification_key(event_type, ca_number, report_id, case_id, message):
+    return "|".join(
+        [
+            str(event_type or ""),
+            str(ca_number or ""),
+            str(report_id or ""),
+            str(case_id or ""),
+            str(message or ""),
+        ]
+    )
+
+
+def _notification_payload(report, message, event_type):
+    case_id = str(report.related_case_id) if report.related_case_id else None
+    report_id = report.id
+    return {
+        "session_id": report.session_id,
+        "ca_number": report.ca_number,
+        "message": message,
+        "event_type": event_type,
+        "report_id": report_id,
+        "case_id": case_id,
+        "notification_key": _notification_key(
+            event_type, report.ca_number, report_id, case_id, message
+        ),
+    }
+
+
 def _sla_case_start_time(case):
     case_start_times = [
         value for value in [case.sla_reference_time, case.created_at] if value
@@ -72,12 +100,7 @@ def _notify_active_case_sessions(case, message, event_type):
         if report.session_id in sent_session_ids:
             continue
 
-        payload = {
-            "session_id": report.session_id,
-            "ca_number": report.ca_number,
-            "message": message,
-            "event_type": event_type,
-        }
+        payload = _notification_payload(report, message, event_type)
 
         try:
             requests.post(AGENT_WEBHOOK_URL, json=payload, timeout=5)
@@ -200,19 +223,19 @@ def check_etr_timeout(case_id):
         print("[Timer_ETR] ไม่พบข้อมูล Case (อาจถูกลบไปแล้ว)")
 
 
-@shared_task
+@shared_task(
+    autoretry_for=(requests.exceptions.RequestException,),
+    retry_kwargs={"max_retries": 3, "countdown": 2},
+    retry_backoff=True,
+)
 def send_proactive_alert(report_id, message, event_type):
     """
     ฟังก์ชันกลางสำหรับส่งแจ้งเตือนเชิงรุก (เช่น ช่างปิดงานไฟมาแล้ว, หรือส่ง ETR ครั้งที่ 2)
     """
     try:
         report = CustomerReport.objects.get(id=report_id)
-        payload = {
-            "session_id": report.session_id,
-            "ca_number": report.ca_number,
-            "message": message,
-            "event_type": event_type,
-        }
-        requests.post(AGENT_WEBHOOK_URL, json=payload, timeout=5)
+        payload = _notification_payload(report, message, event_type)
+        response = requests.post(AGENT_WEBHOOK_URL, json=payload, timeout=10)
+        response.raise_for_status()
     except CustomerReport.DoesNotExist:
         pass
