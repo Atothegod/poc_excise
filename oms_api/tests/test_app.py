@@ -3,13 +3,20 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-os.environ["CA_CSV_PATH"] = str(Path(__file__).resolve().parents[1] / "ca_lat_lon_2.csv")
+REAL_CSV_PATH = Path(__file__).resolve().parents[2] / "backend" / "ca_lat_lon_2.csv"
+if not REAL_CSV_PATH.exists():
+    REAL_CSV_PATH = Path(__file__).resolve().parents[1] / "ca_lat_lon_2.csv"
+
+os.environ["CA_CSV_PATH"] = str(REAL_CSV_PATH)
 os.environ["DJANGO_OMS_EVENT_URL"] = ""
 
 from fastapi.testclient import TestClient
 
 import app as app_module
 from app import app, load_customers
+
+FIRST_CA = "020025009298"
+SECOND_CA = "020017181205"
 
 
 class OmsApiTests(unittest.TestCase):
@@ -30,25 +37,52 @@ class OmsApiTests(unittest.TestCase):
         return response
 
     def test_customer_lookup_uses_csv(self):
-        response = self.client.get("/customers/123456789012")
+        response = self.client.get(f"/customers/{FIRST_CA}")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["ca_number"], "123456789012")
+        self.assertEqual(response.json()["ca_number"], FIRST_CA)
+        self.assertEqual(response.json()["lat"], 14.062607725177923)
+        self.assertEqual(response.json()["lon"], 100.61090536911522)
+        self.assertIn("address", response.json())
 
-    def test_customer_list_and_nearby_radius_use_csv(self):
-        listed = self.client.get("/customers", params={"limit": 10})
-        nearby = self.client.get(
+    def test_customer_list_returns_all_loaded_customers_by_default(self):
+        response = self.client.get("/customers")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["total"], 160)
+        self.assertEqual(response.json()["returned"], 160)
+        self.assertEqual(len(response.json()["customers"]), 160)
+
+    def test_health_exposes_csv_debug_counts(self):
+        response = self.client.get("/health")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["customers_loaded"], 160)
+        self.assertEqual(response.json()["customers_with_coordinates"], 157)
+        self.assertTrue(response.json()["csv_exists"])
+
+    def test_nearby_radius_endpoint_is_removed(self):
+        response = self.client.get(
             "/customers/nearby",
-            params={"ca_number": "123456789012", "radius_km": 0.5},
+            params={"ca_number": FIRST_CA, "radius_km": 0.5},
         )
 
-        self.assertEqual(listed.status_code, 200)
-        self.assertGreaterEqual(listed.json()["total"], 3)
-        self.assertEqual(nearby.status_code, 200)
-        self.assertEqual(
-            {customer["ca_number"] for customer in nearby.json()["customers"]},
-            {"123456789012", "123456789013", "123456789014"},
-        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_ui_uses_tunable_radius_and_status_dropdown(self):
+        response = self.client.get("/ui")
+        html = response.text
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('id="radiusKm"', html)
+        self.assertIn("selectWithinRadius", html)
+        self.assertIn("clearSelection", html)
+        self.assertIn('id="statusAction"', html)
+        self.assertIn('<option value="open">', html)
+        self.assertIn('<option value="update">', html)
+        self.assertIn('<option value="close">', html)
+        self.assertIn('fetch("/customers")', html)
+        self.assertNotIn("/customers/nearby", html)
 
     def test_cases_report_is_removed_from_merge_lifecycle(self):
         response = self.client.post("/cases/report", json={"ca_number": "123456789012"})
@@ -63,9 +97,8 @@ class OmsApiTests(unittest.TestCase):
                 json={
                     "case_id": "11111111-1111-1111-1111-111111111111",
                     "affected_ca_numbers": [
-                        "123456789012",
-                        "123456789013",
-                        "123456789014",
+                        FIRST_CA,
+                        SECOND_CA,
                     ],
                     "oms_etr": "2026-07-09T10:30:00+00:00",
                 },
@@ -80,7 +113,7 @@ class OmsApiTests(unittest.TestCase):
         )
         self.assertEqual(
             payload["case"]["affected_ca_numbers"],
-            ["123456789012", "123456789013", "123456789014"],
+            [FIRST_CA, SECOND_CA],
         )
 
     def test_update_etr_and_close_case_proxy_to_django(self):
@@ -107,7 +140,7 @@ class OmsApiTests(unittest.TestCase):
                 "/api/v1/oms/outage/sync",
                 json={
                     "eventId": "PEA-OUTAGE-20260709-001",
-                    "caList": ["123456789012", "123456789013"],
+                    "caList": [FIRST_CA, SECOND_CA],
                     "outageTime": "2026-07-09T08:30:00+07:00",
                     "etr": "2026-07-09T10:30:00+07:00",
                     "status": "OPEN",
@@ -125,7 +158,8 @@ class OmsApiTests(unittest.TestCase):
             payload["case"]["external_event_id"], "PEA-OUTAGE-20260709-001"
         )
         self.assertNotIn("case_id", payload["case"])
-        self.assertEqual(payload["case"]["affected_ca_numbers"], ["123456789012", "123456789013"])
+        self.assertEqual(payload["case"]["case_type"], "mass_outage")
+        self.assertEqual(payload["case"]["affected_ca_numbers"], [FIRST_CA, SECOND_CA])
 
     def test_spec_sync_closed_sends_closed_event(self):
         app_module.DJANGO_OMS_EVENT_URL = "http://backend.test/api/oms/events/"
@@ -134,7 +168,7 @@ class OmsApiTests(unittest.TestCase):
                 "/api/v1/oms/outage/sync",
                 json={
                     "eventId": "PEA-OUTAGE-20260709-003",
-                    "caList": ["123456789012"],
+                    "caList": [FIRST_CA],
                     "outageTime": "2026-07-09T08:30:00+07:00",
                     "etr": "2026-07-09T10:30:00+07:00",
                     "status": "CLOSED",
@@ -151,7 +185,7 @@ class OmsApiTests(unittest.TestCase):
         app_module.DJANGO_OMS_EVENT_URL = "http://backend.test/api/oms/events/"
         payload = {
             "eventId": "PEA-OUTAGE-20260709-004",
-            "caList": ["123456789012"],
+            "caList": [FIRST_CA],
             "outageTime": "2026-07-09T08:30:00+07:00",
             "etr": None,
             "status": "OPEN",
@@ -178,7 +212,7 @@ class OmsApiTests(unittest.TestCase):
     def test_proxy_requires_django_event_url(self):
         response = self.client.post(
             "/cases/open",
-            json={"affected_ca_numbers": ["123456789012"]},
+            json={"affected_ca_numbers": [FIRST_CA]},
         )
 
         self.assertEqual(response.status_code, 503)

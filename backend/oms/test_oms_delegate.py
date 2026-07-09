@@ -69,7 +69,6 @@ class CaseOwnershipTests(TestCase):
                     "case_id": "11111111-1111-1111-1111-111111111111",
                     "external_event_id": "PEA-OUTAGE-001",
                     "status": "reported",
-                    "case_type": CASE_TYPE_MASS_OUTAGE,
                     "affected_ca_numbers": ["123456789012", "123456789013"],
                 },
             },

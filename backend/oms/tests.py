@@ -427,15 +427,17 @@ class SyncAgentReportTests(TestCase):
     @patch("oms.views_api.celery_app.control.revoke")
     @patch("oms.views_api.send_proactive_alert.delay")
     @patch("oms.views_api.get_pea_assessment")
+    @patch("oms.views_api.check_etr_timeout.apply_async")
     @patch("oms.views_api.check_eta_timeout.apply_async")
     def test_oms_group_event_attaches_reports_and_closed_loop_to_all_sessions(
-        self, mock_apply_async, mock_assessment, mock_send_alert, _mock_revoke
+        self, mock_apply_async, mock_etr_apply_async, mock_assessment, mock_send_alert, _mock_revoke
     ):
         mock_apply_async.return_value.id = "eta-task-id"
+        mock_etr_apply_async.return_value.id = "etr-task-id"
         mock_assessment.return_value = self._assessment_payload()
-        ca_numbers = ["123456789012", "123456789013", "123456789014"]
-        sessions = ["session-a", "session-b", "session-c"]
-        for ca_number, latitude in zip(ca_numbers, [14.0000, 14.0020, 14.0030]):
+        ca_numbers = ["123456789012", "123456789013"]
+        sessions = ["session-a", "session-b"]
+        for ca_number, latitude in zip(ca_numbers, [14.0000, 14.0020]):
             CustomerLocation.objects.create(
                 ca_number=ca_number,
                 fullname=f"Mass restore CA {ca_number}",
@@ -469,7 +471,6 @@ class SyncAgentReportTests(TestCase):
                 "case": {
                     "case_id": group_case_id,
                     "status": "reported",
-                    "case_type": CASE_TYPE_MASS_OUTAGE,
                     "affected_ca_numbers": ca_numbers,
                     "oms_etr": (timezone.now() + timedelta(hours=2)).isoformat(),
                 },
@@ -478,10 +479,14 @@ class SyncAgentReportTests(TestCase):
         )
 
         self.assertEqual(open_response.status_code, 200)
+        self.assertEqual(open_response.data["merged_count"], len(ca_numbers))
+        self.assertTrue(open_response.data["etr_timer_scheduled"])
         anchor = OutageCase.objects.get(case_id=group_case_id)
         self.assertEqual(anchor.case_type, CASE_TYPE_MASS_OUTAGE)
         self.assertNotEqual(anchor.case_id, original_case.case_id)
         self.assertEqual(set(anchor.affected_ca_numbers), set(ca_numbers))
+        self.assertEqual(anchor.celery_etr_task_id, "etr-task-id")
+        self.assertIsNotNone(anchor.oms_etr_updated_at)
         self.assertEqual(
             set(
                 OutageCase.objects.filter(
@@ -499,6 +504,10 @@ class SyncAgentReportTests(TestCase):
             {call.kwargs["event_type"] for call in mock_send_alert.call_args_list},
             {"mass_outage"},
         )
+        mock_etr_apply_async.assert_called_once_with(
+            args=[anchor.case_id],
+            eta=anchor.oms_etr,
+        )
 
         mock_send_alert.reset_mock()
         close_response = self.client.post(
@@ -514,7 +523,7 @@ class SyncAgentReportTests(TestCase):
         )
 
         self.assertEqual(close_response.status_code, 200)
-        self.assertEqual(mock_send_alert.call_count, 3)
+        self.assertEqual(mock_send_alert.call_count, 2)
         alerted_reports = [
             CustomerReport.objects.get(id=call.kwargs["report_id"])
             for call in mock_send_alert.call_args_list
@@ -2237,4 +2246,3 @@ class CsvExportAdminTests(TestCase):
         self.assertEqual(rows[0][:6], ["id", "timestamp", "prefix", "fullname", "address", "ca_number"])
         self.assertEqual(rows[1][3], "CSV User")
         self.assertEqual(rows[1][5], "123456789012")
-

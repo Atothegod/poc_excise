@@ -15,7 +15,7 @@ flowchart LR
     Celery --> DspyWebhook[DSPy webhook/notify]
     DspyWebhook --> DjangoAPI
 
-    Operator[OMS Operator] --> OmsUI[oms_api UI\nmap + radius selection]
+    Operator[OMS Operator] --> OmsUI[oms_api UI\nmap radius selection]
     ExternalOMS[External OMS/PEA] --> OmsSpec[oms_api\n/api/v1/oms/outage/sync]
     OmsUI --> DjangoEvent[Django /api/oms/events/]
     OmsSpec --> DjangoEvent
@@ -44,7 +44,7 @@ flowchart LR
 | Outage case | Django `OutageCase` | Includes normal and mass outage cases |
 | Restoration log | Django `OutageRestorationLog` | Created when case is restored |
 | CA customer coordinates for chat flow | Django `CustomerLocation` | Used by `/api/reports/sync/`, login, validation |
-| CA map data for OMS UI | `oms_api/ca_lat_lon_2.csv` | Used only by OMS UI/customer endpoints |
+| CA map data for OMS UI | `backend/ca_lat_lon_2.csv` mounted to `oms_api` at `/app/ca_lat_lon_2.csv` | Used only by OMS UI/customer endpoints |
 | DSPy conversation memory | `dspy-agent` memory + mirrored Django chat history | Django keeps `CustomerReport.chat_history` |
 
 ## Core Rules After Refactor
@@ -69,7 +69,7 @@ flowchart LR
 | ETA/ETR timers | `check_eta_timeout`, `check_etr_timeout` | Celery tasks for proactive alerts |
 | Signal handling | `signals.py` | Schedules/cancels timers, sends ETR updates, creates restoration log |
 | OMS proxy | `django_event()` in `oms_api` | POST event payload to Django callback URL |
-| OMS map logic | `nearby_customers()` | Find CA numbers inside adjustable radius from CSV |
+| OMS map selection | `list_customers()` + UI radius selection | Load all CSV CA points, select CA inside operator-tuned radius, then send selected CA numbers to Django |
 
 ## Important Models
 
@@ -89,4 +89,3 @@ flowchart LR
 - Postgres: Django persistence.
 - Leaflet + OpenStreetMap tiles: OMS map UI.
 - PEA assessment service: called by `backend/oms/services.py` to estimate ETA/ETR.
-

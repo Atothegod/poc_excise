@@ -58,18 +58,16 @@ Important behavior:
 1. Operator เปิด `oms_api /ui` ที่ `http://localhost:8002/ui`.
 2. UI โหลด CA จาก `GET /customers`.
 3. UI plot CA บน Leaflet map.
-4. Operator คลิก marker CA.
-5. UI แสดงวงกลม radius สีฟ้า.
-6. Operator ปรับ `radius_km`.
-7. Operator กด Select.
-8. UI เรียก `GET /customers/nearby?ca_number=...&radius_km=...`.
-9. `oms_api` คำนวณระยะจาก CSV และเติม `Affected CA Numbers`.
-10. Operator กด Open.
-11. `oms_api` generate หรือใช้ `case_id` UUID แล้ว POST event ไป Django `/api/oms/events/`.
-12. Django upsert `OutageCase` เป็น `mass_outage` เมื่อ CA >= 3.
-13. Django attach active `CustomerReport` ที่ CA อยู่ในกลุ่ม.
-14. Django mark single active cases ที่ถูกแทนที่เป็น `merged`.
-15. Django ส่ง proactive mass outage alert ไป session ที่เกี่ยวข้องผ่าน Celery/DSPy webhook.
+4. Operator คลิก marker CA เพื่อใช้เป็นจุดศูนย์กลาง.
+5. UI แสดงวงรัศมีสีฟ้า และ operator ปรับ `Radius KM` ได้.
+6. UI คำนวณจาก CA ที่โหลดบนหน้า แล้วเติม CA ภายในรัศมีลง `Affected CA Numbers`.
+7. Operator แก้รายการ CA ใน textarea ได้ก่อนส่ง ถ้าจำเป็น.
+8. Operator เลือก status จาก dropdown: Open, Update ETR, หรือ Close.
+9. `oms_api` generate หรือใช้ `case_id` UUID แล้ว POST event ไป Django `/api/oms/events/`.
+10. Django upsert `OutageCase` เป็น `mass_outage` เมื่อ OMS ส่ง CA ตั้งแต่ 2 รายขึ้นไป.
+11. Django attach active `CustomerReport` ที่ CA อยู่ในกลุ่ม.
+12. Django mark single active cases ที่ถูกแทนที่เป็น `merged`.
+13. Django ส่ง proactive mass outage alert ไป session ที่เกี่ยวข้องผ่าน Celery/DSPy webhook.
 
 Result:
 
@@ -161,4 +159,3 @@ Result:
 | External OMS syncs event | OMS API -> Django | Upsert by external event |
 | ETR update | Django signals | Notify sessions + schedule timer |
 | Case close | Django signals | Restoration log + closed-loop prompt |
-

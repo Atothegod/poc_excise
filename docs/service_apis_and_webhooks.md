@@ -97,9 +97,8 @@ Important env:
 | --- | --- | --- | --- |
 | `GET` | `/health` | Ops/monitoring | Health, customer count, config summary |
 | `GET` | `/` | Browser | Same as OMS UI |
-| `GET` | `/ui` | Operator | Map/radius UI for group case open/update/close |
-| `GET` | `/customers` | OMS UI | List CA data from CSV |
-| `GET` | `/customers/nearby?ca_number=...&radius_km=...` | OMS UI | Find CA inside selected radius |
+| `GET` | `/ui` | Operator | Map radius-selection UI plus status dropdown for group case open/update/close |
+| `GET` | `/customers` | OMS UI | List all CA data from mounted CSV by default |
 | `GET` | `/customers/{ca_number}` | OMS UI/API | Validate or fetch CA from CSV |
 
 ### OMS Case/Event APIs
@@ -178,4 +177,3 @@ Base URL:
 | OMS UI | oms_api | `/cases/open`, `/cases/{case_id}`, `/cases/{case_id}/close` | Operator manages group case |
 | External OMS/PEA | oms_api | `/api/v1/oms/outage/sync` | External outage sync |
 | oms_api | Django | `/api/oms/events/` | Open/update/close authoritative Django case |
-

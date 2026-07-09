@@ -16,7 +16,6 @@ from .case_logic import (
     CASE_TYPE_MASS_OUTAGE,
     CASE_TYPE_NORMAL,
     INACTIVE_CASE_STATUSES,
-    MASS_OUTAGE_CONFIRMATION_COUNT,
     STATUS_MERGED,
     STATUS_REPORTED,
     STATUS_RESTORED,
@@ -32,8 +31,11 @@ from .serializers import (
     validate_ca_number_format,
 )
 from .services import format_minutes_label, get_pea_assessment, parse_eta_minutes
-from .tasks import check_eta_timeout, send_proactive_alert
+from .tasks import check_eta_timeout, check_etr_timeout, send_proactive_alert
 from pea_project.celery import app as celery_app
+
+
+OMS_GROUP_MIN_CA_COUNT = 2
 
 
 def _parse_float(value):
@@ -250,10 +252,12 @@ def _case_id_from_oms(oms_case, required=True):
 
 def _case_type_from_oms(oms_case, affected_ca_numbers):
     case_type = oms_case.get("case_type")
+    if affected_ca_numbers:
+        if len(affected_ca_numbers) >= OMS_GROUP_MIN_CA_COUNT:
+            return CASE_TYPE_MASS_OUTAGE
+        return CASE_TYPE_NORMAL
     if case_type in {CASE_TYPE_NORMAL, CASE_TYPE_MASS_OUTAGE}:
         return case_type
-    if len(affected_ca_numbers) >= MASS_OUTAGE_CONFIRMATION_COUNT:
-        return CASE_TYPE_MASS_OUTAGE
     return CASE_TYPE_NORMAL
 
 
@@ -450,6 +454,25 @@ def _revoke_case_timers(case):
         celery_app.control.revoke(case.celery_eta_task_id, terminate=True)
     if case.celery_etr_task_id:
         celery_app.control.revoke(case.celery_etr_task_id, terminate=True)
+
+
+def _schedule_initial_oms_etr(case):
+    if (
+        not case.oms_etr
+        or case.celery_etr_task_id
+        or case.status in INACTIVE_CASE_STATUSES
+    ):
+        return False
+
+    task = check_etr_timeout.apply_async(args=[case.case_id], eta=case.oms_etr)
+    etr_updated_at = timezone.now()
+    case.oms_etr_updated_at = etr_updated_at
+    case.celery_etr_task_id = task.id
+    OutageCase.objects.filter(pk=case.pk).update(
+        oms_etr_updated_at=etr_updated_at,
+        celery_etr_task_id=task.id,
+    )
+    return True
 
 
 def _mark_superseded_cases_as_merged(case, affected_ca_numbers):
@@ -839,6 +862,7 @@ def oms_event_callback(request):
 
     _attach_reports_for_case(case)
     case.sync_affected_ca_numbers()
+    etr_timer_scheduled = _schedule_initial_oms_etr(case) if created else False
     notified_sessions = set()
     if (
         event_type == "case_opened"
@@ -853,6 +877,7 @@ def oms_event_callback(request):
             "event_type": event_type,
             "created": created,
             "merged_count": merged_count,
+            "etr_timer_scheduled": etr_timer_scheduled,
             "notified_session_count": len(notified_sessions),
             **_case_response_fields(case, include_model_etr=True),
         }

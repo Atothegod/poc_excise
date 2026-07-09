@@ -23,6 +23,11 @@ app.add_middleware(
 )
 
 
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+
 class QuestionRequest(BaseModel):
     question: str
     session_id: str
