@@ -29,6 +29,7 @@ class AgentReportSerializer(serializers.Serializer):
         max_length=50, required=False, allow_blank=True, allow_null=True
     )
     pdpa_consent = serializers.BooleanField(required=False, default=False)
+    force_new_case = serializers.BooleanField(required=False, default=False)
 
     # ใช้ DateTimeField เพื่อให้ DRF ตรวจสอบความถูกต้องของ ISO Format ทันที
     time_stamp = serializers.DateTimeField(required=False, allow_null=True)
@@ -67,6 +68,20 @@ class ChatHistorySyncSerializer(serializers.Serializer):
         max_length=12, min_length=12, required=False, allow_blank=True, allow_null=True
     )
     chat_history = serializers.ListField(child=serializers.DictField(), default=list)
+
+    def validate_ca_number(self, value):
+        if not value:
+            return value
+        return validate_ca_number_format(value)
+
+
+class ClosedLoopResponseSerializer(serializers.Serializer):
+    session_id = serializers.CharField(max_length=255)
+    ca_number = serializers.CharField(
+        max_length=12, min_length=12, required=False, allow_blank=True, allow_null=True
+    )
+    report_id = serializers.IntegerField(required=False, allow_null=True)
+    response = serializers.ChoiceField(choices=["resolved", "still_out"])
 
     def validate_ca_number(self, value):
         if not value:

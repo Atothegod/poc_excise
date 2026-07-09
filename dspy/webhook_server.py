@@ -50,6 +50,9 @@ class NotificationWebhook(BaseModel):
     notification_key: Optional[str] = Field(
         None, description="Stable identity for deduping proactive alerts"
     )
+    closed_loop_kind: Optional[str] = Field(
+        None, description="Subtype for closed-loop prompts, such as sla_expired"
+    )
 
 
 class NotificationAck(BaseModel):
@@ -146,6 +149,7 @@ def _notification_record(data):
         "report_id": data.report_id,
         "case_id": data.case_id,
         "notification_key": notification_key,
+        "closed_loop_kind": data.closed_loop_kind,
     }
 
 
@@ -204,6 +208,7 @@ def _latest_closed_loop_notification_from_db(session_id):
         "report_id": report_id,
         "case_id": case_id,
         "notification_key": notification_key,
+        "closed_loop_kind": latest_item.get("closed_loop_kind"),
         "source": "chat_history",
     }
 
@@ -285,8 +290,10 @@ async def receive_proactive_notification(data: NotificationWebhook):
                     "report_id": data.report_id,
                     "case_id": data.case_id,
                     "notification_key": notification["notification_key"],
+                    "closed_loop_kind": data.closed_loop_kind,
                     "content": (
                         f"event_type={data.event_type}; "
+                        f"closed_loop_kind={data.closed_loop_kind}; "
                         f"ca_number={data.ca_number}; "
                         f"report_id={data.report_id}; "
                         f"case_id={data.case_id}; "

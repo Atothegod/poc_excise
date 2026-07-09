@@ -24,7 +24,14 @@ from .case_logic import (
     STATUS_MERGED,
 )
 from .models import CustomerLocation, CustomerReport, OutageCase, OutageRestorationLog
-from .tasks import check_eta_timeout, check_etr_timeout, send_proactive_alert
+from .tasks import (
+    SLA_EXPIRED_CLOSED_LOOP_KIND,
+    SLA_EXPIRED_CLOSED_LOOP_MESSAGE,
+    check_eta_timeout,
+    check_etr_timeout,
+    check_sla_timeout,
+    send_proactive_alert,
+)
 
 
 class SyncAgentReportTests(TestCase):
@@ -51,11 +58,13 @@ class SyncAgentReportTests(TestCase):
 
     @patch("oms.signals.send_proactive_alert.delay")
     @patch("oms.views_api.get_pea_assessment")
+    @patch("oms.views_api.check_sla_timeout.apply_async")
     @patch("oms.views_api.check_eta_timeout.apply_async")
     def test_new_event_uses_customer_location_and_assessment(
-        self, mock_apply_async, mock_assessment, mock_send_alert
+        self, mock_eta_apply_async, mock_sla_apply_async, mock_assessment, mock_send_alert
     ):
-        mock_apply_async.return_value.id = "eta-task-id"
+        mock_eta_apply_async.return_value.id = "eta-task-id"
+        mock_sla_apply_async.return_value.id = "sla-task-id"
         mock_assessment.return_value = {
             "fastest_branch": "การไฟฟ้าส่วนภูมิภาค สาขา รังสิต",
             "eta_formatted": "~ 8 min",
@@ -105,6 +114,7 @@ class SyncAgentReportTests(TestCase):
         self.assertEqual(case.sla_reference_time, base_time)
         self.assertEqual(case.sla_target_time, base_time + timedelta(hours=4))
         self.assertEqual(case.sla_reason, "case_created")
+        self.assertEqual(case.celery_sla_task_id, "sla-task-id")
         self.assertIsNone(case.oms_etr)
         report = CustomerReport.objects.get(id=response.data["report_id"])
         self.assertEqual(report.latitude, 9.2917)
@@ -306,11 +316,13 @@ class SyncAgentReportTests(TestCase):
         mock_assessment.assert_not_called()
 
     @patch("oms.views_api.get_pea_assessment")
+    @patch("oms.views_api.check_sla_timeout.apply_async")
     @patch("oms.views_api.check_eta_timeout.apply_async")
     def test_new_case_attaches_waiting_same_ca_sessions(
-        self, mock_apply_async, mock_assessment
+        self, mock_eta_apply_async, mock_sla_apply_async, mock_assessment
     ):
-        mock_apply_async.return_value.id = "eta-task-id"
+        mock_eta_apply_async.return_value.id = "eta-task-id"
+        mock_sla_apply_async.return_value.id = "sla-task-id"
         mock_assessment.return_value = {
             "fastest_branch": "การไฟฟ้าส่วนภูมิภาค สาขา รังสิต",
             "eta_formatted": "~ 8 min",
@@ -350,11 +362,13 @@ class SyncAgentReportTests(TestCase):
 
     @patch("oms.views_api.send_proactive_alert.delay")
     @patch("oms.views_api.get_pea_assessment")
+    @patch("oms.views_api.check_sla_timeout.apply_async")
     @patch("oms.views_api.check_eta_timeout.apply_async")
     def test_second_nearby_ca_stays_new_event_until_threshold(
-        self, mock_apply_async, mock_assessment, mock_send_alert
+        self, mock_eta_apply_async, mock_sla_apply_async, mock_assessment, mock_send_alert
     ):
-        mock_apply_async.return_value.id = "eta-task-id"
+        mock_eta_apply_async.return_value.id = "eta-task-id"
+        mock_sla_apply_async.return_value.id = "sla-task-id"
         mock_assessment.return_value = self._assessment_payload()
         CustomerLocation.objects.create(
             ca_number="123456789012",
@@ -386,11 +400,13 @@ class SyncAgentReportTests(TestCase):
 
     @patch("oms.views_api.send_proactive_alert.delay")
     @patch("oms.views_api.get_pea_assessment")
+    @patch("oms.views_api.check_sla_timeout.apply_async")
     @patch("oms.views_api.check_eta_timeout.apply_async")
     def test_third_nearby_ca_stays_separate_without_oms_group_event(
-        self, mock_apply_async, mock_assessment, mock_send_alert
+        self, mock_eta_apply_async, mock_sla_apply_async, mock_assessment, mock_send_alert
     ):
-        mock_apply_async.return_value.id = "eta-task-id"
+        mock_eta_apply_async.return_value.id = "eta-task-id"
+        mock_sla_apply_async.return_value.id = "sla-task-id"
         mock_assessment.return_value = self._assessment_payload()
         ca_numbers = ["123456789012", "123456789013", "123456789014"]
         latitudes = [14.0000, 14.0020, 14.0030]
@@ -428,11 +444,19 @@ class SyncAgentReportTests(TestCase):
     @patch("oms.views_api.send_proactive_alert.delay")
     @patch("oms.views_api.get_pea_assessment")
     @patch("oms.views_api.check_etr_timeout.apply_async")
+    @patch("oms.views_api.check_sla_timeout.apply_async")
     @patch("oms.views_api.check_eta_timeout.apply_async")
     def test_oms_group_event_attaches_reports_and_closed_loop_to_all_sessions(
-        self, mock_apply_async, mock_etr_apply_async, mock_assessment, mock_send_alert, _mock_revoke
+        self,
+        mock_eta_apply_async,
+        mock_sla_apply_async,
+        mock_etr_apply_async,
+        mock_assessment,
+        mock_send_alert,
+        _mock_revoke,
     ):
-        mock_apply_async.return_value.id = "eta-task-id"
+        mock_eta_apply_async.return_value.id = "eta-task-id"
+        mock_sla_apply_async.return_value.id = "sla-task-id"
         mock_etr_apply_async.return_value.id = "etr-task-id"
         mock_assessment.return_value = self._assessment_payload()
         ca_numbers = ["123456789012", "123456789013"]
@@ -542,11 +566,13 @@ class SyncAgentReportTests(TestCase):
         )
 
     @patch("oms.views_api.get_pea_assessment")
+    @patch("oms.views_api.check_sla_timeout.apply_async")
     @patch("oms.views_api.check_eta_timeout.apply_async")
     def test_new_ca_inside_existing_mass_outage_only_links_when_ca_is_affected(
-        self, mock_apply_async, mock_assessment
+        self, mock_eta_apply_async, mock_sla_apply_async, mock_assessment
     ):
-        mock_apply_async.return_value.id = "eta-task-id"
+        mock_eta_apply_async.return_value.id = "eta-task-id"
+        mock_sla_apply_async.return_value.id = "sla-task-id"
         mock_assessment.return_value = self._assessment_payload()
         CustomerLocation.objects.create(
             ca_number="123456789012",
@@ -571,11 +597,13 @@ class SyncAgentReportTests(TestCase):
         mock_assessment.assert_called_once()
 
     @patch("oms.views_api.get_pea_assessment")
+    @patch("oms.views_api.check_sla_timeout.apply_async")
     @patch("oms.views_api.check_eta_timeout.apply_async")
     def test_sync_report_creates_new_case_outside_active_case_radius(
-        self, mock_apply_async, mock_assessment
+        self, mock_eta_apply_async, mock_sla_apply_async, mock_assessment
     ):
-        mock_apply_async.return_value.id = "eta-task-id"
+        mock_eta_apply_async.return_value.id = "eta-task-id"
+        mock_sla_apply_async.return_value.id = "sla-task-id"
         mock_assessment.return_value = {
             "fastest_branch": "การไฟฟ้าส่วนภูมิภาค สาขา รังสิต",
             "eta_formatted": "~ 8 min",
@@ -807,11 +835,13 @@ class SyncAgentReportTests(TestCase):
         self.assertEqual(response.status_code, 400)
 
     @patch("oms.views_api.get_pea_assessment")
+    @patch("oms.views_api.check_sla_timeout.apply_async")
     @patch("oms.views_api.check_eta_timeout.apply_async")
     def test_sync_report_after_restored_case_creates_normal_case_with_eta(
-        self, mock_apply_async, mock_assessment
+        self, mock_eta_apply_async, mock_sla_apply_async, mock_assessment
     ):
-        mock_apply_async.return_value.id = "restored-new-eta-task-id"
+        mock_eta_apply_async.return_value.id = "restored-new-eta-task-id"
+        mock_sla_apply_async.return_value.id = "restored-new-sla-task-id"
         mock_assessment.return_value = self._assessment_payload(eta_minutes=12)
         original_case = OutageCase.objects.create(
             title="Original restored case",
@@ -855,6 +885,7 @@ class SyncAgentReportTests(TestCase):
         self.assertEqual(case.sla_reference_time, base_time)
         self.assertEqual(case.sla_target_time, base_time + timedelta(hours=4))
         self.assertEqual(case.eta_target_time, base_time + timedelta(minutes=12))
+        self.assertEqual(case.celery_sla_task_id, "restored-new-sla-task-id")
         self.assertEqual(
             response.data["fastest_branch"], "การไฟฟ้าส่วนภูมิภาค สาขา รังสิต"
         )
@@ -866,18 +897,24 @@ class SyncAgentReportTests(TestCase):
                 "lon": 100.926296,
             }
         )
-        mock_apply_async.assert_called_once_with(
+        mock_eta_apply_async.assert_called_once_with(
             args=[case.case_id, response.data["report_id"]],
             eta=case.eta_target_time,
+        )
+        mock_sla_apply_async.assert_called_once_with(
+            args=[case.case_id],
+            eta=case.sla_target_time,
         )
 
     @patch("oms.signals.send_proactive_alert.delay")
     @patch("oms.views_api.get_pea_assessment")
+    @patch("oms.views_api.check_sla_timeout.apply_async")
     @patch("oms.views_api.check_eta_timeout.apply_async")
     def test_repeated_restored_cases_send_new_closed_loop_prompt_for_same_session(
-        self, mock_apply_async, mock_assessment, mock_send_alert
+        self, mock_eta_apply_async, mock_sla_apply_async, mock_assessment, mock_send_alert
     ):
-        mock_apply_async.return_value.id = "repeated-restored-eta-task-id"
+        mock_eta_apply_async.return_value.id = "repeated-restored-eta-task-id"
+        mock_sla_apply_async.return_value.id = "repeated-restored-sla-task-id"
         mock_assessment.return_value = self._assessment_payload(eta_minutes=12)
         session_id = "session-repeated-restored"
         ca_number = "123456789012"
@@ -1011,11 +1048,13 @@ class SyncAgentReportTests(TestCase):
         )
 
     @patch("oms.views_api.get_pea_assessment")
+    @patch("oms.views_api.check_sla_timeout.apply_async")
     @patch("oms.views_api.check_eta_timeout.apply_async")
     def test_sync_report_reuses_same_session_active_case_on_repeat(
-        self, mock_apply_async, mock_assessment
+        self, mock_eta_apply_async, mock_sla_apply_async, mock_assessment
     ):
-        mock_apply_async.return_value.id = "sync-repeat-task-id"
+        mock_eta_apply_async.return_value.id = "sync-repeat-task-id"
+        mock_sla_apply_async.return_value.id = "sync-repeat-sla-task-id"
         mock_assessment.return_value = self._assessment_payload()
         CustomerLocation.objects.create(
             ca_number="123456789012",
@@ -1050,7 +1089,80 @@ class SyncAgentReportTests(TestCase):
         self.assertEqual(first_response.data["case_id"], second_response.data["case_id"])
         self.assertEqual(OutageCase.objects.count(), 1)
         mock_assessment.assert_called_once()
-        mock_apply_async.assert_called_once()
+        mock_eta_apply_async.assert_called_once()
+        mock_sla_apply_async.assert_called_once()
+
+    @patch("oms.views_api.get_pea_assessment")
+    @patch("oms.views_api.check_sla_timeout.apply_async")
+    @patch("oms.views_api.check_eta_timeout.apply_async")
+    def test_force_new_case_resolves_current_report_and_opens_new_case(
+        self, mock_eta_apply_async, mock_sla_apply_async, mock_assessment
+    ):
+        mock_eta_apply_async.return_value.id = "force-new-eta-task-id"
+        mock_sla_apply_async.return_value.id = "force-new-sla-task-id"
+        mock_assessment.return_value = self._assessment_payload(eta_minutes=9)
+        CustomerLocation.objects.create(
+            ca_number="123456789012",
+            fullname="Force New User",
+            latitude=9.2917,
+            longitude=100.926296,
+        )
+        old_case = OutageCase.objects.create(
+            title="Still active after SLA",
+            latitude=9.2917,
+            longitude=100.926296,
+            affected_ca_numbers=["123456789012"],
+        )
+        old_report = CustomerReport.objects.create(
+            session_id="session-force-new",
+            ca_number="123456789012",
+            related_case=old_case,
+        )
+
+        response = self.client.post(
+            "/api/reports/sync/",
+            {
+                "ca_number": "123456789012",
+                "session_id": "session-force-new",
+                "pdpa_consent": True,
+                "force_new_case": True,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["event_type"], "new_event")
+        new_case = OutageCase.objects.get(case_id=response.data["case_id"])
+        self.assertNotEqual(new_case.case_id, old_case.case_id)
+        self.assertEqual(new_case.case_type, CASE_TYPE_NORMAL)
+        self.assertEqual(new_case.celery_sla_task_id, "force-new-sla-task-id")
+        old_report.refresh_from_db()
+        self.assertTrue(old_report.is_resolved)
+        new_report = CustomerReport.objects.get(id=response.data["report_id"])
+        self.assertFalse(new_report.is_resolved)
+        self.assertEqual(new_report.related_case, new_case)
+
+    def test_closed_loop_response_marks_report_resolved(self):
+        report = CustomerReport.objects.create(
+            session_id="session-closed-loop-response",
+            ca_number="123456789012",
+        )
+
+        response = self.client.post(
+            "/api/reports/closed-loop-response/",
+            {
+                "session_id": "session-closed-loop-response",
+                "ca_number": "123456789012",
+                "report_id": report.id,
+                "response": "resolved",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["resolved_count"], 1)
+        report.refresh_from_db()
+        self.assertTrue(report.is_resolved)
 
     def test_fast_track_route_is_removed(self):
         response = self.client.post(
@@ -1308,8 +1420,10 @@ class CheckEtaTimeoutTests(TestCase):
         )
         self.assertEqual(mock_post.call_count, 2)
 
+    @patch("oms.signals.check_sla_timeout.apply_async")
     @patch("oms.tasks.requests.post")
-    def test_etr_timeout_sends_sla_notification(self, mock_post):
+    def test_etr_timeout_sends_sla_notification(self, mock_post, mock_sla_apply_async):
+        mock_sla_apply_async.return_value.id = "etr-timeout-sla-task-id"
         now = timezone.now()
         case = OutageCase.objects.create(
             title="ETR timeout SLA",
@@ -1343,6 +1457,7 @@ class CheckEtaTimeoutTests(TestCase):
         self.assertEqual(case.sla_reference_time, case.created_at)
         self.assertEqual(case.sla_target_time, expected_sla_target)
         self.assertEqual(case.sla_reason, "case_created")
+        self.assertEqual(case.celery_sla_task_id, "etr-timeout-sla-task-id")
         self.assertIn(
             timezone.localtime(expected_sla_target).strftime("%H:%M น."),
             payload["message"],
@@ -1354,6 +1469,68 @@ class CheckEtaTimeoutTests(TestCase):
         self.assertNotIn("ETA", payload["message"])
         self.assertNotIn("ETR", payload["message"])
         self.assertNotIn("SLA", payload["message"])
+
+
+class CheckSlaTimeoutTests(TestCase):
+    @patch("oms.tasks.requests.post")
+    def test_sla_timeout_sends_closed_loop_prompt_to_active_sessions(self, mock_post):
+        now = timezone.now()
+        case = OutageCase.objects.create(
+            title="SLA timeout prompt",
+            latitude=9.2917,
+            longitude=100.926296,
+            sla_target_time=now - timedelta(minutes=1),
+        )
+        CustomerReport.objects.create(
+            session_id="session-sla-a",
+            ca_number="123456789012",
+            related_case=case,
+        )
+        CustomerReport.objects.create(
+            session_id="session-sla-a",
+            ca_number="123456789013",
+            related_case=case,
+        )
+        CustomerReport.objects.create(
+            session_id="session-sla-resolved",
+            ca_number="123456789014",
+            related_case=case,
+            is_resolved=True,
+        )
+
+        check_sla_timeout(case.case_id)
+
+        self.assertEqual(mock_post.call_count, 1)
+        payload = mock_post.call_args.kwargs["json"]
+        self.assertEqual(payload["session_id"], "session-sla-a")
+        self.assertEqual(payload["event_type"], "closed_loop_prompt")
+        self.assertEqual(payload["message"], SLA_EXPIRED_CLOSED_LOOP_MESSAGE)
+        self.assertEqual(
+            payload["closed_loop_kind"], SLA_EXPIRED_CLOSED_LOOP_KIND
+        )
+        self.assertIn("ไฟฟ้ากลับมาใช้งานได้หรือยัง", payload["message"])
+        self.assertNotIn("SLA", payload["message"])
+        self.assertNotIn("ETA", payload["message"])
+        self.assertNotIn("ETR", payload["message"])
+
+    @patch("oms.tasks.requests.post")
+    def test_sla_timeout_skips_inactive_cases(self, mock_post):
+        case = OutageCase.objects.create(
+            title="SLA timeout restored",
+            status="restored",
+            latitude=9.2917,
+            longitude=100.926296,
+            sla_target_time=timezone.now() - timedelta(minutes=1),
+        )
+        CustomerReport.objects.create(
+            session_id="session-sla-restored",
+            ca_number="123456789012",
+            related_case=case,
+        )
+
+        check_sla_timeout(case.case_id)
+
+        mock_post.assert_not_called()
 
 
 class ProactiveAlertTaskTests(TestCase):

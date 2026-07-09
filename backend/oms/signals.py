@@ -4,7 +4,12 @@ from django.utils import timezone
 from datetime import timedelta
 from .case_logic import INACTIVE_CASE_STATUSES
 from .models import OutageCase, CustomerReport, OutageRestorationLog
-from .tasks import check_eta_timeout, check_etr_timeout, send_proactive_alert
+from .tasks import (
+    check_eta_timeout,
+    check_etr_timeout,
+    check_sla_timeout,
+    send_proactive_alert,
+)
 from pea_project.celery import app as celery_app
 
 
@@ -82,11 +87,21 @@ def track_eta_changes(sender, instance, **kwargs):
         # 2. เช็คว่าถ้าสถานะเปลี่ยนเป็น restored ให้เก็บ Flag ไว้
         if old_instance.status != "restored" and instance.status == "restored":
             instance._is_just_restored = True
+        if (
+            old_instance.status not in INACTIVE_CASE_STATUSES
+            and instance.status in INACTIVE_CASE_STATUSES
+        ):
+            instance._is_just_inactive = True
 
         # 3. เช็คว่า OMS เพิ่งส่ง/แก้ ETR มาไหม เพื่อแจ้งลูกค้าอัตโนมัติ
         if old_instance.oms_etr != instance.oms_etr and instance.oms_etr:
             instance._has_new_oms_etr = True
             instance._old_celery_etr_task_id = old_instance.celery_etr_task_id
+
+        # 4. เช็คว่า SLA ถูกแก้ผ่าน Admin หรือ flow อื่นที่ save model โดยตรงหรือไม่
+        if old_instance.sla_target_time != instance.sla_target_time:
+            instance._needs_new_sla_task = bool(instance.sla_target_time)
+            instance._old_celery_sla_task_id = old_instance.celery_sla_task_id
 
     except OutageCase.DoesNotExist:
         pass
@@ -161,6 +176,31 @@ def process_outage_case_updates(sender, instance, created, **kwargs):
 
         instance._has_new_oms_etr = False
 
+    # --- กรณี SLA target ถูกแก้ไขผ่าน Admin หรือ model save โดยตรง ---
+    if hasattr(instance, "_old_celery_sla_task_id") or getattr(
+        instance, "_needs_new_sla_task", False
+    ):
+        old_sla_task_id = getattr(instance, "_old_celery_sla_task_id", None)
+        if old_sla_task_id:
+            celery_app.control.revoke(old_sla_task_id, terminate=True)
+
+        sla_task_id = None
+        if (
+            getattr(instance, "_needs_new_sla_task", False)
+            and instance.sla_target_time
+            and instance.status not in INACTIVE_CASE_STATUSES
+        ):
+            task = check_sla_timeout.apply_async(
+                args=[instance.case_id], eta=instance.sla_target_time
+            )
+            sla_task_id = task.id
+
+        instance.celery_sla_task_id = sla_task_id
+        OutageCase.objects.filter(pk=instance.pk).update(
+            celery_sla_task_id=sla_task_id
+        )
+        instance._needs_new_sla_task = False
+
     # --- กรณีการปิดเคส (Closed-Loop & State Cleansing) ---
     if getattr(instance, "_is_just_restored", False):
         _create_restoration_log(instance)
@@ -170,9 +210,11 @@ def process_outage_case_updates(sender, instance, created, **kwargs):
             celery_app.control.revoke(instance.celery_eta_task_id, terminate=True)
         if instance.celery_etr_task_id:
             celery_app.control.revoke(instance.celery_etr_task_id, terminate=True)
+        if instance.celery_sla_task_id:
+            celery_app.control.revoke(instance.celery_sla_task_id, terminate=True)
 
         OutageCase.objects.filter(pk=instance.pk).update(
-            celery_eta_task_id=None, celery_etr_task_id=None
+            celery_eta_task_id=None, celery_etr_task_id=None, celery_sla_task_id=None
         )
 
         # 2. ค้นหาลูกค้าทุกคนในเคสนี้ รวมเคสย่อยที่เคยถูก merge เข้า anchor
@@ -197,6 +239,22 @@ def process_outage_case_updates(sender, instance, created, **kwargs):
             )
 
         instance._is_just_restored = False
+        instance._is_just_inactive = False
+
+    if getattr(instance, "_is_just_inactive", False) and not getattr(
+        instance, "_is_just_restored", False
+    ):
+        if instance.celery_eta_task_id:
+            celery_app.control.revoke(instance.celery_eta_task_id, terminate=True)
+        if instance.celery_etr_task_id:
+            celery_app.control.revoke(instance.celery_etr_task_id, terminate=True)
+        if instance.celery_sla_task_id:
+            celery_app.control.revoke(instance.celery_sla_task_id, terminate=True)
+
+        OutageCase.objects.filter(pk=instance.pk).update(
+            celery_eta_task_id=None, celery_etr_task_id=None, celery_sla_task_id=None
+        )
+        instance._is_just_inactive = False
 
 
 @receiver(post_save, sender=CustomerReport)

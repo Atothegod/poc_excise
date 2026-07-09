@@ -18,6 +18,7 @@ from tools import (
     fetch_session_context,
     get_latest_outage,
     parse_iso_datetime,
+    record_closed_loop_response,
     restore_latest_outage,
     sync_chat_history_to_db,
 )
@@ -68,6 +69,7 @@ class MemoryAgent:
                         "report_id": item.get("report_id"),
                         "case_id": item.get("case_id"),
                         "notification_key": item.get("notification_key"),
+                        "closed_loop_kind": item.get("closed_loop_kind"),
                     }
                 )
             if restored_history:
@@ -115,6 +117,9 @@ class MemoryAgent:
         for msg in history:
             event_type = msg.get("event_type")
             event_prefix = f"event_type={event_type}; " if event_type else ""
+            closed_loop_kind = msg.get("closed_loop_kind")
+            if closed_loop_kind:
+                event_prefix += f"closed_loop_kind={closed_loop_kind}; "
             formatted.append(f"{msg['role']}: {event_prefix}{msg['content']}")
         return "\n".join(formatted)
 
@@ -154,11 +159,16 @@ class MemoryAgent:
             "System: If event_type=etr_timeout_sla, answer naturally using latest_sla_user_label when available.",
         ]
 
-    def _has_pending_closed_loop_prompt(self, history: list) -> bool:
+    def _latest_pending_closed_loop_prompt(self, history: list):
         for index in range(len(history) - 1, -1, -1):
             if history[index].get("event_type") == "closed_loop_prompt":
-                return index == len(history) - 1
-        return False
+                if index == len(history) - 1:
+                    return history[index]
+                return None
+        return None
+
+    def _has_pending_closed_loop_prompt(self, history: list) -> bool:
+        return self._latest_pending_closed_loop_prompt(history) is not None
 
     def _is_still_without_power(self, user_input: str) -> bool:
         normalized_input = user_input.strip().lower()
@@ -175,7 +185,8 @@ class MemoryAgent:
     def _closed_loop_resolution_response(
         self, user_input: str, history: list, ca_number: str | None
     ):
-        if not self._has_pending_closed_loop_prompt(history):
+        prompt = self._latest_pending_closed_loop_prompt(history)
+        if not prompt:
             return None
 
         normalized_input = user_input.strip().lower()
@@ -189,6 +200,11 @@ class MemoryAgent:
         if not any(keyword in normalized_input for keyword in resolved_keywords):
             return None
 
+        record_closed_loop_response(
+            "resolved",
+            ca_number=ca_number,
+            report_id=prompt.get("report_id"),
+        )
         return SimpleNamespace(
             answer=(
                 "ขอบคุณที่แจ้งยืนยันค่ะ ดีใจที่ไฟกลับมาใช้งานได้ตามปกติแล้ว "
@@ -245,8 +261,15 @@ class MemoryAgent:
             ),
         )
 
-    def _closed_loop_still_out_response(self, ca_number: str | None):
-        tool_result = Check_Outage_Tool(ca_number or "", pdpa_consent=True)
+    def _closed_loop_still_out_response(self, ca_number: str | None, prompt=None):
+        record_closed_loop_response(
+            "still_out",
+            ca_number=ca_number,
+            report_id=(prompt or {}).get("report_id"),
+        )
+        tool_result = Check_Outage_Tool(
+            ca_number or "", pdpa_consent=True, force_new_case=True
+        )
         return self._response_from_check_outage_result(tool_result, ca_number)
 
     def _ensure_feminine_ending(self, response):
@@ -367,7 +390,10 @@ class MemoryAgent:
         current_pdpa_consent.set(bool(pdpa_consent))
 
         history_list = self._hydrate_session_from_db(session_id, ca_number=ca_number)
-        pending_closed_loop = self._has_pending_closed_loop_prompt(history_list)
+        pending_closed_loop_prompt = self._latest_pending_closed_loop_prompt(
+            history_list
+        )
+        pending_closed_loop = pending_closed_loop_prompt is not None
         still_without_power = self._is_still_without_power(user_input)
 
         history_str = self._format_history(
@@ -383,7 +409,9 @@ class MemoryAgent:
         )
         if response is None:
             if pending_closed_loop and still_without_power:
-                response = self._closed_loop_still_out_response(ca_number)
+                response = self._closed_loop_still_out_response(
+                    ca_number, prompt=pending_closed_loop_prompt
+                )
             else:
                 response = self.agent(
                     chat_history=history_str, question=user_input, time_stamp=time_stamp

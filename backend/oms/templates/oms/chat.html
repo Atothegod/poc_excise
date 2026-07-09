@@ -638,6 +638,9 @@
 
             const bubble = document.createElement("div");
             bubble.className = "chat-bubble-left bubble relative bg-white text-gray-800 text-sm py-2 px-3 rounded-2xl rounded-tl-md max-w-[280px] shadow-sm leading-relaxed whitespace-pre-wrap break-words";
+            if (options.closedLoopKind) {
+                bubble.dataset.closedLoopKind = options.closedLoopKind;
+            }
             if (options.restorationSelect) {
                 const messageText = document.createElement("div");
                 messageText.textContent = text;
@@ -794,6 +797,7 @@
                         reportId: item.report_id,
                         caseId: item.case_id,
                         notificationKey: item.notification_key,
+                        closedLoopKind: item.closed_loop_kind,
                         restorationSelect: item.event_type === "closed_loop_prompt"
                             && index === chatHistory.length - 1
                     });
@@ -909,6 +913,7 @@
                 reportId: notification.report_id,
                 caseId: notification.case_id,
                 notificationKey: notification.notification_key,
+                closedLoopKind: notification.closed_loop_kind,
                 restorationSelect: notification.event_type === "closed_loop_prompt"
             });
             acknowledgeNotification(key);

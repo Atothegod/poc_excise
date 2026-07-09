@@ -140,6 +140,7 @@ def _normalize_dialog_history(history):
                 "report_id": item.get("report_id"),
                 "case_id": item.get("case_id"),
                 "notification_key": item.get("notification_key"),
+                "closed_loop_kind": item.get("closed_loop_kind"),
             }
         )
     return dialog
@@ -167,13 +168,16 @@ def sync_chat_history_to_db(session_id: str, history: list):
         pass
 
 
-def save_report_to_db(ca_number: str, pdpa_consent: bool):
+def save_report_to_db(
+    ca_number: str, pdpa_consent: bool, force_new_case: bool = False
+):
     endpoint = f"{DJANGO_API_URL}/reports/sync/"
     payload = {
         "session_id": current_session_id.get(),
         "ca_number": ca_number,
         "time_stamp": current_time_stamp.get(),
         "pdpa_consent": pdpa_consent,
+        "force_new_case": force_new_case,
     }
 
     max_retries = 3
@@ -186,6 +190,36 @@ def save_report_to_db(ca_number: str, pdpa_consent: bool):
             if attempt == max_retries - 1:
                 return {"event_type": "api_error"}
     return None
+
+
+def record_closed_loop_response(
+    response: str,
+    ca_number: str | None = None,
+    report_id: int | None = None,
+):
+    session_id = current_session_id.get()
+    if not session_id or session_id == "unknown":
+        return None
+
+    payload = {
+        "session_id": session_id,
+        "response": response,
+    }
+    if ca_number and is_valid_ca_number(ca_number):
+        payload["ca_number"] = ca_number
+    if report_id:
+        payload["report_id"] = report_id
+
+    try:
+        response_obj = requests.post(
+            f"{DJANGO_API_URL}/reports/closed-loop-response/",
+            json=payload,
+            timeout=5,
+        )
+        response_obj.raise_for_status()
+        return response_obj.json()
+    except requests.exceptions.RequestException:
+        return None
 
 
 def _format_etr_label(etr, etr_source=None):
@@ -230,7 +264,9 @@ def _join_branch_eta_etr(branch_label=None, eta_label=None, etr_label=None):
     return " และ".join(details)
 
 
-def Check_Outage_Tool(ca_number: str, pdpa_consent: bool = False):
+def Check_Outage_Tool(
+    ca_number: str, pdpa_consent: bool = False, force_new_case: bool = False
+):
     login_ca_number = current_login_ca_number.get()
     if login_ca_number and is_valid_ca_number(login_ca_number):
         ca_number = login_ca_number
@@ -244,7 +280,9 @@ def Check_Outage_Tool(ca_number: str, pdpa_consent: bool = False):
     if not pdpa_consent:
         return "[CONSENT_REQUIRED] ยังไม่ได้รับ PDPA consent จากหน้าเข้าสู่ระบบ กรุณากลับไปเข้าสู่ระบบใหม่"
 
-    db_response = save_report_to_db(ca_number, pdpa_consent)
+    db_response = save_report_to_db(
+        ca_number, pdpa_consent, force_new_case=force_new_case
+    )
 
     if not db_response:
         return "ขัดข้อง ไม่สามารถเชื่อมต่อกับระบบได้"

@@ -11,6 +11,11 @@ urlpatterns = [
     ),
     path("reports/chat-history/", views_api.sync_chat_history, name="sync_chat_history"),
     path(
+        "reports/closed-loop-response/",
+        views_api.record_closed_loop_response,
+        name="closed_loop_response",
+    ),
+    path(
         "reports/session-context/<str:session_id>/",
         views_api.get_session_context,
         name="session_context",

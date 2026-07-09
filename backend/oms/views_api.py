@@ -27,11 +27,17 @@ from .serializers import (
     ActionStatusResponseSerializer,
     CaValidationSerializer,
     ChatHistorySyncSerializer,
+    ClosedLoopResponseSerializer,
     SessionLoginSerializer,
     validate_ca_number_format,
 )
 from .services import format_minutes_label, get_pea_assessment, parse_eta_minutes
-from .tasks import check_eta_timeout, check_etr_timeout, send_proactive_alert
+from .tasks import (
+    check_eta_timeout,
+    check_etr_timeout,
+    check_sla_timeout,
+    send_proactive_alert,
+)
 from pea_project.celery import app as celery_app
 
 
@@ -138,6 +144,18 @@ def _get_or_create_active_report(session_id, ca_number):
         CustomerReport.objects.create(session_id=session_id, ca_number=ca_number),
         True,
     )
+
+
+def _mark_closed_loop_reports_resolved(session_id, ca_number=None, report_id=None):
+    reports = CustomerReport.objects.filter(session_id=session_id)
+    if ca_number:
+        reports = reports.filter(ca_number=ca_number)
+    if report_id:
+        reports = reports.filter(id=report_id)
+    else:
+        reports = reports.filter(is_resolved=False)
+
+    return reports.update(is_resolved=True, updated_at=timezone.now())
 
 
 def _grant_pdpa_consent(report):
@@ -385,12 +403,19 @@ def _apply_assessment_fields_to_case(case, assessment_fields, report):
     )
     case.refresh_from_db()
 
-    task = check_eta_timeout.apply_async(
+    eta_task = check_eta_timeout.apply_async(
         args=[case.case_id, report.id],
         eta=assessment_fields["eta_target_time"],
     )
-    case.celery_eta_task_id = task.id
-    case.save(update_fields=["celery_eta_task_id", "updated_at"])
+    sla_task = check_sla_timeout.apply_async(
+        args=[case.case_id],
+        eta=assessment_fields["sla_target_time"],
+    )
+    case.celery_eta_task_id = eta_task.id
+    case.celery_sla_task_id = sla_task.id
+    case.save(
+        update_fields=["celery_eta_task_id", "celery_sla_task_id", "updated_at"]
+    )
     return None
 
 
@@ -454,6 +479,8 @@ def _revoke_case_timers(case):
         celery_app.control.revoke(case.celery_eta_task_id, terminate=True)
     if case.celery_etr_task_id:
         celery_app.control.revoke(case.celery_etr_task_id, terminate=True)
+    if case.celery_sla_task_id:
+        celery_app.control.revoke(case.celery_sla_task_id, terminate=True)
 
 
 def _schedule_initial_oms_etr(case):
@@ -472,6 +499,20 @@ def _schedule_initial_oms_etr(case):
         oms_etr_updated_at=etr_updated_at,
         celery_etr_task_id=task.id,
     )
+    return True
+
+
+def _schedule_initial_sla(case):
+    if (
+        not case.sla_target_time
+        or case.celery_sla_task_id
+        or case.status in INACTIVE_CASE_STATUSES
+    ):
+        return False
+
+    task = check_sla_timeout.apply_async(args=[case.case_id], eta=case.sla_target_time)
+    case.celery_sla_task_id = task.id
+    OutageCase.objects.filter(pk=case.pk).update(celery_sla_task_id=task.id)
     return True
 
 
@@ -497,6 +538,7 @@ def _mark_superseded_cases_as_merged(case, affected_ca_numbers):
         superseded_case.merged_at = timezone.now()
         superseded_case.celery_eta_task_id = None
         superseded_case.celery_etr_task_id = None
+        superseded_case.celery_sla_task_id = None
         superseded_case.save(
             update_fields=[
                 "status",
@@ -504,6 +546,7 @@ def _mark_superseded_cases_as_merged(case, affected_ca_numbers):
                 "merged_at",
                 "celery_eta_task_id",
                 "celery_etr_task_id",
+                "celery_sla_task_id",
                 "updated_at",
             ]
         )
@@ -617,6 +660,7 @@ def sync_agent_report(request):
     data = serializer.validated_data
     session_id = data.get("session_id")
     ca_number = data.get("ca_number")
+    force_new_case = data.get("force_new_case", False)
     customer = _customer_location_for_ca(ca_number)
     if not customer:
         return Response(
@@ -630,6 +674,9 @@ def sync_agent_report(request):
             status=404,
         )
 
+    if force_new_case and session_id:
+        _mark_closed_loop_reports_resolved(session_id, ca_number=ca_number)
+
     report, _created = _get_or_create_active_report(session_id, ca_number)
     _apply_customer_location(report, customer)
     if data.get("time_stamp"):
@@ -638,12 +685,14 @@ def sync_agent_report(request):
         _grant_pdpa_consent(report)
     report.save()
 
-    if not _has_active_related_case(report):
+    if not force_new_case and not _has_active_related_case(report):
         _attach_active_ca_case(report)
         if report.related_case_id:
             report.save(update_fields=["related_case", "updated_at"])
 
-    case = report.related_case if _has_active_related_case(report) else None
+    case = None
+    if not force_new_case and _has_active_related_case(report):
+        case = report.related_case
     event_type = _existing_case_event_type(case) if case else "new_event"
 
     if event_type == "new_event":
@@ -824,6 +873,27 @@ def sync_chat_history(request):
     return Response({"status": "success", "report_id": report.id})
 
 
+@api_view(["POST"])
+def record_closed_loop_response(request):
+    serializer = ClosedLoopResponseSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=400)
+
+    data = serializer.validated_data
+    resolved_count = _mark_closed_loop_reports_resolved(
+        data["session_id"],
+        ca_number=data.get("ca_number"),
+        report_id=data.get("report_id"),
+    )
+    return Response(
+        {
+            "status": "success",
+            "response": data["response"],
+            "resolved_count": resolved_count,
+        }
+    )
+
+
 @api_view(["GET"])
 def get_session_context(request, session_id):
     ca_number = request.query_params.get("ca_number")
@@ -863,6 +933,7 @@ def oms_event_callback(request):
     _attach_reports_for_case(case)
     case.sync_affected_ca_numbers()
     etr_timer_scheduled = _schedule_initial_oms_etr(case) if created else False
+    sla_timer_scheduled = _schedule_initial_sla(case)
     notified_sessions = set()
     if (
         event_type == "case_opened"
@@ -878,6 +949,7 @@ def oms_event_callback(request):
             "created": created,
             "merged_count": merged_count,
             "etr_timer_scheduled": etr_timer_scheduled,
+            "sla_timer_scheduled": sla_timer_scheduled,
             "notified_session_count": len(notified_sessions),
             **_case_response_fields(case, include_model_etr=True),
         }

@@ -131,6 +131,12 @@ class OutageCase(models.Model):
         blank=True,
         help_text="ID ของ Celery Task สำหรับนับเวลา ETR",
     )
+    celery_sla_task_id = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        help_text="ID ของ Celery Task สำหรับนับเวลา SLA",
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

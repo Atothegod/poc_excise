@@ -69,6 +69,7 @@ class OutageCaseAdmin(CsvExportAdminMixin, admin.ModelAdmin):
         "pluem_etr_target_time",
         "celery_eta_task_id",
         "celery_etr_task_id",
+        "celery_sla_task_id",
         "created_at",
         "updated_at",
     )

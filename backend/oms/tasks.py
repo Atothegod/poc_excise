@@ -10,6 +10,11 @@ import os
 AGENT_WEBHOOK_URL = os.getenv(
     "AGENT_WEBHOOK_URL", "http://dspy-agent:8000/webhook/notify"
 )
+SLA_EXPIRED_CLOSED_LOOP_KIND = "sla_expired"
+SLA_EXPIRED_CLOSED_LOOP_MESSAGE = (
+    "ขออภัยที่การดำเนินการเกินเวลาที่แจ้งไว้ค่ะ "
+    "ไฟฟ้ากลับมาใช้งานได้หรือยังคะ"
+)
 
 
 def _parse_float(value):
@@ -39,10 +44,10 @@ def _notification_key(event_type, ca_number, report_id, case_id, message):
     )
 
 
-def _notification_payload(report, message, event_type):
+def _notification_payload(report, message, event_type, closed_loop_kind=None):
     case_id = str(report.related_case_id) if report.related_case_id else None
     report_id = report.id
-    return {
+    payload = {
         "session_id": report.session_id,
         "ca_number": report.ca_number,
         "message": message,
@@ -53,6 +58,9 @@ def _notification_payload(report, message, event_type):
             event_type, report.ca_number, report_id, case_id, message
         ),
     }
+    if closed_loop_kind:
+        payload["closed_loop_kind"] = closed_loop_kind
+    return payload
 
 
 def _sla_case_start_time(case):
@@ -88,7 +96,7 @@ def _ensure_sla(case, reference_time=None, reason="case_created"):
     return case
 
 
-def _notify_active_case_sessions(case, message, event_type):
+def _notify_active_case_sessions(case, message, event_type, closed_loop_kind=None):
     reports = (
         CustomerReport.objects.filter(related_case=case, is_resolved=False)
         .exclude(session_id__isnull=True)
@@ -100,7 +108,9 @@ def _notify_active_case_sessions(case, message, event_type):
         if report.session_id in sent_session_ids:
             continue
 
-        payload = _notification_payload(report, message, event_type)
+        payload = _notification_payload(
+            report, message, event_type, closed_loop_kind=closed_loop_kind
+        )
 
         try:
             requests.post(AGENT_WEBHOOK_URL, json=payload, timeout=5)
@@ -224,18 +234,45 @@ def check_etr_timeout(case_id):
         print("[Timer_ETR] ไม่พบข้อมูล Case (อาจถูกลบไปแล้ว)")
 
 
+@shared_task
+def check_sla_timeout(case_id):
+    try:
+        case = OutageCase.objects.get(case_id=case_id)
+        if case.status in INACTIVE_CASE_STATUSES:
+            return
+        if not case.sla_target_time:
+            return
+        if timezone.now() < case.sla_target_time:
+            return
+
+        case.sync_affected_ca_numbers()
+        sent_session_ids = _notify_active_case_sessions(
+            case,
+            SLA_EXPIRED_CLOSED_LOOP_MESSAGE,
+            "closed_loop_prompt",
+            closed_loop_kind=SLA_EXPIRED_CLOSED_LOOP_KIND,
+        )
+        if not sent_session_ids:
+            print(f"[Timer_SLA] ไม่พบ session ที่ต้องแจ้งเตือนสำหรับ Case: {case_id}")
+
+    except OutageCase.DoesNotExist:
+        print("[Timer_SLA] ไม่พบข้อมูล Case (อาจถูกลบไปแล้ว)")
+
+
 @shared_task(
     autoretry_for=(requests.exceptions.RequestException,),
     retry_kwargs={"max_retries": 3, "countdown": 2},
     retry_backoff=True,
 )
-def send_proactive_alert(report_id, message, event_type):
+def send_proactive_alert(report_id, message, event_type, closed_loop_kind=None):
     """
     ฟังก์ชันกลางสำหรับส่งแจ้งเตือนเชิงรุก (เช่น ช่างปิดงานไฟมาแล้ว, หรือส่ง ETR ครั้งที่ 2)
     """
     try:
         report = CustomerReport.objects.get(id=report_id)
-        payload = _notification_payload(report, message, event_type)
+        payload = _notification_payload(
+            report, message, event_type, closed_loop_kind=closed_loop_kind
+        )
         response = requests.post(AGENT_WEBHOOK_URL, json=payload, timeout=10)
         response.raise_for_status()
     except CustomerReport.DoesNotExist:
