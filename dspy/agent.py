@@ -8,20 +8,21 @@ from zoneinfo import ZoneInfo
 # 2. Now import your components safely
 from signature import PEA_Assistant, PEA_Conversation_State
 
-# นำเข้าตัวแปรทะลุมิติมาด้วยขอรับ!
-from tools import (
-    Check_Outage_Tool,
+from agent_tools import Check_Outage_Tool
+from django_client import (
+    fetch_session_context,
+    record_closed_loop_response,
+    sync_chat_history_to_db,
+)
+from session_state import (
     current_login_ca_number,
     current_pdpa_consent,
     current_session_id,
     current_time_stamp,
-    fetch_session_context,
     get_latest_outage,
-    parse_iso_datetime,
-    record_closed_loop_response,
     restore_latest_outage,
-    sync_chat_history_to_db,
 )
+from time_utils import parse_iso_datetime
 
 # 3. Initialize your ReAct agent
 base_react_agent = dspy.ReAct(

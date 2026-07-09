@@ -8,7 +8,8 @@ from collections import defaultdict
 
 # 1. Import the stateful 'chatbot' instance you created in agent.py
 from agent import chatbot  # (สมมติว่าไฟล์คลาส MemoryAgent ของคุณชื่อ core_agent)
-from tools import fetch_session_context, restore_latest_outage, sync_chat_history_to_db
+from django_client import fetch_session_context, sync_chat_history_to_db
+from session_state import restore_latest_outage
 
 app = FastAPI(title="DSPy Agent Webhook Server")
 pending_notifications = defaultdict(list)
@@ -213,18 +214,6 @@ def _latest_closed_loop_notification_from_db(session_id):
     }
 
 
-def _merge_latest_closed_loop_fallback(session_id, notifications):
-    fallback = _latest_closed_loop_notification_from_db(session_id)
-    if not fallback:
-        return notifications
-
-    fallback_key = _notification_key_for_record(fallback)
-    if any(_notification_key_for_record(item) == fallback_key for item in notifications):
-        return notifications
-
-    return notifications + [fallback]
-
-
 @app.post("/ask")
 async def ask_agent(data: QuestionRequest):
     try:
@@ -354,8 +343,3 @@ async def ack_notifications(session_id: str, data: NotificationAck):
         if _notification_key_for_record(notification) not in keys
     ]
     return {"status": "success", "acked": len(keys)}
-
-
-@app.get("/health")
-def health_check():
-    return {"status": "healthy"}

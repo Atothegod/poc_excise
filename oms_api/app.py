@@ -147,14 +147,6 @@ def api_status_to_case_status(value: str):
     raise HTTPException(status_code=422, detail="status must be OPEN or CLOSED")
 
 
-def event_type_for_status(case_status: str, has_etr: bool = False):
-    if case_status == STATUS_RESTORED:
-        return "case_closed"
-    if has_etr:
-        return "etr_updated"
-    return "case_opened"
-
-
 def build_case_payload(
     *,
     affected_ca_numbers: list[str] | None = None,

@@ -1,0 +1,85 @@
+from django_client import is_valid_ca_number, save_report_to_db
+from response_formatters import (
+    format_branch_label,
+    format_etr_label,
+    format_mass_outage_label,
+    join_branch_eta_etr,
+)
+from session_state import (
+    current_login_ca_number,
+    current_pdpa_consent,
+    remember_latest_outage,
+)
+from time_utils import format_eta_label, format_time_only
+
+
+def Check_Outage_Tool(
+    ca_number: str, pdpa_consent: bool = False, force_new_case: bool = False
+):
+    login_ca_number = current_login_ca_number.get()
+    if login_ca_number and is_valid_ca_number(login_ca_number):
+        ca_number = login_ca_number
+    else:
+        ca_number = str(ca_number).strip()
+    pdpa_consent = bool(pdpa_consent or current_pdpa_consent.get())
+
+    if not is_valid_ca_number(ca_number):
+        return "[CA_INVALID] ไม่พบหมายเลข CA จากหน้าเข้าสู่ระบบ กรุณากลับไปเข้าสู่ระบบใหม่"
+
+    if not pdpa_consent:
+        return "[CONSENT_REQUIRED] ยังไม่ได้รับ PDPA consent จากหน้าเข้าสู่ระบบ กรุณากลับไปเข้าสู่ระบบใหม่"
+
+    db_response = save_report_to_db(
+        ca_number, pdpa_consent, force_new_case=force_new_case
+    )
+
+    if not db_response:
+        return "ขัดข้อง ไม่สามารถเชื่อมต่อกับระบบได้"
+
+    event_type = db_response.get("event_type")
+    eta = db_response.get("eta_target_time")
+    fastest_branch = db_response.get("fastest_branch")
+    etr = db_response.get("etr_target_time") or db_response.get("oms_etr")
+    etr_label = format_etr_label(etr, db_response.get("etr_source"))
+    sla = db_response.get("sla_target_time")
+    sla_label = format_time_only(sla)
+    remember_latest_outage(db_response, ca_number=ca_number)
+
+    # เคส 1: API ขัดข้องติดต่อกันจนครบกำหนด
+    if event_type == "api_error":
+        return "ขัดข้อง: API_Timeout เกิน 3 ครั้ง โปรดแจ้งลูกค้าว่าเปลี่ยนสถานะเป็นโอนสายให้ Human Agent"
+
+    if event_type == "ca_not_found":
+        return "[CA_NOT_FOUND] ไม่พบหมายเลข CA นี้ในฐานข้อมูลพิกัดลูกค้า กรุณาตรวจสอบหมายเลข CA อีกครั้ง หรือโอนให้เจ้าหน้าที่ช่วยตรวจสอบ"
+
+    if event_type == "assessment_error":
+        return "[FallBack] ระบบประเมินเวลาเข้าหน้างานหรือเวลาไฟกลับขัดข้อง ให้ตอบว่ากำลังโอนสายให้เจ้าหน้าที่"
+
+    if event_type == "etr_timeout_sla":
+        if sla_label:
+            return f"[อัปเดตการจ่ายไฟ] แจ้งว่า ขออัปเดตค่ะ การจ่ายไฟจะไม่เกินเวลา {sla_label} ค่ะ"
+        return "[อัปเดตการจ่ายไฟ] แจ้งว่า ขออัปเดตค่ะ ระบบกำลังเร่งดำเนินการจ่ายไฟคืนค่ะ"
+
+    # เคส 2: เกิดเหตุวงกว้าง (Mass Outage) -> บังคับแจ้ง ETR ตาม Rule 6
+    if event_type == "existing_ca_case":
+        eta_label = format_eta_label(eta, db_response.get("eta_formatted")) or eta
+        branch_label = format_branch_label(fastest_branch)
+        detail_text = join_branch_eta_etr(branch_label, eta_label, etr_label)
+        if detail_text:
+            return f"[เคสเดิมของ CA] แจ้งว่า {detail_text}"
+        return "[เคสเดิมของ CA] ระบบพบเคสที่เปิดอยู่แล้ว แต่ยังไม่มีเวลาประเมินล่าสุด"
+
+    if event_type in {"mass_outage", "repeated_event"}:
+        return f"[เหตุวงกว้าง] {format_mass_outage_label(etr_label)}"
+
+    # เคส 3: แจ้งครั้งแรก (New Event) หรือ เคสเดี่ยว -> บังคับแจ้ง ETA ตาม Rule 7
+    # และตรวจสอบ ETR เพิ่มเติม
+    elif event_type == "new_event":
+        eta_label = format_eta_label(eta, db_response.get("eta_formatted")) or eta
+        branch_label = format_branch_label(fastest_branch)
+        detail_text = join_branch_eta_etr(branch_label, eta_label, etr_label)
+        if not detail_text:
+            detail_text = "ระบบกำลังประเมินเวลาช่างเข้าหน้างานล่าสุด"
+        return f"[เหตุแจ้งใหม่] เปิดใบงานแล้ว แจ้งว่า {detail_text}"
+
+    return "ขัดข้อง ไม่สามารถระบุประเภทเหตุการณ์ได้ค่ะ"

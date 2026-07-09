@@ -419,18 +419,6 @@ def _apply_assessment_fields_to_case(case, assessment_fields, report):
     return None
 
 
-def _apply_assessment_to_case(case, ca_number, base_time, report):
-    if case.eta_target_time:
-        return None
-
-    assessment_error, assessment_fields = _prepare_assessment_fields(
-        ca_number, base_time, report
-    )
-    if assessment_error:
-        return assessment_error
-    return _apply_assessment_fields_to_case(case, assessment_fields, report)
-
-
 def _format_time_label(target_time):
     if not target_time:
         return None
