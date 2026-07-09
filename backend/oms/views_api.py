@@ -16,10 +16,12 @@ from .case_logic import (
     CASE_TYPE_MASS_OUTAGE,
     CASE_TYPE_NORMAL,
     INACTIVE_CASE_STATUSES,
+    MASS_OUTAGE_CONFIRMATION_COUNT,
+    STATUS_MERGED,
+    STATUS_REPORTED,
     STATUS_RESTORED,
 )
-from .models import CustomerReport, OutageCase
-from .oms_client import OmsClientError, get_customer, report_outage
+from .models import CustomerLocation, CustomerReport, OutageCase
 from .serializers import (
     AgentReportSerializer,
     ActionStatusRequestSerializer,
@@ -31,6 +33,7 @@ from .serializers import (
 )
 from .services import format_minutes_label, get_pea_assessment, parse_eta_minutes
 from .tasks import check_eta_timeout, send_proactive_alert
+from pea_project.celery import app as celery_app
 
 
 def _parse_float(value):
@@ -72,6 +75,8 @@ def _case_response_fields(case, include_model_etr=False):
             "etr_target_time": None,
             "etr_source": None,
             "case_type": None,
+            "external_event_id": None,
+            "outage_time": None,
             "oms_etr_updated_at": None,
             "sla_reference_time": None,
             "sla_target_time": None,
@@ -102,6 +107,8 @@ def _case_response_fields(case, include_model_etr=False):
         "etr_target_time": _datetime_iso(etr_target_time),
         "etr_source": etr_source,
         "case_type": case.case_type,
+        "external_event_id": case.external_event_id or None,
+        "outage_time": _datetime_iso(case.outage_time),
         "oms_etr_updated_at": _datetime_iso(case.oms_etr_updated_at),
         "sla_reference_time": _datetime_iso(case.sla_reference_time),
         "sla_target_time": _datetime_iso(case.sla_target_time),
@@ -135,6 +142,16 @@ def _grant_pdpa_consent(report):
     report.pdpa_consent = True
     if not report.pdpa_consent_at:
         report.pdpa_consent_at = timezone.now()
+
+
+def _customer_location_for_ca(ca_number):
+    return CustomerLocation.objects.filter(ca_number=ca_number).first()
+
+
+def _apply_customer_location(report, customer):
+    report.customer_name = customer.fullname or ""
+    report.latitude = customer.latitude
+    report.longitude = customer.longitude
 
 
 def _has_active_related_case(report):
@@ -173,11 +190,19 @@ def _attach_active_ca_case(report):
     active_report = _latest_active_report_for_ca(
         report.ca_number, exclude_report_id=report.id
     )
-    if not active_report or not active_report.related_case:
-        return False
+    if active_report and active_report.related_case:
+        report.related_case = active_report.related_case
+        return True
 
-    report.related_case = active_report.related_case
-    return True
+    for case in (
+        OutageCase.objects.exclude(status__in=INACTIVE_CASE_STATUSES)
+        .order_by("-updated_at", "-created_at")
+        .only("case_id", "affected_ca_numbers", "status")
+    ):
+        if report.ca_number in (case.affected_ca_numbers or []):
+            report.related_case = case
+            return True
+    return False
 
 
 def _attach_waiting_same_ca_reports(report):
@@ -211,43 +236,83 @@ def _existing_case_event_type(case):
     return "existing_ca_case"
 
 
-def _case_id_from_oms(oms_case):
+def _case_id_from_oms(oms_case, required=True):
     raw_case_id = oms_case.get("case_id")
     if not raw_case_id:
-        raise ValueError("OMS response does not contain case_id")
-    return UUID(str(raw_case_id))
+        if required:
+            raise ValueError("OMS response does not contain case_id")
+        return None
+    try:
+        return UUID(str(raw_case_id))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("OMS response contains invalid case_id") from exc
 
 
-def _mirror_oms_case(oms_case, trigger_signals=False):
-    case_id = _case_id_from_oms(oms_case)
+def _case_type_from_oms(oms_case, affected_ca_numbers):
+    case_type = oms_case.get("case_type")
+    if case_type in {CASE_TYPE_NORMAL, CASE_TYPE_MASS_OUTAGE}:
+        return case_type
+    if len(affected_ca_numbers) >= MASS_OUTAGE_CONFIRMATION_COUNT:
+        return CASE_TYPE_MASS_OUTAGE
+    return CASE_TYPE_NORMAL
+
+
+def _find_oms_case(case_id, external_event_id):
+    if external_event_id:
+        case = OutageCase.objects.filter(external_event_id=external_event_id).first()
+        if case:
+            return case
+    if case_id:
+        return OutageCase.objects.filter(case_id=case_id).first()
+    return None
+
+
+def _upsert_oms_case(oms_case, trigger_signals=False):
+    case_id = _case_id_from_oms(oms_case, required=False)
+    external_event_id = (oms_case.get("external_event_id") or "").strip() or None
     status = oms_case.get("status") or "reported"
-    case_type = oms_case.get("case_type") or CASE_TYPE_NORMAL
     affected_ca_numbers = sorted(set(oms_case.get("affected_ca_numbers") or []))
+    case_type = _case_type_from_oms(oms_case, affected_ca_numbers)
+    outage_time = _parse_oms_datetime(oms_case.get("outage_time"))
     oms_etr = _parse_oms_datetime(
         oms_case.get("oms_etr") or oms_case.get("etr_target_time")
     )
 
+    if not case_id and not external_event_id:
+        raise ValueError("OMS event must contain case_id or external_event_id")
+
     defaults = {
-        "title": f"OMS case {case_id}",
+        "title": f"OMS case {external_event_id or case_id}",
         "case_type": case_type,
         "status": status,
+        "external_event_id": external_event_id,
         "affected_ca_numbers": affected_ca_numbers,
+        "outage_time": outage_time,
         "oms_etr": oms_etr,
         "sla_reference_time": timezone.now(),
         "sla_target_time": timezone.now() + timedelta(hours=OutageCase.SLA_HOURS),
         "sla_reason": "case_created",
     }
+    if case_id:
+        defaults["case_id"] = case_id
 
-    case, created = OutageCase.objects.get_or_create(case_id=case_id, defaults=defaults)
-    if created:
-        return case
+    case = _find_oms_case(case_id, external_event_id)
+    if not case:
+        case = OutageCase.objects.create(**defaults)
+        return case, True
 
-    fields = {
-        "case_type": case_type,
-        "status": status,
-        "affected_ca_numbers": affected_ca_numbers,
-        "oms_etr": oms_etr,
-    }
+    fields = {"status": status}
+    if "case_type" in oms_case or "affected_ca_numbers" in oms_case:
+        fields["case_type"] = case_type
+    if external_event_id:
+        fields["external_event_id"] = external_event_id
+    if "affected_ca_numbers" in oms_case:
+        fields["affected_ca_numbers"] = affected_ca_numbers
+    if "outage_time" in oms_case:
+        fields["outage_time"] = outage_time
+    if "oms_etr" in oms_case or "etr_target_time" in oms_case:
+        fields["oms_etr"] = oms_etr
+
     if trigger_signals:
         for field, value in fields.items():
             setattr(case, field, value)
@@ -255,21 +320,28 @@ def _mirror_oms_case(oms_case, trigger_signals=False):
     else:
         OutageCase.objects.filter(pk=case.pk).update(**fields, updated_at=timezone.now())
         case.refresh_from_db()
-    return case
+    return case, False
 
 
-def _apply_assessment_to_case(case, ca_number, base_time, report):
-    if case.eta_target_time:
-        return None
+def _assessment_request_payload(ca_number, report):
+    payload = {"ca_number": ca_number}
+    if report.latitude is not None and report.longitude is not None:
+        payload.update({"lat": report.latitude, "lon": report.longitude})
+    return payload
 
-    assessment = get_pea_assessment({"ca_number": ca_number}) or {}
+
+def _prepare_assessment_fields(ca_number, base_time, report):
+    assessment = get_pea_assessment(_assessment_request_payload(ca_number, report)) or {}
     assessment_error = assessment.get("error")
     eta_minutes = None if assessment_error else parse_eta_minutes(
         assessment.get("eta_formatted")
     )
 
     if eta_minutes is None:
-        return assessment_error or "assessment response does not contain a usable ETA"
+        return (
+            assessment_error or "assessment response does not contain a usable ETA",
+            None,
+        )
 
     etr_minutes = _parse_float(assessment.get("estimated_etr_minutes"))
     eta_target_time = base_time + timedelta(minutes=eta_minutes)
@@ -279,40 +351,55 @@ def _apply_assessment_to_case(case, ca_number, base_time, report):
         else None
     )
 
-    case.eta_target_time = eta_target_time
-    case.sla_reference_time = base_time
-    case.sla_target_time = base_time + timedelta(hours=OutageCase.SLA_HOURS)
-    case.sla_reason = "case_created"
-    case.assessment_fastest_branch = assessment.get("fastest_branch") or ""
-    case.assessment_eta_formatted = (
-        assessment.get("eta_formatted")
-        or format_minutes_label(eta_minutes)
-        or ""
-    )
-    case.assessment_eta_minutes = eta_minutes
-    case.pluem_etr_minutes = etr_minutes
-    case.pluem_etr_target_time = pluem_etr_target_time
-    case.assessment_payload = assessment
-    case.save(
-        update_fields=[
-            "eta_target_time",
-            "sla_reference_time",
-            "sla_target_time",
-            "sla_reason",
-            "assessment_fastest_branch",
-            "assessment_eta_formatted",
-            "assessment_eta_minutes",
-            "pluem_etr_minutes",
-            "pluem_etr_target_time",
-            "assessment_payload",
-            "updated_at",
-        ]
+    return (
+        None,
+        {
+            "eta_target_time": eta_target_time,
+            "sla_reference_time": base_time,
+            "sla_target_time": base_time + timedelta(hours=OutageCase.SLA_HOURS),
+            "sla_reason": "case_created",
+            "assessment_fastest_branch": assessment.get("fastest_branch") or "",
+            "assessment_eta_formatted": (
+                assessment.get("eta_formatted")
+                or format_minutes_label(eta_minutes)
+                or ""
+            ),
+            "assessment_eta_minutes": eta_minutes,
+            "pluem_etr_minutes": etr_minutes,
+            "pluem_etr_target_time": pluem_etr_target_time,
+            "assessment_payload": assessment,
+        },
     )
 
-    task = check_eta_timeout.apply_async(args=[case.case_id, report.id], eta=eta_target_time)
+
+def _apply_assessment_fields_to_case(case, assessment_fields, report):
+    for field, value in assessment_fields.items():
+        setattr(case, field, value)
+    OutageCase.objects.filter(pk=case.pk).update(
+        **assessment_fields,
+        updated_at=timezone.now(),
+    )
+    case.refresh_from_db()
+
+    task = check_eta_timeout.apply_async(
+        args=[case.case_id, report.id],
+        eta=assessment_fields["eta_target_time"],
+    )
     case.celery_eta_task_id = task.id
     case.save(update_fields=["celery_eta_task_id", "updated_at"])
     return None
+
+
+def _apply_assessment_to_case(case, ca_number, base_time, report):
+    if case.eta_target_time:
+        return None
+
+    assessment_error, assessment_fields = _prepare_assessment_fields(
+        ca_number, base_time, report
+    )
+    if assessment_error:
+        return assessment_error
+    return _apply_assessment_fields_to_case(case, assessment_fields, report)
 
 
 def _format_time_label(target_time):
@@ -356,6 +443,49 @@ def _notify_mass_outage_sessions(case, exclude_session_id=None):
             event_type="mass_outage",
         )
     return sent_session_ids
+
+
+def _revoke_case_timers(case):
+    if case.celery_eta_task_id:
+        celery_app.control.revoke(case.celery_eta_task_id, terminate=True)
+    if case.celery_etr_task_id:
+        celery_app.control.revoke(case.celery_etr_task_id, terminate=True)
+
+
+def _mark_superseded_cases_as_merged(case, affected_ca_numbers):
+    if not affected_ca_numbers or case.case_type != CASE_TYPE_MASS_OUTAGE:
+        return 0
+
+    superseded_cases = (
+        OutageCase.objects.filter(
+            affected_customers__ca_number__in=affected_ca_numbers,
+            affected_customers__is_resolved=False,
+        )
+        .exclude(pk=case.pk)
+        .exclude(status__in=INACTIVE_CASE_STATUSES)
+        .distinct()
+    )
+
+    updated_count = 0
+    for superseded_case in superseded_cases:
+        _revoke_case_timers(superseded_case)
+        superseded_case.status = STATUS_MERGED
+        superseded_case.merged_into = case
+        superseded_case.merged_at = timezone.now()
+        superseded_case.celery_eta_task_id = None
+        superseded_case.celery_etr_task_id = None
+        superseded_case.save(
+            update_fields=[
+                "status",
+                "merged_into",
+                "merged_at",
+                "celery_eta_task_id",
+                "celery_etr_task_id",
+                "updated_at",
+            ]
+        )
+        updated_count += 1
+    return updated_count
 
 
 def _should_include_model_etr(case):
@@ -464,46 +594,40 @@ def sync_agent_report(request):
     data = serializer.validated_data
     session_id = data.get("session_id")
     ca_number = data.get("ca_number")
+    customer = _customer_location_for_ca(ca_number)
+    if not customer:
+        return Response(
+            {
+                "status": "not_found",
+                "event_type": "ca_not_found",
+                "message": "ไม่พบหมายเลข CA นี้ในฐานข้อมูลลูกค้า",
+                "report_id": None,
+                **_case_response_fields(None),
+            },
+            status=404,
+        )
 
     report, _created = _get_or_create_active_report(session_id, ca_number)
+    _apply_customer_location(report, customer)
     if data.get("time_stamp"):
         report.time_stamp = data.get("time_stamp")
     if data.get("pdpa_consent"):
         _grant_pdpa_consent(report)
     report.save()
 
-    try:
-        oms_response = report_outage(ca_number)
-    except OmsClientError:
-        return Response({"status": "error", "event_type": "api_error"})
+    if not _has_active_related_case(report):
+        _attach_active_ca_case(report)
+        if report.related_case_id:
+            report.save(update_fields=["related_case", "updated_at"])
 
-    if not oms_response:
-        return Response(
-            {
-                "status": "not_found",
-                "event_type": "ca_not_found",
-                "message": "ไม่พบ CA ในฐานข้อมูลพิกัดลูกค้า OMS",
-                "report_id": report.id,
-                **_case_response_fields(None),
-            }
-        )
-
-    event_type = oms_response.get("event_type") or "new_event"
-    oms_case = oms_response.get("case") or oms_response
-    try:
-        case = _mirror_oms_case(oms_case, trigger_signals=False)
-    except ValueError as exc:
-        return Response({"status": "error", "event_type": "api_error", "message": str(exc)})
-
-    report.related_case = case
-    report.save(update_fields=["related_case", "updated_at"])
-    _attach_waiting_same_ca_reports(report)
-    _attach_reports_for_case(case)
-    case.sync_affected_ca_numbers()
+    case = report.related_case if _has_active_related_case(report) else None
+    event_type = _existing_case_event_type(case) if case else "new_event"
 
     if event_type == "new_event":
         base_time = report.time_stamp if report.time_stamp else timezone.now()
-        assessment_error = _apply_assessment_to_case(case, ca_number, base_time, report)
+        assessment_error, assessment_fields = _prepare_assessment_fields(
+            ca_number, base_time, report
+        )
         if assessment_error:
             return Response(
                 {
@@ -511,13 +635,23 @@ def sync_agent_report(request):
                     "event_type": "assessment_error",
                     "message": assessment_error,
                     "report_id": report.id,
-                    **_case_response_fields(case),
+                    **_case_response_fields(None),
                 }
             )
 
-    if oms_response.get("newly_promoted"):
-        case.refresh_from_db()
-        _notify_mass_outage_sessions(case, exclude_session_id=session_id)
+        case = OutageCase.objects.create(
+            title=f"ไฟดับ CA {ca_number}",
+            case_type=CASE_TYPE_NORMAL,
+            status=STATUS_REPORTED,
+            affected_ca_numbers=[ca_number],
+            latitude=customer.latitude,
+            longitude=customer.longitude,
+        )
+        report.related_case = case
+        report.save(update_fields=["related_case", "updated_at"])
+        _attach_waiting_same_ca_reports(report)
+        case.sync_affected_ca_numbers()
+        _apply_assessment_fields_to_case(case, assessment_fields, report)
 
     if case.status not in INACTIVE_CASE_STATUSES:
         effective_etr = case.effective_etr_time()
@@ -587,16 +721,12 @@ def validate_ca_login(request):
         return Response(serializer.errors, status=400)
 
     ca_number = serializer.validated_data["ca_number"]
-    try:
-        customer = get_customer(ca_number)
-    except OmsClientError:
-        return Response({"status": "error", "message": "ไม่สามารถเชื่อมต่อ OMS"}, status=502)
-
+    customer = _customer_location_for_ca(ca_number)
     if not customer:
         return Response(
             {
                 "status": "not_found",
-                "message": "ไม่พบหมายเลข CA นี้ในฐานข้อมูลลูกค้า OMS",
+                "message": "ไม่พบหมายเลข CA นี้ในฐานข้อมูลลูกค้า",
             },
             status=404,
         )
@@ -605,7 +735,7 @@ def validate_ca_login(request):
         {
             "status": "success",
             "ca_number": ca_number,
-            "customer_name": customer.get("fullname") or "",
+            "customer_name": customer.fullname or "",
         }
     )
 
@@ -619,16 +749,12 @@ def register_session_login(request):
         return Response(serializer.errors, status=400)
 
     data = serializer.validated_data
-    try:
-        customer = get_customer(data["ca_number"])
-    except OmsClientError:
-        return Response({"status": "error", "message": "ไม่สามารถเชื่อมต่อ OMS"}, status=502)
-
+    customer = _customer_location_for_ca(data["ca_number"])
     if not customer:
         return Response(
             {
                 "status": "not_found",
-                "message": "ไม่พบหมายเลข CA นี้ในฐานข้อมูลลูกค้า OMS",
+                "message": "ไม่พบหมายเลข CA นี้ในฐานข้อมูลลูกค้า",
             },
             status=404,
         )
@@ -636,7 +762,7 @@ def register_session_login(request):
     report, _created = _get_or_create_active_report(
         data["session_id"], data["ca_number"]
     )
-    report.customer_name = customer.get("fullname") or ""
+    _apply_customer_location(report, customer)
     _grant_pdpa_consent(report)
     _attach_active_ca_case(report)
     report.save()
@@ -698,19 +824,36 @@ def oms_event_callback(request):
         return Response({"status": "error", "message": "event_type and case are required"}, status=400)
 
     try:
-        case = _mirror_oms_case(
+        case, created = _upsert_oms_case(
             oms_case,
-            trigger_signals=event_type in {"etr_updated", "case_closed"},
+            trigger_signals=True,
         )
     except ValueError as exc:
         return Response({"status": "error", "message": str(exc)}, status=400)
 
+    merged_count = 0
+    if event_type == "case_opened":
+        merged_count = _mark_superseded_cases_as_merged(
+            case, case.affected_ca_numbers or []
+        )
+
     _attach_reports_for_case(case)
     case.sync_affected_ca_numbers()
+    notified_sessions = set()
+    if (
+        event_type == "case_opened"
+        and case.case_type == CASE_TYPE_MASS_OUTAGE
+        and case.status not in INACTIVE_CASE_STATUSES
+    ):
+        notified_sessions = _notify_mass_outage_sessions(case)
+
     return Response(
         {
             "status": "success",
             "event_type": event_type,
+            "created": created,
+            "merged_count": merged_count,
+            "notified_session_count": len(notified_sessions),
             **_case_response_fields(case, include_model_etr=True),
         }
     )

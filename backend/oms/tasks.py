@@ -127,6 +127,10 @@ def _ensure_pluem_etr(case, report_id=None):
         return case
 
     payload = {"ca_number": report.ca_number}
+    lat = report.latitude if report.latitude is not None else case.latitude
+    lon = report.longitude if report.longitude is not None else case.longitude
+    if lat is not None and lon is not None:
+        payload.update({"lat": lat, "lon": lon})
     assessment = get_pea_assessment(payload)
     etr_minutes = _parse_float(assessment.get("estimated_etr_minutes"))
     if assessment.get("error") or etr_minutes is None:

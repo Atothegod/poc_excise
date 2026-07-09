@@ -1,6 +1,5 @@
 import csv
 import io
-import math
 from datetime import timedelta
 from unittest.mock import patch
 
@@ -22,12 +21,10 @@ from .case_logic import (
     CASE_LINK_RADIUS_KM,
     CASE_TYPE_MASS_OUTAGE,
     CASE_TYPE_NORMAL,
-    MASS_OUTAGE_CONFIRMATION_COUNT,
     STATUS_MERGED,
 )
 from .models import CustomerLocation, CustomerReport, OutageCase, OutageRestorationLog
 from .tasks import check_eta_timeout, check_etr_timeout, send_proactive_alert
-from .views_api import calculate_distance
 
 
 class SyncAgentReportTests(TestCase):
@@ -270,6 +267,12 @@ class SyncAgentReportTests(TestCase):
     def test_sync_report_reuses_active_case_for_same_ca_across_sessions(
         self, mock_assessment
     ):
+        CustomerLocation.objects.create(
+            ca_number="123456789012",
+            fullname="Same CA active user",
+            latitude=9.2917,
+            longitude=100.926296,
+        )
         case = OutageCase.objects.create(
             title="Same CA active case",
             latitude=9.2917,
@@ -381,12 +384,11 @@ class SyncAgentReportTests(TestCase):
         )
         mock_send_alert.assert_not_called()
 
-    @patch("oms.views_api.celery_app.control.revoke")
     @patch("oms.views_api.send_proactive_alert.delay")
     @patch("oms.views_api.get_pea_assessment")
     @patch("oms.views_api.check_eta_timeout.apply_async")
-    def test_third_nearby_ca_promotes_anchor_to_mass_outage(
-        self, mock_apply_async, mock_assessment, mock_send_alert, mock_revoke
+    def test_third_nearby_ca_stays_separate_without_oms_group_event(
+        self, mock_apply_async, mock_assessment, mock_send_alert
     ):
         mock_apply_async.return_value.id = "eta-task-id"
         mock_assessment.return_value = self._assessment_payload()
@@ -409,59 +411,24 @@ class SyncAgentReportTests(TestCase):
         self.assertEqual(third_response.status_code, 200)
         self.assertEqual(first_response.data["event_type"], "new_event")
         self.assertEqual(second_response.data["event_type"], "new_event")
-        self.assertEqual(third_response.data["event_type"], "mass_outage")
-        self.assertEqual(third_response.data["case_type"], CASE_TYPE_MASS_OUTAGE)
+        self.assertEqual(third_response.data["event_type"], "new_event")
+        self.assertEqual(third_response.data["case_type"], CASE_TYPE_NORMAL)
+        self.assertEqual(OutageCase.objects.count(), 3)
         self.assertEqual(
-            set(third_response.data["affected_ca_numbers"]),
-            set(ca_numbers),
+            set(OutageCase.objects.values_list("case_type", flat=True)),
+            {CASE_TYPE_NORMAL},
         )
-        self.assertIsNotNone(third_response.data["etr_target_time"])
-        self.assertIsNotNone(parse_datetime(third_response.data["etr_target_time"]))
-        self.assertEqual(third_response.data["etr_source"], "pluem_model")
-        self.assertEqual(third_response.data["pluem_etr_minutes"], 69.0)
-
-        anchor = OutageCase.objects.get(case_id=first_response.data["case_id"])
-        anchor.refresh_from_db()
-        self.assertEqual(anchor.case_type, CASE_TYPE_MASS_OUTAGE)
-        self.assertEqual(anchor.affected_ca_numbers, sorted(ca_numbers))
-
-        merged_cases = OutageCase.objects.filter(status=STATUS_MERGED)
-        self.assertEqual(merged_cases.count(), 2)
-        for merged_case in merged_cases:
-            self.assertEqual(merged_case.merged_into, anchor)
-            self.assertIsNotNone(merged_case.merged_at)
-            self.assertIsNone(merged_case.celery_eta_task_id)
-            self.assertIsNone(merged_case.celery_etr_task_id)
 
         for ca_number in ca_numbers:
             report = CustomerReport.objects.get(ca_number=ca_number)
-            self.assertEqual(report.related_case, anchor)
+            self.assertEqual(report.related_case.affected_ca_numbers, [ca_number])
+        mock_send_alert.assert_not_called()
 
-        notified_reports = [
-            CustomerReport.objects.get(id=call.kwargs["report_id"])
-            for call in mock_send_alert.call_args_list
-        ]
-        self.assertEqual(
-            {report.session_id for report in notified_reports},
-            {"session-a", "session-b"},
-        )
-        self.assertEqual(
-            {call.kwargs["event_type"] for call in mock_send_alert.call_args_list},
-            {"mass_outage"},
-        )
-        for call in mock_send_alert.call_args_list:
-            self.assertIn(
-                "ขณะนี้เกิดเหตุไฟดับวงกว้างในพื้นที่ค่ะ",
-                call.kwargs["message"],
-            )
-            self.assertIn("คาดว่าจะจ่ายไฟคืนประมาณ", call.kwargs["message"])
-        self.assertEqual(mock_revoke.call_count, 2)
-
-    @patch("oms.signals.celery_app.control.revoke")
+    @patch("oms.views_api.celery_app.control.revoke")
     @patch("oms.views_api.send_proactive_alert.delay")
     @patch("oms.views_api.get_pea_assessment")
     @patch("oms.views_api.check_eta_timeout.apply_async")
-    def test_restored_re_report_mass_outage_sends_closed_loop_to_all_sessions(
+    def test_oms_group_event_attaches_reports_and_closed_loop_to_all_sessions(
         self, mock_apply_async, mock_assessment, mock_send_alert, _mock_revoke
     ):
         mock_apply_async.return_value.id = "eta-task-id"
@@ -482,37 +449,77 @@ class SyncAgentReportTests(TestCase):
             latitude=14.0000,
             longitude=100.0000,
         )
-        original_report = CustomerReport.objects.create(
+        CustomerReport.objects.create(
             session_id=sessions[0],
             ca_number=ca_numbers[0],
             related_case=original_case,
             is_resolved=True,
         )
 
-        first_response = self._post_sync(sessions[0], ca_numbers[0])
-        self._post_sync(sessions[1], ca_numbers[1])
-        third_response = self._post_sync(sessions[2], ca_numbers[2])
+        for session_id, ca_number in zip(sessions, ca_numbers):
+            response = self._post_sync(session_id, ca_number)
+            self.assertEqual(response.data["event_type"], "new_event")
 
-        self.assertEqual(first_response.data["event_type"], "new_event")
-        self.assertEqual(third_response.data["event_type"], "mass_outage")
-        anchor = OutageCase.objects.get(case_id=first_response.data["case_id"])
+        single_case_ids = set(OutageCase.objects.values_list("case_id", flat=True))
+        group_case_id = "11111111-1111-1111-1111-111111111111"
+        open_response = self.client.post(
+            "/api/oms/events/",
+            {
+                "event_type": "case_opened",
+                "case": {
+                    "case_id": group_case_id,
+                    "status": "reported",
+                    "case_type": CASE_TYPE_MASS_OUTAGE,
+                    "affected_ca_numbers": ca_numbers,
+                    "oms_etr": (timezone.now() + timedelta(hours=2)).isoformat(),
+                },
+            },
+            format="json",
+        )
+
+        self.assertEqual(open_response.status_code, 200)
+        anchor = OutageCase.objects.get(case_id=group_case_id)
         self.assertEqual(anchor.case_type, CASE_TYPE_MASS_OUTAGE)
         self.assertNotEqual(anchor.case_id, original_case.case_id)
+        self.assertEqual(set(anchor.affected_ca_numbers), set(ca_numbers))
+        self.assertEqual(
+            set(
+                OutageCase.objects.filter(
+                    case_id__in=single_case_ids,
+                    status=STATUS_MERGED,
+                    merged_into=anchor,
+                ).values_list("case_id", flat=True)
+            ),
+            single_case_ids - {original_case.case_id},
+        )
+        for ca_number in ca_numbers:
+            report = CustomerReport.objects.get(ca_number=ca_number, is_resolved=False)
+            self.assertEqual(report.related_case, anchor)
+        self.assertEqual(
+            {call.kwargs["event_type"] for call in mock_send_alert.call_args_list},
+            {"mass_outage"},
+        )
 
         mock_send_alert.reset_mock()
-        anchor.status = "restored"
-        anchor.save(update_fields=["status"])
+        close_response = self.client.post(
+            "/api/oms/events/",
+            {
+                "event_type": "case_closed",
+                "case": {
+                    "case_id": group_case_id,
+                    "status": "restored",
+                },
+            },
+            format="json",
+        )
 
+        self.assertEqual(close_response.status_code, 200)
         self.assertEqual(mock_send_alert.call_count, 3)
         alerted_reports = [
             CustomerReport.objects.get(id=call.kwargs["report_id"])
             for call in mock_send_alert.call_args_list
         ]
         self.assertEqual({report.session_id for report in alerted_reports}, set(sessions))
-        self.assertNotIn(
-            original_report.id,
-            {report.id for report in alerted_reports},
-        )
         self.assertEqual(
             {call.kwargs["event_type"] for call in mock_send_alert.call_args_list},
             {"closed_loop_prompt"},
@@ -526,7 +533,12 @@ class SyncAgentReportTests(TestCase):
         )
 
     @patch("oms.views_api.get_pea_assessment")
-    def test_new_ca_inside_existing_mass_outage_links_to_anchor(self, mock_assessment):
+    @patch("oms.views_api.check_eta_timeout.apply_async")
+    def test_new_ca_inside_existing_mass_outage_only_links_when_ca_is_affected(
+        self, mock_apply_async, mock_assessment
+    ):
+        mock_apply_async.return_value.id = "eta-task-id"
+        mock_assessment.return_value = self._assessment_payload()
         CustomerLocation.objects.create(
             ca_number="123456789012",
             fullname="Mass Area CA User",
@@ -544,12 +556,10 @@ class SyncAgentReportTests(TestCase):
         response = self._post_sync("session-mass-area", "123456789012")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["event_type"], "mass_outage")
-        self.assertEqual(str(response.data["case_id"]), str(mass_case.case_id))
-        self.assertIsNotNone(response.data["etr_target_time"])
-        self.assertEqual(response.data["etr_source"], "pluem_model")
-        self.assertEqual(OutageCase.objects.count(), 1)
-        mock_assessment.assert_not_called()
+        self.assertEqual(response.data["event_type"], "new_event")
+        self.assertNotEqual(str(response.data["case_id"]), str(mass_case.case_id))
+        self.assertEqual(OutageCase.objects.count(), 2)
+        mock_assessment.assert_called_once()
 
     @patch("oms.views_api.get_pea_assessment")
     @patch("oms.views_api.check_eta_timeout.apply_async")
@@ -2228,24 +2238,3 @@ class CsvExportAdminTests(TestCase):
         self.assertEqual(rows[1][3], "CSV User")
         self.assertEqual(rows[1][5], "123456789012")
 
-
-class DistanceLinkingTests(TestCase):
-    def test_case_link_radius_constant_is_half_km(self):
-        self.assertEqual(CASE_LINK_RADIUS_KM, 0.5)
-        self.assertEqual(MASS_OUTAGE_CONFIRMATION_COUNT, 3)
-
-    def test_calculate_distance_allows_effectively_same_coordinates(self):
-        distance = calculate_distance(14.0626077, 100.6109053, 14.0626077, 100.6109053)
-
-        self.assertEqual(distance, 0)
-
-    def test_calculate_distance_returns_finite_inside_half_km_radius(self):
-        distance = calculate_distance(14.0000, 100.0000, 14.0030, 100.0000)
-
-        self.assertFalse(math.isinf(distance))
-        self.assertLessEqual(distance, CASE_LINK_RADIUS_KM)
-
-    def test_calculate_distance_returns_infinite_outside_half_km_radius(self):
-        distance = calculate_distance(14.0000, 100.0000, 14.0100, 100.0000)
-
-        self.assertTrue(math.isinf(distance))

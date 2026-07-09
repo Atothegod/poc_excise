@@ -25,17 +25,15 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-myuser}:${POSTGRES_PASSWORD:-mypassword}@db:5432/${POSTGRES_DB:-mydb}
       CA_CSV_PATH: /app/ca_lat_lon_2.csv
       DJANGO_OMS_EVENT_URL: http://backend:8000/api/oms/events/
+      OMS_API_TOKEN: ${OMS_API_TOKEN:-}
       CASE_LINK_RADIUS_KM: "0.5"
       MASS_OUTAGE_CONFIRMATION_COUNT: "3"
     ports:
       - "8002:8000"
     volumes:
       - ./oms_api:/app
-    depends_on:
-      - db
     restart: always
 
   backend:
@@ -52,7 +50,6 @@ services:
     depends_on:
       - db
       - redis # แจ้งให้รอ Redis สตาร์ทก่อน
-      - oms
     command: >
       sh -c "
       python manage.py migrate &&

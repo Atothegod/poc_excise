@@ -53,6 +53,18 @@ class OutageCase(models.Model):
         blank=True,
         help_text="Snapshot รายการ CA ที่ผูกกับเคสนี้",
     )
+    external_event_id = models.CharField(
+        max_length=100,
+        unique=True,
+        null=True,
+        blank=True,
+        help_text="รหัส event ภายนอกจาก OMS/PEA",
+    )
+    outage_time = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="เวลาที่ OMS แจ้งว่าเริ่มเกิดเหตุไฟดับ",
+    )
     latitude = models.FloatField(null=True, blank=True)
     longitude = models.FloatField(null=True, blank=True)
     merged_into = models.ForeignKey(
