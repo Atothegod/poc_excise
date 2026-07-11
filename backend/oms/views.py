@@ -3,6 +3,7 @@ from datetime import timedelta
 from uuid import UUID
 
 from django.conf import settings
+from django.db import transaction
 from django.db.models import Q
 from django.http import JsonResponse
 from django.shortcuts import render
@@ -533,13 +534,18 @@ def ops_cases_action_api(request):
         except ValueError as exc:
             return JsonResponse({"status": "error", "message": str(exc)}, status=400)
 
-        for case in cases:
-            if case.status in INACTIVE_CASE_STATUSES:
-                skipped_cases.append(_action_case_payload(case))
-                continue
-            case.oms_etr = etr_target
-            case.save(update_fields=["oms_etr", "updated_at"])
-            updated_cases.append(_action_case_payload(case))
+        for target_case in cases:
+            with transaction.atomic():
+                case = OutageCase.objects.select_for_update().get(pk=target_case.pk)
+                if case.status in INACTIVE_CASE_STATUSES:
+                    skipped_cases.append(_action_case_payload(case))
+                    continue
+                if case.oms_etr and etr_target <= case.oms_etr:
+                    skipped_cases.append(_action_case_payload(case))
+                    continue
+                case.oms_etr = etr_target
+                case.save(update_fields=["oms_etr", "updated_at"])
+                updated_cases.append(_action_case_payload(case))
 
         return JsonResponse(
             {

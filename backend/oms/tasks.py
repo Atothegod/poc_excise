@@ -1,6 +1,8 @@
 from celery import shared_task
+from django.db import transaction
 from django.utils import timezone
 from datetime import timedelta
+from uuid import uuid4
 from .case_logic import INACTIVE_CASE_STATUSES
 from .models import OutageCase, CustomerReport
 from .services import get_pea_assessment
@@ -15,6 +17,91 @@ SLA_EXPIRED_CLOSED_LOOP_MESSAGE = (
     "ขออภัยที่การดำเนินการเกินเวลาที่แจ้งไว้ค่ะ "
     "ไฟฟ้ากลับมาใช้งานได้หรือยังคะ"
 )
+
+
+def schedule_case_timer(case, task, task_id_field, args, eta):
+    """Persist a timer identity before publishing so an immediate task can claim it."""
+    task_id = str(uuid4())
+    OutageCase.objects.filter(pk=case.pk).update(**{task_id_field: task_id})
+    setattr(case, task_id_field, task_id)
+    def publish():
+        try:
+            task.apply_async(args=args, eta=eta, task_id=task_id)
+        except Exception:
+            OutageCase.objects.filter(
+                pk=case.pk,
+                **{task_id_field: task_id},
+            ).update(**{task_id_field: None})
+            setattr(case, task_id_field, None)
+            raise
+
+    if getattr(case, "_defer_timer_publish_until_commit", False):
+        transaction.on_commit(publish)
+    else:
+        publish()
+    return task_id
+
+
+def _claim_due_timer(case_id, task_id, task_id_field, target_time_field):
+    """Claim the current timer once; stale and redelivered tasks become no-ops."""
+    with transaction.atomic():
+        try:
+            case = OutageCase.objects.select_for_update().get(case_id=case_id)
+        except OutageCase.DoesNotExist:
+            return None
+
+        if case.status in INACTIVE_CASE_STATUSES:
+            return None
+
+        current_task_id = getattr(case, task_id_field)
+        if task_id and current_task_id != task_id:
+            return None
+
+        target_time = getattr(case, target_time_field)
+        if not target_time or timezone.now() < target_time:
+            return None
+
+        setattr(case, task_id_field, None)
+        OutageCase.objects.filter(pk=case.pk).update(**{task_id_field: None})
+        return case
+
+
+def _restore_failed_timer_claim(
+    case, task_id, task_id_field, target_time_field
+):
+    if not task_id:
+        return
+    OutageCase.objects.filter(
+        pk=case.pk,
+        **{
+            task_id_field: None,
+            target_time_field: getattr(case, target_time_field),
+        },
+    ).exclude(status__in=INACTIVE_CASE_STATUSES).update(
+        **{task_id_field: task_id}
+    )
+
+
+def _restore_due_sla(case_id, task_id):
+    with transaction.atomic():
+        try:
+            case = OutageCase.objects.select_for_update().get(case_id=case_id)
+        except OutageCase.DoesNotExist:
+            return False
+        if case.status in INACTIVE_CASE_STATUSES:
+            return False
+        if task_id and case.celery_sla_task_id != task_id:
+            return False
+        if not case.sla_target_time or timezone.now() < case.sla_target_time:
+            return False
+
+        case.celery_sla_task_id = None
+        case._closed_loop_kind = SLA_EXPIRED_CLOSED_LOOP_KIND
+        case.status = "restored"
+        case.save(
+            update_fields=["status", "celery_sla_task_id", "updated_at"]
+        )
+        return True
 
 
 def _parse_float(value):
@@ -104,6 +191,7 @@ def _notify_active_case_sessions(case, message, event_type, closed_loop_kind=Non
     )
 
     sent_session_ids = set()
+    last_error = None
     for report in reports:
         if report.session_id in sent_session_ids:
             continue
@@ -113,15 +201,19 @@ def _notify_active_case_sessions(case, message, event_type, closed_loop_kind=Non
         )
 
         try:
-            requests.post(AGENT_WEBHOOK_URL, json=payload, timeout=5)
+            response = requests.post(AGENT_WEBHOOK_URL, json=payload, timeout=5)
+            response.raise_for_status()
             sent_session_ids.add(report.session_id)
             print(
                 f"[{event_type}] ยิง Webhook แจ้งเตือน CA: {report.ca_number} "
                 f"session: {report.session_id} สำเร็จ"
             )
         except requests.exceptions.RequestException as e:
+            last_error = e
             print(f"[{event_type}] ยิง Webhook ล้มเหลว: {e}")
 
+    if last_error:
+        raise last_error
     return sent_session_ids
 
 
@@ -166,11 +258,21 @@ def _ensure_pluem_etr(case, report_id=None):
     return case
 
 
-@shared_task
-def check_eta_timeout(case_id, report_id):
+@shared_task(
+    bind=True,
+    autoretry_for=(requests.exceptions.RequestException,),
+    retry_kwargs={"max_retries": 3, "countdown": 2},
+    retry_backoff=True,
+)
+def check_eta_timeout(self, case_id, report_id):
     try:
-        case = OutageCase.objects.get(case_id=case_id)
-        if case.status in INACTIVE_CASE_STATUSES:
+        case = _claim_due_timer(
+            case_id,
+            self.request.id,
+            "celery_eta_task_id",
+            "eta_target_time",
+        )
+        if not case:
             return
 
         case.sync_affected_ca_numbers()
@@ -190,9 +292,18 @@ def check_eta_timeout(case_id, report_id):
                 "ระบบกำลังประเมินเวลาไฟกลับล่าสุดค่ะ"
             )
 
-        sent_session_ids = _notify_active_case_sessions(
-            case, message, "eta_timeout"
-        )
+        try:
+            sent_session_ids = _notify_active_case_sessions(
+                case, message, "eta_timeout"
+            )
+        except requests.exceptions.RequestException:
+            _restore_failed_timer_claim(
+                case,
+                self.request.id,
+                "celery_eta_task_id",
+                "eta_target_time",
+            )
+            raise
         if not sent_session_ids:
             print(f"[Timer_ETA] ไม่พบ session ที่ต้องแจ้งเตือนสำหรับ Case: {case_id}")
 
@@ -200,17 +311,25 @@ def check_eta_timeout(case_id, report_id):
         print("[Timer_ETA] ไม่พบข้อมูล Case (อาจถูกลบไปแล้ว)")
 
 
-@shared_task
-def check_etr_timeout(case_id):
+@shared_task(
+    bind=True,
+    autoretry_for=(requests.exceptions.RequestException,),
+    retry_kwargs={"max_retries": 3, "countdown": 2},
+    retry_backoff=True,
+)
+def check_etr_timeout(self, case_id):
     try:
-        case = OutageCase.objects.get(case_id=case_id)
-        if case.status in INACTIVE_CASE_STATUSES:
+        case = _claim_due_timer(
+            case_id,
+            self.request.id,
+            "celery_etr_task_id",
+            "oms_etr",
+        )
+        if not case:
             return
 
         etr_target_time = case.oms_etr or case.effective_etr_time()
         if not etr_target_time:
-            return
-        if timezone.now() < etr_target_time:
             return
 
         case.sync_affected_ca_numbers()
@@ -224,9 +343,18 @@ def check_etr_timeout(case_id):
         message = (
             f"ขออัปเดตค่ะ การจ่ายไฟจะไม่เกินเวลา {sla_label} ค่ะ"
         )
-        sent_session_ids = _notify_active_case_sessions(
-            case, message, "etr_timeout_sla"
-        )
+        try:
+            sent_session_ids = _notify_active_case_sessions(
+                case, message, "etr_timeout_sla"
+            )
+        except requests.exceptions.RequestException:
+            _restore_failed_timer_claim(
+                case,
+                self.request.id,
+                "celery_etr_task_id",
+                "oms_etr",
+            )
+            raise
         if not sent_session_ids:
             print(f"[Timer_ETR] ไม่พบ session ที่ต้องแจ้งเตือนสำหรับ Case: {case_id}")
 
@@ -234,29 +362,9 @@ def check_etr_timeout(case_id):
         print("[Timer_ETR] ไม่พบข้อมูล Case (อาจถูกลบไปแล้ว)")
 
 
-@shared_task
-def check_sla_timeout(case_id):
-    try:
-        case = OutageCase.objects.get(case_id=case_id)
-        if case.status in INACTIVE_CASE_STATUSES:
-            return
-        if not case.sla_target_time:
-            return
-        if timezone.now() < case.sla_target_time:
-            return
-
-        case.sync_affected_ca_numbers()
-        sent_session_ids = _notify_active_case_sessions(
-            case,
-            SLA_EXPIRED_CLOSED_LOOP_MESSAGE,
-            "closed_loop_prompt",
-            closed_loop_kind=SLA_EXPIRED_CLOSED_LOOP_KIND,
-        )
-        if not sent_session_ids:
-            print(f"[Timer_SLA] ไม่พบ session ที่ต้องแจ้งเตือนสำหรับ Case: {case_id}")
-
-    except OutageCase.DoesNotExist:
-        print("[Timer_SLA] ไม่พบข้อมูล Case (อาจถูกลบไปแล้ว)")
+@shared_task(bind=True)
+def check_sla_timeout(self, case_id):
+    _restore_due_sla(case_id, self.request.id)
 
 
 @shared_task(

@@ -8,6 +8,7 @@ from .tasks import (
     check_eta_timeout,
     check_etr_timeout,
     check_sla_timeout,
+    schedule_case_timer,
     send_proactive_alert,
 )
 from pea_project.celery import app as celery_app
@@ -42,6 +43,20 @@ def _format_time_label(target_time):
     if not target_time:
         return None
     return timezone.localtime(target_time).strftime("%H:%M น.")
+
+
+def _closed_loop_message(ca_number, closed_loop_kind=None):
+    if closed_loop_kind == "sla_expired":
+        return (
+            f"เรียนผู้ใช้ไฟฟ้าหมายเลข CA {ca_number} "
+            "ครบกำหนดเวลาดำเนินการของเคสแล้วค่ะ "
+            "ขณะนี้ไฟฟ้ากลับมาใช้งานได้หรือยังคะ"
+        )
+    return (
+        f"เรียนผู้ใช้ไฟฟ้าหมายเลข CA {ca_number} "
+        "เจ้าหน้าที่ได้ทำการแก้ไขและจ่ายไฟคืนเรียบร้อยแล้วค่ะ "
+        "ขณะนี้ไฟฟ้ากลับมาใช้งานได้หรือยังคะ"
+    )
 
 
 def _closed_loop_recipient_reports(case):
@@ -80,6 +95,9 @@ def track_eta_changes(sender, instance, **kwargs):
                     old_instance.celery_eta_task_id, terminate=True
                 )
                 instance.celery_eta_task_id = None
+                OutageCase.objects.filter(pk=instance.pk).update(
+                    celery_eta_task_id=None
+                )
 
             # เก็บ Flag ไว้ให้ post_save รู้ว่าต้องตั้งเวลาใหม่
             instance._needs_new_eta_task = True if instance.eta_target_time else False
@@ -94,7 +112,11 @@ def track_eta_changes(sender, instance, **kwargs):
             instance._is_just_inactive = True
 
         # 3. เช็คว่า OMS เพิ่งส่ง/แก้ ETR มาไหม เพื่อแจ้งลูกค้าอัตโนมัติ
-        if old_instance.oms_etr != instance.oms_etr and instance.oms_etr:
+        if old_instance.oms_etr and (
+            not instance.oms_etr or instance.oms_etr <= old_instance.oms_etr
+        ):
+            instance.oms_etr = old_instance.oms_etr
+        elif old_instance.oms_etr != instance.oms_etr and instance.oms_etr:
             instance._has_new_oms_etr = True
             instance._old_celery_etr_task_id = old_instance.celery_etr_task_id
 
@@ -129,11 +151,13 @@ def process_outage_case_updates(sender, instance, created, **kwargs):
         report = instance.affected_customers.filter(is_resolved=False).last()
         if report:
             # สร้างซองจดหมาย Task ใหม่
-            task = check_eta_timeout.apply_async(
-                args=[instance.case_id, report.id], eta=instance.eta_target_time
+            schedule_case_timer(
+                instance,
+                check_eta_timeout,
+                "celery_eta_task_id",
+                [instance.case_id, report.id],
+                instance.eta_target_time,
             )
-            # อัปเดต Task ID ใหม่ลงไปแบบไม่ trigger signal ซ้ำ
-            OutageCase.objects.filter(pk=instance.pk).update(celery_eta_task_id=task.id)
         instance._needs_new_eta_task = False
 
     # --- กรณี OMS/Admin เติมหรือแก้ ETR ---
@@ -145,10 +169,14 @@ def process_outage_case_updates(sender, instance, created, **kwargs):
 
         etr_task_id = None
         if instance.status not in INACTIVE_CASE_STATUSES:
-            task = check_etr_timeout.apply_async(
-                args=[instance.case_id], eta=instance.oms_etr
+            schedule_case_timer(
+                instance,
+                check_etr_timeout,
+                "celery_etr_task_id",
+                [instance.case_id],
+                instance.oms_etr,
             )
-            etr_task_id = task.id
+            etr_task_id = instance.celery_etr_task_id
 
         instance.oms_etr_updated_at = etr_updated_at
         instance.celery_etr_task_id = etr_task_id
@@ -173,6 +201,7 @@ def process_outage_case_updates(sender, instance, created, **kwargs):
                 send_proactive_alert.delay(
                     report_id=report.id, message=message, event_type="etr_update"
                 )
+            instance._etr_update_session_ids = sent_session_ids
 
         instance._has_new_oms_etr = False
 
@@ -190,10 +219,14 @@ def process_outage_case_updates(sender, instance, created, **kwargs):
             and instance.sla_target_time
             and instance.status not in INACTIVE_CASE_STATUSES
         ):
-            task = check_sla_timeout.apply_async(
-                args=[instance.case_id], eta=instance.sla_target_time
+            schedule_case_timer(
+                instance,
+                check_sla_timeout,
+                "celery_sla_task_id",
+                [instance.case_id],
+                instance.sla_target_time,
             )
-            sla_task_id = task.id
+            sla_task_id = instance.celery_sla_task_id
 
         instance.celery_sla_task_id = sla_task_id
         OutageCase.objects.filter(pk=instance.pk).update(
@@ -203,6 +236,7 @@ def process_outage_case_updates(sender, instance, created, **kwargs):
 
     # --- กรณีการปิดเคส (Closed-Loop & State Cleansing) ---
     if getattr(instance, "_is_just_restored", False):
+        closed_loop_kind = getattr(instance, "_closed_loop_kind", None)
         _create_restoration_log(instance)
 
         # 1. ยกเลิก Timers ที่ค้างอยู่ของเคสนี้ทิ้งทั้งหมด (State Cleansing)
@@ -230,12 +264,12 @@ def process_outage_case_updates(sender, instance, created, **kwargs):
             sent_session_ids.add(report.session_id)
 
             # 3. ส่งข้อความยืนยันไฟมาเชิงรุกไปหาลูกค้า
-            message = (
-                "ระบบแจ้งว่าจ่ายไฟคืนแล้วค่ะ "
-                "กรุณาเลือกสถานะไฟฟ้าด้านล่างค่ะ"
-            )
+            message = _closed_loop_message(report.ca_number, closed_loop_kind)
             send_proactive_alert.delay(
-                report_id=report.id, message=message, event_type="closed_loop_prompt"
+                report_id=report.id,
+                message=message,
+                event_type="closed_loop_prompt",
+                closed_loop_kind=closed_loop_kind,
             )
 
         instance._is_just_restored = False

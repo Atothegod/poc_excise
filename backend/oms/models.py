@@ -1,4 +1,5 @@
 from django.db import models
+from django.db import transaction
 from django.utils import timezone
 from datetime import timedelta
 import uuid
@@ -145,15 +146,32 @@ class OutageCase(models.Model):
         return f"Case {self.case_id} - [{self.get_status_display()}]"
 
     def save(self, *args, **kwargs):
-        if self.lv_group_id is None:
-            latest_id = (
-                OutageCase.objects.exclude(lv_group_id__isnull=True).aggregate(
-                    models.Max("lv_group_id")
-                )["lv_group_id__max"]
-                or 0
-            )
-            self.lv_group_id = latest_id + 1
-        super().save(*args, **kwargs)
+        with transaction.atomic():
+            if self.pk:
+                persisted = (
+                    OutageCase.objects.select_for_update()
+                    .filter(pk=self.pk)
+                    .only("oms_etr")
+                    .first()
+                )
+                if persisted and persisted.oms_etr and (
+                    not self.oms_etr or self.oms_etr <= persisted.oms_etr
+                ):
+                    self.oms_etr = persisted.oms_etr
+
+            if self.lv_group_id is None:
+                latest_id = (
+                    OutageCase.objects.exclude(lv_group_id__isnull=True).aggregate(
+                        models.Max("lv_group_id")
+                    )["lv_group_id__max"]
+                    or 0
+                )
+                self.lv_group_id = latest_id + 1
+            self._defer_timer_publish_until_commit = True
+            try:
+                super().save(*args, **kwargs)
+            finally:
+                self._defer_timer_publish_until_commit = False
 
     def effective_etr_time(self):
         return self.oms_etr or self.pluem_etr_target_time
@@ -259,6 +277,19 @@ class CustomerReport(models.Model):
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["session_id"],
+                condition=(
+                    models.Q(is_resolved=False)
+                    & models.Q(session_id__isnull=False)
+                    & ~models.Q(session_id="")
+                ),
+                name="unique_active_customer_report_per_session",
+            )
+        ]
 
     def __str__(self):
         session_label = self.session_id[:8] if self.session_id else "no-session"

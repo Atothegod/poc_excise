@@ -56,6 +56,37 @@ class SyncAgentReportTests(TestCase):
             format="json",
         )
 
+    @patch("oms.views_api.check_sla_timeout.apply_async")
+    @patch("oms.views_api.check_eta_timeout.apply_async")
+    @patch("oms.views_api.get_pea_assessment")
+    def test_session_switching_ca_resolves_previous_active_report(
+        self, mock_assessment, mock_eta_apply_async, mock_sla_apply_async
+    ):
+        mock_eta_apply_async.return_value.id = "eta-task-id"
+        mock_sla_apply_async.return_value.id = "sla-task-id"
+        mock_assessment.return_value = self._assessment_payload()
+        for ca_number, latitude in [
+            ("123456789012", 14.0),
+            ("123456789013", 14.1),
+        ]:
+            CustomerLocation.objects.create(
+                ca_number=ca_number,
+                fullname=ca_number,
+                latitude=latitude,
+                longitude=100.0,
+            )
+
+        self._post_sync("one-active-session", "123456789012")
+        self._post_sync("one-active-session", "123456789013")
+
+        reports = CustomerReport.objects.filter(
+            session_id="one-active-session"
+        ).order_by("created_at")
+        self.assertEqual(reports.count(), 2)
+        self.assertTrue(reports[0].is_resolved)
+        self.assertFalse(reports[1].is_resolved)
+        self.assertEqual(reports[1].ca_number, "123456789013")
+
     @patch("oms.signals.send_proactive_alert.delay")
     @patch("oms.views_api.get_pea_assessment")
     @patch("oms.views_api.check_sla_timeout.apply_async")
@@ -114,7 +145,7 @@ class SyncAgentReportTests(TestCase):
         self.assertEqual(case.sla_reference_time, base_time)
         self.assertEqual(case.sla_target_time, base_time + timedelta(hours=4))
         self.assertEqual(case.sla_reason, "case_created")
-        self.assertEqual(case.celery_sla_task_id, "sla-task-id")
+        self.assertIsNotNone(case.celery_sla_task_id)
         self.assertIsNone(case.oms_etr)
         report = CustomerReport.objects.get(id=response.data["report_id"])
         self.assertEqual(report.latitude, 9.2917)
@@ -509,7 +540,7 @@ class SyncAgentReportTests(TestCase):
         self.assertEqual(anchor.case_type, CASE_TYPE_MASS_OUTAGE)
         self.assertNotEqual(anchor.case_id, original_case.case_id)
         self.assertEqual(set(anchor.affected_ca_numbers), set(ca_numbers))
-        self.assertEqual(anchor.celery_etr_task_id, "etr-task-id")
+        self.assertIsNotNone(anchor.celery_etr_task_id)
         self.assertIsNotNone(anchor.oms_etr_updated_at)
         self.assertEqual(
             set(
@@ -531,6 +562,7 @@ class SyncAgentReportTests(TestCase):
         mock_etr_apply_async.assert_called_once_with(
             args=[anchor.case_id],
             eta=anchor.oms_etr,
+            task_id=anchor.celery_etr_task_id,
         )
 
         mock_send_alert.reset_mock()
@@ -563,6 +595,195 @@ class SyncAgentReportTests(TestCase):
                 related_case=anchor,
                 is_resolved=False,
             ).exists()
+        )
+
+    @patch("oms.views_api.check_sla_timeout.apply_async")
+    @patch("oms.views_api.send_proactive_alert.delay")
+    def test_oms_merge_moves_every_active_report_from_superseded_case(
+        self, mock_send_alert, mock_sla_apply_async
+    ):
+        child = OutageCase.objects.create(
+            title="Superseded multi-CA case",
+            affected_ca_numbers=["123456789012", "123456789099"],
+        )
+        reports = [
+            CustomerReport.objects.create(
+                session_id="merge-session-a",
+                ca_number="123456789012",
+                related_case=child,
+            ),
+            CustomerReport.objects.create(
+                session_id="merge-session-b",
+                ca_number="123456789099",
+                related_case=child,
+            ),
+        ]
+
+        response = self.client.post(
+            "/api/oms/events/",
+            {
+                "event_type": "case_opened",
+                "case": {
+                    "case_id": "22222222-2222-2222-2222-222222222222",
+                    "status": "reported",
+                    "affected_ca_numbers": ["123456789012", "123456789013"],
+                },
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        child.refresh_from_db()
+        anchor = OutageCase.objects.get(
+            case_id="22222222-2222-2222-2222-222222222222"
+        )
+        self.assertEqual(child.status, STATUS_MERGED)
+        self.assertEqual(child.merged_into, anchor)
+        for report in reports:
+            report.refresh_from_db()
+            self.assertEqual(report.related_case, anchor)
+
+    @patch("oms.signals.check_etr_timeout.apply_async")
+    @patch("oms.signals.send_proactive_alert.delay")
+    def test_callback_for_merged_child_is_ignored(
+        self, mock_send_alert, mock_etr_apply_async
+    ):
+        anchor_etr = timezone.now() + timedelta(hours=2)
+        anchor = OutageCase.objects.create(title="Merge anchor", oms_etr=anchor_etr)
+        child = OutageCase.objects.create(
+            title="Merged callback child",
+            status=STATUS_MERGED,
+            external_event_id="OLD-OMS-EVENT",
+            merged_into=anchor,
+            merged_at=timezone.now(),
+        )
+
+        response = self.client.post(
+            "/api/oms/events/",
+            {
+                "event_type": "case_opened",
+                "case": {
+                    "external_event_id": "OLD-OMS-EVENT",
+                    "status": "reported",
+                    "oms_etr": (anchor_etr + timedelta(hours=1)).isoformat(),
+                },
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(str(response.data["case_id"]), str(anchor.case_id))
+        child.refresh_from_db()
+        anchor.refresh_from_db()
+        self.assertEqual(child.status, STATUS_MERGED)
+        self.assertEqual(anchor.oms_etr, anchor_etr)
+        mock_etr_apply_async.assert_not_called()
+        mock_send_alert.assert_not_called()
+
+    @patch("oms.signals.check_etr_timeout.apply_async")
+    @patch("oms.signals.send_proactive_alert.delay")
+    def test_repeated_oms_etr_updates_keep_latest_time_without_mass_rebroadcast(
+        self, mock_send_alert, mock_etr_apply_async
+    ):
+        first_etr = timezone.now() + timedelta(hours=1)
+        later_etr = first_etr + timedelta(hours=1)
+        case = OutageCase.objects.create(
+            title="Repeated OMS ETR",
+            case_type=CASE_TYPE_MASS_OUTAGE,
+            external_event_id="REPEATED-ETR",
+            affected_ca_numbers=["123456789012", "123456789013"],
+            oms_etr=first_etr,
+        )
+        CustomerReport.objects.create(
+            session_id="repeated-etr-session",
+            ca_number="123456789012",
+            related_case=case,
+        )
+
+        def post_etr(value):
+            return self.client.post(
+                "/api/oms/events/",
+                {
+                    "event_type": "case_opened",
+                    "case": {
+                        "external_event_id": "REPEATED-ETR",
+                        "status": "reported",
+                        "affected_ca_numbers": ["123456789012", "123456789013"],
+                        "oms_etr": value,
+                    },
+                },
+                format="json",
+            )
+
+        self.assertEqual(post_etr(later_etr.isoformat()).status_code, 200)
+        case.refresh_from_db()
+        self.assertEqual(case.oms_etr, later_etr)
+        self.assertEqual(mock_send_alert.call_count, 1)
+        self.assertEqual(
+            mock_send_alert.call_args.kwargs["event_type"], "etr_update"
+        )
+
+        mock_send_alert.reset_mock()
+        for ignored_value in [first_etr.isoformat(), later_etr.isoformat(), None]:
+            self.assertEqual(post_etr(ignored_value).status_code, 200)
+        case.refresh_from_db()
+        self.assertEqual(case.oms_etr, later_etr)
+        mock_send_alert.assert_not_called()
+
+    @patch("oms.signals.check_etr_timeout.apply_async")
+    @patch("oms.signals.send_proactive_alert.delay")
+    def test_group_expansion_and_later_etr_notify_each_session_once(
+        self, mock_send_alert, mock_etr_apply_async
+    ):
+        first_etr = timezone.now() + timedelta(hours=1)
+        anchor = OutageCase.objects.create(
+            title="Expanding OMS group",
+            case_type=CASE_TYPE_MASS_OUTAGE,
+            external_event_id="EXPANDING-GROUP",
+            affected_ca_numbers=["123456789012"],
+            oms_etr=first_etr,
+        )
+        existing_report = CustomerReport.objects.create(
+            session_id="existing-group-session",
+            ca_number="123456789012",
+            related_case=anchor,
+        )
+        child = OutageCase.objects.create(
+            title="Newly merged child",
+            affected_ca_numbers=["123456789013"],
+        )
+        new_report = CustomerReport.objects.create(
+            session_id="new-group-session",
+            ca_number="123456789013",
+            related_case=child,
+        )
+
+        response = self.client.post(
+            "/api/oms/events/",
+            {
+                "event_type": "case_opened",
+                "case": {
+                    "external_event_id": "EXPANDING-GROUP",
+                    "status": "reported",
+                    "affected_ca_numbers": ["123456789012", "123456789013"],
+                    "oms_etr": (first_etr + timedelta(hours=1)).isoformat(),
+                },
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(mock_send_alert.call_count, 2)
+        calls_by_report = {
+            call.kwargs["report_id"]: call.kwargs["event_type"]
+            for call in mock_send_alert.call_args_list
+        }
+        self.assertEqual(
+            calls_by_report,
+            {
+                existing_report.id: "etr_update",
+                new_report.id: "mass_outage",
+            },
         )
 
     @patch("oms.views_api.get_pea_assessment")
@@ -885,7 +1106,7 @@ class SyncAgentReportTests(TestCase):
         self.assertEqual(case.sla_reference_time, base_time)
         self.assertEqual(case.sla_target_time, base_time + timedelta(hours=4))
         self.assertEqual(case.eta_target_time, base_time + timedelta(minutes=12))
-        self.assertEqual(case.celery_sla_task_id, "restored-new-sla-task-id")
+        self.assertIsNotNone(case.celery_sla_task_id)
         self.assertEqual(
             response.data["fastest_branch"], "การไฟฟ้าส่วนภูมิภาค สาขา รังสิต"
         )
@@ -900,10 +1121,12 @@ class SyncAgentReportTests(TestCase):
         mock_eta_apply_async.assert_called_once_with(
             args=[case.case_id, response.data["report_id"]],
             eta=case.eta_target_time,
+            task_id=case.celery_eta_task_id,
         )
         mock_sla_apply_async.assert_called_once_with(
             args=[case.case_id],
             eta=case.sla_target_time,
+            task_id=case.celery_sla_task_id,
         )
 
     @patch("oms.signals.send_proactive_alert.delay")
@@ -1135,7 +1358,7 @@ class SyncAgentReportTests(TestCase):
         new_case = OutageCase.objects.get(case_id=response.data["case_id"])
         self.assertNotEqual(new_case.case_id, old_case.case_id)
         self.assertEqual(new_case.case_type, CASE_TYPE_NORMAL)
-        self.assertEqual(new_case.celery_sla_task_id, "force-new-sla-task-id")
+        self.assertIsNotNone(new_case.celery_sla_task_id)
         old_report.refresh_from_db()
         self.assertTrue(old_report.is_resolved)
         new_report = CustomerReport.objects.get(id=response.data["report_id"])
@@ -1179,6 +1402,30 @@ class SyncAgentReportTests(TestCase):
 
 
 class CheckEtaTimeoutTests(TestCase):
+    @patch("oms.tasks.requests.post")
+    def test_eta_timeout_redelivery_with_same_task_id_sends_once(self, mock_post):
+        case = OutageCase.objects.create(
+            title="Idempotent ETA timer",
+            eta_target_time=timezone.now() - timedelta(minutes=1),
+            celery_eta_task_id="same-eta-task-id",
+        )
+        report = CustomerReport.objects.create(
+            session_id="session-idempotent-eta",
+            ca_number="123456789012",
+            related_case=case,
+        )
+
+        check_eta_timeout.apply(
+            args=[case.case_id, report.id], task_id="same-eta-task-id"
+        ).get()
+        check_eta_timeout.apply(
+            args=[case.case_id, report.id], task_id="same-eta-task-id"
+        ).get()
+
+        case.refresh_from_db()
+        self.assertIsNone(case.celery_eta_task_id)
+        self.assertEqual(mock_post.call_count, 1)
+
     @patch("oms.tasks.requests.post")
     def test_eta_timeout_sends_oms_etr_when_available(self, mock_post):
         etr = timezone.now() + timedelta(hours=1)
@@ -1403,6 +1650,7 @@ class CheckEtaTimeoutTests(TestCase):
             session_id="session-a",
             ca_number="123456789014",
             related_case=case,
+            is_resolved=True,
         )
         CustomerReport.objects.create(
             session_id="session-resolved",
@@ -1457,7 +1705,7 @@ class CheckEtaTimeoutTests(TestCase):
         self.assertEqual(case.sla_reference_time, case.created_at)
         self.assertEqual(case.sla_target_time, expected_sla_target)
         self.assertEqual(case.sla_reason, "case_created")
-        self.assertEqual(case.celery_sla_task_id, "etr-timeout-sla-task-id")
+        self.assertIsNotNone(case.celery_sla_task_id)
         self.assertIn(
             timezone.localtime(expected_sla_target).strftime("%H:%M น."),
             payload["message"],
@@ -1472,14 +1720,17 @@ class CheckEtaTimeoutTests(TestCase):
 
 
 class CheckSlaTimeoutTests(TestCase):
-    @patch("oms.tasks.requests.post")
-    def test_sla_timeout_sends_closed_loop_prompt_to_active_sessions(self, mock_post):
+    @patch("oms.signals.send_proactive_alert.delay")
+    def test_sla_timeout_restores_case_and_sends_closed_loop_prompt(
+        self, mock_send_alert
+    ):
         now = timezone.now()
         case = OutageCase.objects.create(
             title="SLA timeout prompt",
             latitude=9.2917,
             longitude=100.926296,
             sla_target_time=now - timedelta(minutes=1),
+            celery_sla_task_id="same-sla-task-id",
         )
         CustomerReport.objects.create(
             session_id="session-sla-a",
@@ -1490,6 +1741,7 @@ class CheckSlaTimeoutTests(TestCase):
             session_id="session-sla-a",
             ca_number="123456789013",
             related_case=case,
+            is_resolved=True,
         )
         CustomerReport.objects.create(
             session_id="session-sla-resolved",
@@ -1498,23 +1750,35 @@ class CheckSlaTimeoutTests(TestCase):
             is_resolved=True,
         )
 
-        check_sla_timeout(case.case_id)
+        check_sla_timeout.apply(
+            args=[case.case_id], task_id="same-sla-task-id"
+        ).get()
+        check_sla_timeout.apply(
+            args=[case.case_id], task_id="same-sla-task-id"
+        ).get()
 
-        self.assertEqual(mock_post.call_count, 1)
-        payload = mock_post.call_args.kwargs["json"]
-        self.assertEqual(payload["session_id"], "session-sla-a")
+        case.refresh_from_db()
+        report = CustomerReport.objects.get(
+            session_id="session-sla-a", ca_number="123456789012"
+        )
+        self.assertEqual(case.status, "restored")
+        self.assertIsNone(case.celery_sla_task_id)
+        self.assertTrue(report.is_resolved)
+        self.assertTrue(OutageRestorationLog.objects.filter(case=case).exists())
+        self.assertEqual(mock_send_alert.call_count, 1)
+        payload = mock_send_alert.call_args.kwargs
         self.assertEqual(payload["event_type"], "closed_loop_prompt")
-        self.assertEqual(payload["message"], SLA_EXPIRED_CLOSED_LOOP_MESSAGE)
         self.assertEqual(
             payload["closed_loop_kind"], SLA_EXPIRED_CLOSED_LOOP_KIND
         )
         self.assertIn("ไฟฟ้ากลับมาใช้งานได้หรือยัง", payload["message"])
+        self.assertIn("123456789012", payload["message"])
         self.assertNotIn("SLA", payload["message"])
         self.assertNotIn("ETA", payload["message"])
         self.assertNotIn("ETR", payload["message"])
 
-    @patch("oms.tasks.requests.post")
-    def test_sla_timeout_skips_inactive_cases(self, mock_post):
+    @patch("oms.signals.send_proactive_alert.delay")
+    def test_sla_timeout_skips_inactive_cases(self, mock_send_alert):
         case = OutageCase.objects.create(
             title="SLA timeout restored",
             status="restored",
@@ -1530,7 +1794,7 @@ class CheckSlaTimeoutTests(TestCase):
 
         check_sla_timeout(case.case_id)
 
-        mock_post.assert_not_called()
+        mock_send_alert.assert_not_called()
 
 
 class ProactiveAlertTaskTests(TestCase):
@@ -1568,6 +1832,81 @@ class ProactiveAlertTaskTests(TestCase):
 
 
 class OutageCaseSignalTests(TestCase):
+    @patch("oms.signals.celery_app.control.revoke")
+    @patch("oms.signals.check_eta_timeout.apply_async")
+    @patch("oms.tasks.requests.post")
+    def test_clearing_eta_invalidates_stored_and_redelivered_task(
+        self, mock_post, mock_apply_async, mock_revoke
+    ):
+        case = OutageCase.objects.create(
+            title="Clear ETA task",
+            eta_target_time=timezone.now() + timedelta(hours=1),
+            celery_eta_task_id="old-eta-task-id",
+        )
+        report = CustomerReport.objects.create(
+            session_id="clear-eta-session",
+            ca_number="123456789012",
+            related_case=case,
+        )
+
+        case.eta_target_time = None
+        case.save(update_fields=["eta_target_time"])
+        case.refresh_from_db()
+        self.assertIsNone(case.celery_eta_task_id)
+        mock_revoke.assert_called_once_with("old-eta-task-id", terminate=True)
+        mock_apply_async.assert_not_called()
+
+        check_eta_timeout.apply(
+            args=[case.case_id, report.id], task_id="old-eta-task-id"
+        ).get()
+        mock_post.assert_not_called()
+
+    @patch("oms.signals.check_etr_timeout.apply_async")
+    @patch("oms.signals.send_proactive_alert.delay")
+    def test_oms_etr_only_moves_later(
+        self, mock_send_alert, mock_apply_async
+    ):
+        initial_etr = timezone.now() + timedelta(hours=2)
+        case = OutageCase.objects.create(title="Monotonic ETR", oms_etr=initial_etr)
+        CustomerReport.objects.create(
+            session_id="session-monotonic-etr",
+            ca_number="123456789012",
+            related_case=case,
+        )
+        stale_case = OutageCase.objects.get(pk=case.pk)
+
+        case.oms_etr = initial_etr - timedelta(hours=1)
+        case.save(update_fields=["oms_etr"])
+        case.refresh_from_db()
+        self.assertEqual(case.oms_etr, initial_etr)
+        mock_apply_async.assert_not_called()
+        mock_send_alert.assert_not_called()
+
+        case.oms_etr = initial_etr
+        case.save(update_fields=["oms_etr"])
+        mock_apply_async.assert_not_called()
+
+        mock_apply_async.return_value.id = "later-etr-task-id"
+        later_etr = initial_etr + timedelta(hours=1)
+        case.oms_etr = later_etr
+        with self.captureOnCommitCallbacks(execute=True):
+            case.save(update_fields=["oms_etr"])
+        case.refresh_from_db()
+        self.assertEqual(case.oms_etr, later_etr)
+        mock_apply_async.assert_called_once_with(
+            args=[case.case_id],
+            eta=later_etr,
+            task_id=case.celery_etr_task_id,
+        )
+        mock_send_alert.assert_called_once()
+
+        stale_case.oms_etr = initial_etr + timedelta(minutes=30)
+        stale_case.save(update_fields=["oms_etr"])
+        stale_case.refresh_from_db()
+        self.assertEqual(stale_case.oms_etr, later_etr)
+        self.assertEqual(mock_apply_async.call_count, 1)
+        self.assertEqual(mock_send_alert.call_count, 1)
+
     @patch("oms.signals.check_etr_timeout.apply_async")
     @patch("oms.signals.send_proactive_alert.delay")
     def test_oms_etr_update_sends_etr_update_to_active_sessions(
@@ -1594,6 +1933,7 @@ class OutageCaseSignalTests(TestCase):
             session_id="session-a",
             ca_number="123456789014",
             related_case=case,
+            is_resolved=True,
         )
         CustomerReport.objects.create(
             session_id="session-resolved",
@@ -1606,21 +1946,24 @@ class OutageCaseSignalTests(TestCase):
         original_sla_reason = case.sla_reason
 
         case.oms_etr = timezone.now() + timedelta(hours=1)
-        case.save(update_fields=["oms_etr"])
+        with self.captureOnCommitCallbacks(execute=True):
+            case.save(update_fields=["oms_etr"])
 
         case.refresh_from_db()
         self.assertIsNotNone(case.oms_etr_updated_at)
         self.assertIsNotNone(case.sla_reference_time)
         self.assertIsNotNone(case.sla_target_time)
         self.assertEqual(case.sla_reason, original_sla_reason)
-        self.assertEqual(case.celery_etr_task_id, "etr-task-id")
+        self.assertIsNotNone(case.celery_etr_task_id)
         self.assertEqual(case.sla_reference_time, original_sla_reference_time)
         self.assertEqual(case.sla_target_time, original_sla_target_time)
         self.assertNotEqual(
             case.sla_target_time, case.oms_etr_updated_at + timedelta(hours=4)
         )
         mock_apply_async.assert_called_once_with(
-            args=[case.case_id], eta=case.oms_etr
+            args=[case.case_id],
+            eta=case.oms_etr,
+            task_id=case.celery_etr_task_id,
         )
         self.assertEqual(mock_send_alert.call_count, 2)
         event_types = {
@@ -1659,7 +2002,7 @@ class OutageCaseSignalTests(TestCase):
             {call.kwargs["event_type"] for call in mock_send_alert.call_args_list},
             {"etr_update"},
         )
-        self.assertEqual(case.celery_etr_task_id, "mass-etr-task-id")
+        self.assertIsNotNone(case.celery_etr_task_id)
 
     @patch("oms.signals.check_etr_timeout.apply_async")
     @patch("oms.signals.send_proactive_alert.delay")
@@ -1724,7 +2067,9 @@ class OutageCaseSignalTests(TestCase):
         self.assertIsNotNone(log.etr_delta_minutes)
         call = mock_send_alert.call_args
         self.assertEqual(call.kwargs["event_type"], "closed_loop_prompt")
-        self.assertIn("กรุณาเลือกสถานะไฟฟ้า", call.kwargs["message"])
+        self.assertIn("ไฟฟ้ากลับมาใช้งานได้หรือยัง", call.kwargs["message"])
+        self.assertIn("123456789012", call.kwargs["message"])
+        self.assertNotIn("{ca_number}", call.kwargs["message"])
         self.assertNotIn("พิมพ์", call.kwargs["message"])
         self.assertNotIn("เปิดเคสเร่งด่วน", call.kwargs["message"])
         self.assertNotIn("เบรกเกอร์", call.kwargs["message"])
@@ -1746,6 +2091,7 @@ class OutageCaseSignalTests(TestCase):
             session_id="session-duplicate",
             ca_number="123456789013",
             related_case=case,
+            is_resolved=True,
         )
 
         case.status = "restored"
@@ -2237,9 +2583,38 @@ class OpsWebhookConsoleTests(TestCase):
         selected_case.refresh_from_db()
         untouched_case.refresh_from_db()
         self.assertIsNotNone(selected_case.oms_etr)
-        self.assertEqual(selected_case.celery_etr_task_id, "ops-etr-task-id")
+        self.assertIsNotNone(selected_case.celery_etr_task_id)
         self.assertIsNone(untouched_case.oms_etr)
         mock_send_alert.assert_called_once()
+
+    @patch("oms.signals.check_etr_timeout.apply_async")
+    @patch("oms.signals.send_proactive_alert.delay")
+    def test_ops_action_ignores_earlier_or_equal_etr(
+        self, mock_send_alert, mock_apply_async
+    ):
+        current_etr = timezone.now() + timedelta(hours=2)
+        case = OutageCase.objects.create(title="Ops monotonic ETR", oms_etr=current_etr)
+
+        for requested_etr in [current_etr - timedelta(hours=1), current_etr]:
+            response = self.client.post(
+                "/ops/cases/action/",
+                {
+                    "action": "set_etr",
+                    "target_mode": "selected",
+                    "case_ids": [str(case.case_id)],
+                    "etr_mode": "datetime",
+                    "etr_at": requested_etr.isoformat(),
+                },
+                format="json",
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["updated_count"], 0)
+            self.assertEqual(response.json()["skipped_count"], 1)
+
+        case.refresh_from_db()
+        self.assertEqual(case.oms_etr, current_etr)
+        mock_apply_async.assert_not_called()
+        mock_send_alert.assert_not_called()
 
     @patch("oms.signals.check_eta_timeout.apply_async")
     def test_ops_action_sets_eta_to_now_for_selected_cases(self, mock_apply_async):
@@ -2263,16 +2638,26 @@ class OpsWebhookConsoleTests(TestCase):
             related_case=selected_case,
         )
 
+        def assert_task_id_was_persisted(*, args, eta, task_id):
+            persisted_id = OutageCase.objects.values_list(
+                "celery_eta_task_id", flat=True
+            ).get(pk=selected_case.pk)
+            self.assertEqual(persisted_id, task_id)
+            return mock_apply_async.return_value
+
+        mock_apply_async.side_effect = assert_task_id_was_persisted
+
         before = timezone.now()
-        response = self.client.post(
-            "/ops/cases/action/",
-            {
-                "action": "set_eta_now",
-                "target_mode": "selected",
-                "case_ids": [str(selected_case.case_id)],
-            },
-            format="json",
-        )
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(
+                "/ops/cases/action/",
+                {
+                    "action": "set_eta_now",
+                    "target_mode": "selected",
+                    "case_ids": [str(selected_case.case_id)],
+                },
+                format="json",
+            )
         after = timezone.now()
 
         self.assertEqual(response.status_code, 200)
@@ -2282,10 +2667,11 @@ class OpsWebhookConsoleTests(TestCase):
         self.assertGreaterEqual(selected_case.eta_target_time, before)
         self.assertLessEqual(selected_case.eta_target_time, after)
         self.assertEqual(untouched_case.eta_target_time, untouched_eta)
-        self.assertEqual(selected_case.celery_eta_task_id, "eta-now-task-id")
+        self.assertIsNotNone(selected_case.celery_eta_task_id)
         mock_apply_async.assert_called_once_with(
             args=[selected_case.case_id, report.id],
             eta=selected_case.eta_target_time,
+            task_id=selected_case.celery_eta_task_id,
         )
 
     def test_ops_action_restores_all_active_cases(self):

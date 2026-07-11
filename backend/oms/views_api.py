@@ -1,6 +1,7 @@
 from datetime import timedelta
 from uuid import UUID
 
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from rest_framework import serializers
@@ -36,6 +37,7 @@ from .tasks import (
     check_eta_timeout,
     check_etr_timeout,
     check_sla_timeout,
+    schedule_case_timer,
     send_proactive_alert,
 )
 from pea_project.celery import app as celery_app
@@ -131,19 +133,51 @@ def _include_model_etr_for_response(case, event_type=None):
 
 
 def _get_or_create_active_report(session_id, ca_number):
-    report = (
-        CustomerReport.objects.filter(
-            session_id=session_id, ca_number=ca_number, is_resolved=False
-        )
-        .order_by("-updated_at")
-        .first()
-    )
-    if report:
-        return report, False
-    return (
-        CustomerReport.objects.create(session_id=session_id, ca_number=ca_number),
-        True,
-    )
+    if not session_id:
+        return CustomerReport.objects.create(ca_number=ca_number), True
+
+    for attempt in range(2):
+        try:
+            with transaction.atomic():
+                active_reports = list(
+                    CustomerReport.objects.select_for_update()
+                    .filter(session_id=session_id, is_resolved=False)
+                    .order_by("-updated_at", "-id")
+                )
+                matching_report = next(
+                    (
+                        report
+                        for report in active_reports
+                        if report.ca_number == ca_number
+                    ),
+                    None,
+                )
+                if matching_report:
+                    stale_ids = [
+                        report.id
+                        for report in active_reports
+                        if report.id != matching_report.id
+                    ]
+                    if stale_ids:
+                        CustomerReport.objects.filter(id__in=stale_ids).update(
+                            is_resolved=True, updated_at=timezone.now()
+                        )
+                    return matching_report, False
+
+                if active_reports:
+                    CustomerReport.objects.filter(
+                        id__in=[report.id for report in active_reports]
+                    ).update(is_resolved=True, updated_at=timezone.now())
+
+                return CustomerReport.objects.create(
+                    session_id=session_id,
+                    ca_number=ca_number,
+                ), True
+        except IntegrityError:
+            if attempt:
+                raise
+
+    raise RuntimeError("Unable to establish the active report for this session")
 
 
 def _mark_closed_loop_reports_resolved(session_id, ca_number=None, report_id=None):
@@ -289,6 +323,16 @@ def _find_oms_case(case_id, external_event_id):
     return None
 
 
+def _active_merge_anchor(case):
+    seen = set()
+    while case and case.status == STATUS_MERGED and case.merged_into_id:
+        if case.pk in seen:
+            return None
+        seen.add(case.pk)
+        case = case.merged_into
+    return case
+
+
 def _upsert_oms_case(oms_case, trigger_signals=False):
     case_id = _case_id_from_oms(oms_case, required=False)
     external_event_id = (oms_case.get("external_event_id") or "").strip() or None
@@ -322,6 +366,10 @@ def _upsert_oms_case(oms_case, trigger_signals=False):
     if not case:
         case = OutageCase.objects.create(**defaults)
         return case, True
+    if case.status == STATUS_MERGED:
+        anchor = _active_merge_anchor(case) or case
+        anchor._ignored_merged_callback = True
+        return anchor, False
 
     fields = {"status": status}
     if "case_type" in oms_case or "affected_ca_numbers" in oms_case:
@@ -332,7 +380,11 @@ def _upsert_oms_case(oms_case, trigger_signals=False):
         fields["affected_ca_numbers"] = affected_ca_numbers
     if "outage_time" in oms_case:
         fields["outage_time"] = outage_time
-    if "oms_etr" in oms_case or "etr_target_time" in oms_case:
+    if (
+        ("oms_etr" in oms_case or "etr_target_time" in oms_case)
+        and oms_etr
+        and (not case.oms_etr or oms_etr > case.oms_etr)
+    ):
         fields["oms_etr"] = oms_etr
 
     if trigger_signals:
@@ -403,18 +455,19 @@ def _apply_assessment_fields_to_case(case, assessment_fields, report):
     )
     case.refresh_from_db()
 
-    eta_task = check_eta_timeout.apply_async(
-        args=[case.case_id, report.id],
-        eta=assessment_fields["eta_target_time"],
+    schedule_case_timer(
+        case,
+        check_eta_timeout,
+        "celery_eta_task_id",
+        [case.case_id, report.id],
+        assessment_fields["eta_target_time"],
     )
-    sla_task = check_sla_timeout.apply_async(
-        args=[case.case_id],
-        eta=assessment_fields["sla_target_time"],
-    )
-    case.celery_eta_task_id = eta_task.id
-    case.celery_sla_task_id = sla_task.id
-    case.save(
-        update_fields=["celery_eta_task_id", "celery_sla_task_id", "updated_at"]
+    schedule_case_timer(
+        case,
+        check_sla_timeout,
+        "celery_sla_task_id",
+        [case.case_id],
+        assessment_fields["sla_target_time"],
     )
     return None
 
@@ -427,18 +480,24 @@ def _format_time_label(target_time):
 
 def _mass_outage_message(case):
     etr_label = _format_time_label(case.effective_etr_time())
+    ca_numbers = ", ".join(case.affected_ca_numbers or [])
     if etr_label:
         return (
-            "ขณะนี้เกิดเหตุไฟดับวงกว้างในพื้นที่ค่ะ "
-            f"คาดว่าจะจ่ายไฟคืนประมาณ {etr_label} ค่ะ"
+            "ขณะนี้เกิดเหตุไฟดับวงกว้างในพื้นที่ "
+            f"หมายเลข CA {ca_numbers} เจ้าหน้าที่กำลังเร่งแก้ไข "
+            f"คาดว่าจะแล้วเสร็จประมาณ {etr_label} ค่ะ "
+            "ขออภัยในความไม่สะดวกค่ะ"
         )
     return (
-        "ขณะนี้เกิดเหตุไฟดับวงกว้างในพื้นที่ค่ะ "
+        "ขณะนี้เกิดเหตุไฟดับวงกว้างในพื้นที่ "
+        f"หมายเลข CA {ca_numbers} "
         "ระบบกำลังประเมินเวลาไฟกลับล่าสุดค่ะ"
     )
 
 
-def _notify_mass_outage_sessions(case, exclude_session_id=None):
+def _notify_mass_outage_sessions(
+    case, exclude_session_id=None, exclude_session_ids=None
+):
     reports = (
         CustomerReport.objects.filter(related_case=case, is_resolved=False)
         .exclude(session_id__isnull=True)
@@ -447,8 +506,11 @@ def _notify_mass_outage_sessions(case, exclude_session_id=None):
     )
 
     sent_session_ids = set()
+    excluded_session_ids = set(exclude_session_ids or [])
+    if exclude_session_id:
+        excluded_session_ids.add(exclude_session_id)
     for report in reports:
-        if report.session_id == exclude_session_id:
+        if report.session_id in excluded_session_ids:
             continue
         if report.session_id in sent_session_ids:
             continue
@@ -479,13 +541,18 @@ def _schedule_initial_oms_etr(case):
     ):
         return False
 
-    task = check_etr_timeout.apply_async(args=[case.case_id], eta=case.oms_etr)
+    schedule_case_timer(
+        case,
+        check_etr_timeout,
+        "celery_etr_task_id",
+        [case.case_id],
+        case.oms_etr,
+    )
     etr_updated_at = timezone.now()
     case.oms_etr_updated_at = etr_updated_at
-    case.celery_etr_task_id = task.id
     OutageCase.objects.filter(pk=case.pk).update(
         oms_etr_updated_at=etr_updated_at,
-        celery_etr_task_id=task.id,
+        celery_etr_task_id=case.celery_etr_task_id,
     )
     return True
 
@@ -498,9 +565,13 @@ def _schedule_initial_sla(case):
     ):
         return False
 
-    task = check_sla_timeout.apply_async(args=[case.case_id], eta=case.sla_target_time)
-    case.celery_sla_task_id = task.id
-    OutageCase.objects.filter(pk=case.pk).update(celery_sla_task_id=task.id)
+    schedule_case_timer(
+        case,
+        check_sla_timeout,
+        "celery_sla_task_id",
+        [case.case_id],
+        case.sla_target_time,
+    )
     return True
 
 
@@ -518,27 +589,38 @@ def _mark_superseded_cases_as_merged(case, affected_ca_numbers):
         .distinct()
     )
 
+    superseded_case_ids = list(superseded_cases.values_list("pk", flat=True))
     updated_count = 0
-    for superseded_case in superseded_cases:
-        _revoke_case_timers(superseded_case)
-        superseded_case.status = STATUS_MERGED
-        superseded_case.merged_into = case
-        superseded_case.merged_at = timezone.now()
-        superseded_case.celery_eta_task_id = None
-        superseded_case.celery_etr_task_id = None
-        superseded_case.celery_sla_task_id = None
-        superseded_case.save(
-            update_fields=[
-                "status",
-                "merged_into",
-                "merged_at",
-                "celery_eta_task_id",
-                "celery_etr_task_id",
-                "celery_sla_task_id",
-                "updated_at",
-            ]
-        )
-        updated_count += 1
+    for superseded_case_id in superseded_case_ids:
+        with transaction.atomic():
+            superseded_case = OutageCase.objects.select_for_update().get(
+                pk=superseded_case_id
+            )
+            if superseded_case.status in INACTIVE_CASE_STATUSES:
+                continue
+            _revoke_case_timers(superseded_case)
+            superseded_case.status = STATUS_MERGED
+            superseded_case.merged_into = case
+            superseded_case.merged_at = timezone.now()
+            superseded_case.celery_eta_task_id = None
+            superseded_case.celery_etr_task_id = None
+            superseded_case.celery_sla_task_id = None
+            superseded_case.save(
+                update_fields=[
+                    "status",
+                    "merged_into",
+                    "merged_at",
+                    "celery_eta_task_id",
+                    "celery_etr_task_id",
+                    "celery_sla_task_id",
+                    "updated_at",
+                ]
+            )
+            CustomerReport.objects.filter(
+                related_case=superseded_case,
+                is_resolved=False,
+            ).update(related_case=case, updated_at=timezone.now())
+            updated_count += 1
     return updated_count
 
 
@@ -912,6 +994,20 @@ def oms_event_callback(request):
     except ValueError as exc:
         return Response({"status": "error", "message": str(exc)}, status=400)
 
+    if getattr(case, "_ignored_merged_callback", False):
+        return Response(
+            {
+                "status": "success",
+                "event_type": event_type,
+                "created": False,
+                "merged_count": 0,
+                "etr_timer_scheduled": False,
+                "sla_timer_scheduled": False,
+                "notified_session_count": 0,
+                **_case_response_fields(case, include_model_etr=True),
+            }
+        )
+
     merged_count = 0
     if event_type == "case_opened":
         merged_count = _mark_superseded_cases_as_merged(
@@ -925,10 +1021,14 @@ def oms_event_callback(request):
     notified_sessions = set()
     if (
         event_type == "case_opened"
+        and (created or merged_count)
         and case.case_type == CASE_TYPE_MASS_OUTAGE
         and case.status not in INACTIVE_CASE_STATUSES
     ):
-        notified_sessions = _notify_mass_outage_sessions(case)
+        notified_sessions = _notify_mass_outage_sessions(
+            case,
+            exclude_session_ids=getattr(case, "_etr_update_session_ids", set()),
+        )
 
     return Response(
         {

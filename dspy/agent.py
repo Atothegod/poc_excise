@@ -249,7 +249,7 @@ class MemoryAgent:
     def _out_of_scope_response(self, ca_number: str | None):
         return SimpleNamespace(
             answer=(
-                "ช่องทางนี้รองรับการแจ้งและติดตามเหตุไฟดับเท่านั้นค่ะ "
+                "[HEART MODE] ช่องทางนี้รองรับการแจ้งและติดตามเหตุไฟดับเท่านั้นค่ะ "
                 "หากเป็นเรื่องอื่นของการไฟฟ้า กรุณาติดต่อช่องทางบริการลูกค้าที่เกี่ยวข้องค่ะ"
             ),
             current_state=PEA_Conversation_State(
