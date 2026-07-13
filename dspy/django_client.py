@@ -4,7 +4,6 @@ import re
 import requests
 
 from session_state import current_login_ca_number, current_session_id, current_time_stamp
-from session_state import get_latest_outage
 
 
 DJANGO_API_URL = os.getenv("DJANGO_API_URL", "http://backend:8000/api")
@@ -15,13 +14,19 @@ def is_valid_ca_number(ca_number: str) -> bool:
     return bool(CA_NUMBER_PATTERN.fullmatch(str(ca_number).strip()))
 
 
-def fetch_session_context(session_id: str, ca_number: str | None = None):
+def fetch_session_context(
+    session_id: str,
+    ca_number: str | None = None,
+    before_message_id: int | None = None,
+):
     if not session_id or session_id == "unknown":
         return None
 
     params = {}
     if ca_number and is_valid_ca_number(ca_number):
         params["ca_number"] = ca_number
+    if before_message_id is not None:
+        params["before_message_id"] = before_message_id
 
     try:
         response = requests.get(
@@ -36,59 +41,6 @@ def fetch_session_context(session_id: str, ca_number: str | None = None):
     except requests.exceptions.RequestException:
         return None
     return None
-
-
-def _normalize_dialog_history(history):
-    dialog = []
-    for item in history:
-        raw_role = str(item.get("role", "")).lower()
-        if "user" in raw_role:
-            role = "user"
-        elif "assistant" in raw_role or "agent" in raw_role or "system alert" in raw_role:
-            role = "agent"
-        else:
-            continue
-
-        message = item.get("message") or item.get("content") or ""
-        if not message:
-            continue
-
-        dialog.append(
-            {
-                "role": role,
-                "message": str(message),
-                "timestamp": item.get("timestamp"),
-                "event_type": item.get("event_type"),
-                "ca_number": item.get("ca_number"),
-                "report_id": item.get("report_id"),
-                "case_id": item.get("case_id"),
-                "notification_key": item.get("notification_key"),
-                "closed_loop_kind": item.get("closed_loop_kind"),
-            }
-        )
-    return dialog
-
-
-def sync_chat_history_to_db(session_id: str, history: list):
-    if not session_id or session_id == "unknown":
-        return
-
-    latest_outage = get_latest_outage(session_id) or {}
-    ca_number = latest_outage.get("ca_number") or current_login_ca_number.get()
-    payload = {
-        "session_id": session_id,
-        "ca_number": ca_number,
-        "chat_history": _normalize_dialog_history(history),
-    }
-
-    try:
-        requests.post(
-            f"{DJANGO_API_URL}/reports/chat-history/",
-            json=payload,
-            timeout=5,
-        )
-    except requests.exceptions.RequestException:
-        pass
 
 
 def save_report_to_db(

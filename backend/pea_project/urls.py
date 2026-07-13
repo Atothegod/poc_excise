@@ -15,6 +15,11 @@ urlpatterns = [
     
     path("agent/ask/", views.agent_ask_proxy, name="agent_ask_proxy"),
     path(
+        "agent/jobs/<uuid:job_id>/",
+        views.agent_job_status,
+        name="agent_job_status",
+    ),
+    path(
         "agent/notifications/<str:session_id>/",
         views.agent_notifications_proxy,
         name="agent_notifications_proxy",

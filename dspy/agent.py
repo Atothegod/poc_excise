@@ -12,7 +12,6 @@ from agent_tools import Check_Outage_Tool
 from django_client import (
     fetch_session_context,
     record_closed_loop_response,
-    sync_chat_history_to_db,
 )
 from session_state import (
     current_login_ca_number,
@@ -40,51 +39,48 @@ OUTAGE_ROUTES = {
 }
 
 
-class MemoryAgent:
+class StatelessAgent:
     def __init__(self, agent_module, intent_router_module=None):
         self.agent = agent_module
         self.intent_router = intent_router_module or base_intent_router
-        self.sessions = {}
 
-    def _get_or_create_session(self, session_id: str) -> list:
-        if session_id not in self.sessions:
-            self.sessions[session_id] = []
-        return self.sessions[session_id]
-
-    def _hydrate_session_from_db(self, session_id: str, ca_number: str | None = None):
-        history_list = self._get_or_create_session(session_id)
-
-        context = fetch_session_context(session_id, ca_number=ca_number)
+    def _hydrate_session_from_db(
+        self,
+        session_id: str,
+        ca_number: str | None = None,
+        before_message_id: int | None = None,
+    ):
+        history_list = []
+        context = fetch_session_context(
+            session_id,
+            ca_number=ca_number,
+            before_message_id=before_message_id,
+        )
         if not context:
+            restore_latest_outage(session_id, None)
             return history_list
 
         latest_outage = context.get("latest_outage")
-        if latest_outage:
-            restore_latest_outage(session_id, latest_outage)
+        restore_latest_outage(session_id, latest_outage)
 
-        if not history_list:
-            restored_history = []
-            for item in context.get("chat_history") or []:
-                role = item.get("role")
-                message = item.get("message")
-                if not role or not message:
-                    continue
-                restored_history.append(
-                    {
-                        "role": role,
-                        "content": message,
-                        "timestamp": item.get("timestamp"),
-                        "event_type": item.get("event_type"),
-                        "ca_number": item.get("ca_number"),
-                        "report_id": item.get("report_id"),
-                        "case_id": item.get("case_id"),
-                        "notification_key": item.get("notification_key"),
-                        "closed_loop_kind": item.get("closed_loop_kind"),
-                    }
-                )
-            if restored_history:
-                self.sessions[session_id] = restored_history
-                history_list = restored_history
+        for item in context.get("chat_history") or []:
+            role = item.get("role")
+            message = item.get("message") or item.get("content")
+            if not role or not message:
+                continue
+            history_list.append(
+                {
+                    "role": role,
+                    "content": message,
+                    "timestamp": item.get("timestamp"),
+                    "event_type": item.get("event_type"),
+                    "ca_number": item.get("ca_number"),
+                    "report_id": item.get("report_id"),
+                    "case_id": item.get("case_id"),
+                    "notification_key": item.get("notification_key"),
+                    "closed_loop_kind": item.get("closed_loop_kind"),
+                }
+            )
 
         return history_list
 
@@ -474,6 +470,7 @@ class MemoryAgent:
         time_stamp: str,
         ca_number: str | None = None,
         pdpa_consent: bool = False,
+        user_message_id: int | None = None,
     ):
         # 4. ยัดข้อมูลใส่กระเป๋าทะลุมิติก่อนเริ่มคุย!
         current_session_id.set(session_id)
@@ -481,7 +478,11 @@ class MemoryAgent:
         current_login_ca_number.set(ca_number)
         current_pdpa_consent.set(bool(pdpa_consent))
 
-        history_list = self._hydrate_session_from_db(session_id, ca_number=ca_number)
+        history_list = self._hydrate_session_from_db(
+            session_id,
+            ca_number=ca_number,
+            before_message_id=user_message_id,
+        )
         pending_closed_loop_prompt = self._latest_pending_closed_loop_prompt(
             history_list
         )
@@ -521,19 +522,7 @@ class MemoryAgent:
         response = self._ensure_branch_wording(response, session_id)
         response = self._ensure_feminine_ending(response)
 
-        history_list.append(
-            {"role": "user", "content": user_input, "timestamp": time_stamp}
-        )
-        history_list.append(
-            {
-                "role": "agent",
-                "content": getattr(response, "answer", str(response)),
-                "timestamp": time_stamp,
-            }
-        )
-        sync_chat_history_to_db(session_id, history_list)
-
         return response
 
 
-chatbot = MemoryAgent(base_react_agent, intent_router_module=base_intent_router)
+chatbot = StatelessAgent(base_react_agent, intent_router_module=base_intent_router)

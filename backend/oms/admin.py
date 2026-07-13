@@ -4,7 +4,14 @@ from django.utils import timezone
 from django.utils.html import format_html, format_html_join
 from .case_logic import STATUS_MERGED
 from .csv_exports import csv_response, write_csv
-from .models import CustomerLocation, OutageCase, CustomerReport, OutageRestorationLog
+from .models import (
+    AgentJob,
+    ChatMessage,
+    CustomerLocation,
+    CustomerReport,
+    OutageCase,
+    OutageRestorationLog,
+)
 
 
 class CsvExportAdminMixin:
@@ -356,6 +363,9 @@ class CustomerReportAdmin(CsvExportAdminMixin, admin.ModelAdmin):
     )
 
     def chat_dialog_preview(self, obj):
+        message_count = obj.messages.count()
+        if message_count:
+            return f"{message_count} messages"
         history = obj.chat_history or []
         if not history:
             return format_html('<span style="color: gray;">ยังไม่มีบทสนทนา</span>')
@@ -364,7 +374,19 @@ class CustomerReportAdmin(CsvExportAdminMixin, admin.ModelAdmin):
     chat_dialog_preview.short_description = "Chat History"
 
     def chat_dialog(self, obj):
-        history = obj.chat_history or []
+        timeline = list(obj.messages.order_by("created_at", "id"))
+        history = (
+            [
+                {
+                    "role": message.role,
+                    "timestamp": message.created_at.isoformat(),
+                    "message": message.content,
+                }
+                for message in timeline
+            ]
+            if timeline
+            else obj.chat_history or []
+        )
         if not history:
             return format_html('<span style="color: gray;">ยังไม่มีบทสนทนา</span>')
 
@@ -444,3 +466,19 @@ class OutageRestorationLogAdmin(CsvExportAdminMixin, admin.ModelAdmin):
         return f"{len(ca_numbers)} CA: {preview}"
 
     affected_CA.short_description = "affected_CA"
+
+
+@admin.register(ChatMessage)
+class ChatMessageAdmin(admin.ModelAdmin):
+    list_display = ("id", "session_id", "role", "event_type", "ca_number", "created_at")
+    list_filter = ("role", "event_type")
+    search_fields = ("session_id", "ca_number", "content", "notification_key")
+    readonly_fields = ("created_at",)
+
+
+@admin.register(AgentJob)
+class AgentJobAdmin(admin.ModelAdmin):
+    list_display = ("id", "session_id", "status", "attempts", "created_at", "completed_at")
+    list_filter = ("status",)
+    search_fields = ("id", "session_id", "ca_number", "celery_task_id")
+    readonly_fields = ("created_at", "updated_at", "started_at", "completed_at")

@@ -21,7 +21,7 @@ from .case_logic import (
     STATUS_REPORTED,
     STATUS_RESTORED,
 )
-from .models import CustomerLocation, CustomerReport, OutageCase
+from .models import AgentJob, ChatMessage, CustomerLocation, CustomerReport, OutageCase
 from .serializers import (
     AgentReportSerializer,
     ActionStatusRequestSerializer,
@@ -40,6 +40,7 @@ from .tasks import (
     schedule_case_timer,
     send_proactive_alert,
 )
+from .timeline import serialize_chat_message
 from pea_project.celery import app as celery_app
 
 
@@ -278,10 +279,47 @@ def _attach_reports_for_case(case):
     affected_ca_numbers = case.affected_ca_numbers or []
     if not affected_ca_numbers:
         return 0
-    return CustomerReport.objects.filter(
+
+    attached_count = CustomerReport.objects.filter(
         ca_number__in=affected_ca_numbers,
         is_resolved=False,
     ).update(related_case=case)
+    if case.status in INACTIVE_CASE_STATUSES:
+        return attached_count
+
+    active_session_ids = set(
+        CustomerReport.objects.filter(is_resolved=False)
+        .exclude(session_id__isnull=True)
+        .exclude(session_id="")
+        .values_list("session_id", flat=True)
+    )
+    revived_report_ids = []
+    seen_session_ids = set()
+    reusable_reports = (
+        CustomerReport.objects.filter(
+            ca_number__in=affected_ca_numbers,
+            is_resolved=True,
+        )
+        .exclude(session_id__isnull=True)
+        .exclude(session_id="")
+        .order_by("-updated_at", "-id")
+    )
+    for report in reusable_reports:
+        if report.session_id in active_session_ids:
+            continue
+        if report.session_id in seen_session_ids:
+            continue
+        seen_session_ids.add(report.session_id)
+        revived_report_ids.append(report.id)
+
+    if revived_report_ids:
+        CustomerReport.objects.filter(id__in=revived_report_ids).update(
+            related_case=case,
+            is_resolved=False,
+            updated_at=timezone.now(),
+        )
+
+    return attached_count + len(revived_report_ids)
 
 
 def _existing_case_event_type(case):
@@ -331,6 +369,24 @@ def _active_merge_anchor(case):
         seen.add(case.pk)
         case = case.merged_into
     return case
+
+
+def _active_anchor_case_for_ca_numbers(affected_ca_numbers, exclude_case_id=None):
+    reports = (
+        CustomerReport.objects.select_related("related_case")
+        .filter(
+            ca_number__in=affected_ca_numbers,
+            is_resolved=False,
+            related_case__isnull=False,
+        )
+        .exclude(related_case__status__in=INACTIVE_CASE_STATUSES)
+        .order_by("-related_case__updated_at", "-updated_at", "-id")
+    )
+    if exclude_case_id:
+        reports = reports.exclude(related_case_id=exclude_case_id)
+
+    report = reports.first()
+    return report.related_case if report else None
 
 
 def _upsert_oms_case(oms_case, trigger_signals=False):
@@ -533,6 +589,60 @@ def _revoke_case_timers(case):
         celery_app.control.revoke(case.celery_sla_task_id, terminate=True)
 
 
+def _merge_single_ca_oms_case_into_active_anchor(case, affected_ca_numbers):
+    if (
+        case.case_type != CASE_TYPE_NORMAL
+        or case.status in INACTIVE_CASE_STATUSES
+        or len(affected_ca_numbers or []) != 1
+    ):
+        return None
+
+    anchor = _active_anchor_case_for_ca_numbers(
+        affected_ca_numbers,
+        exclude_case_id=case.pk,
+    )
+    if not anchor:
+        return None
+
+    with transaction.atomic():
+        child = OutageCase.objects.select_for_update().get(pk=case.pk)
+        anchor = OutageCase.objects.select_for_update().get(pk=anchor.pk)
+        if child.status in INACTIVE_CASE_STATUSES:
+            return anchor
+        if anchor.status in INACTIVE_CASE_STATUSES:
+            return None
+
+        if child.oms_etr and (not anchor.oms_etr or child.oms_etr > anchor.oms_etr):
+            anchor.oms_etr = child.oms_etr
+            anchor.save(update_fields=["oms_etr"])
+
+        _revoke_case_timers(child)
+        child.status = STATUS_MERGED
+        child.merged_into = anchor
+        child.merged_at = timezone.now()
+        child.celery_eta_task_id = None
+        child.celery_etr_task_id = None
+        child.celery_sla_task_id = None
+        child.save(
+            update_fields=[
+                "status",
+                "merged_into",
+                "merged_at",
+                "celery_eta_task_id",
+                "celery_etr_task_id",
+                "celery_sla_task_id",
+                "updated_at",
+            ]
+        )
+        CustomerReport.objects.filter(
+            related_case=child,
+            is_resolved=False,
+        ).update(related_case=anchor, updated_at=timezone.now())
+
+    anchor.refresh_from_db()
+    return anchor
+
+
 def _schedule_initial_oms_etr(case):
     if (
         not case.oms_etr
@@ -690,13 +800,31 @@ def _latest_outage_for_report(report):
     }
 
 
-def _session_context_payload(session_id, report):
+def _session_context_payload(session_id, report, before_message_id=None):
+    # Read the active job first. If it completes between these queries, the
+    # timeline read below includes its response and polling safely deduplicates it.
+    active_job = AgentJob.objects.filter(
+        session_id=session_id,
+        status__in=AgentJob.ACTIVE_STATUSES,
+    ).order_by("-created_at").first()
+    messages = ChatMessage.objects.filter(session_id=session_id)
+    if report and report.ca_number:
+        messages = messages.filter(ca_number=report.ca_number)
+    if before_message_id is not None:
+        messages = messages.filter(id__lt=before_message_id)
+    messages = list(messages.order_by("created_at", "id"))
+
     if not report:
         return {
             "status": "not_found",
             "session_id": session_id,
-            "chat_history": [],
+            "chat_history": [serialize_chat_message(item) for item in messages],
             "latest_outage": None,
+            "active_agent_job": (
+                {"job_id": str(active_job.id), "status": active_job.status}
+                if active_job
+                else None
+            ),
         }
 
     return {
@@ -705,8 +833,17 @@ def _session_context_payload(session_id, report):
         "report_id": report.id,
         "ca_number": report.ca_number,
         "customer_name": report.customer_name,
-        "chat_history": report.chat_history or [],
+        "chat_history": (
+            [serialize_chat_message(item) for item in messages]
+            if messages
+            else report.chat_history or []
+        ),
         "latest_outage": _latest_outage_for_report(report),
+        "active_agent_job": (
+            {"job_id": str(active_job.id), "status": active_job.status}
+            if active_job
+            else None
+        ),
     }
 
 
@@ -973,8 +1110,21 @@ def get_session_context(request, session_id):
         except serializers.ValidationError as e:
             return Response({"error": str(e)}, status=400)
 
+    before_message_id = request.query_params.get("before_message_id")
+    if before_message_id:
+        try:
+            before_message_id = int(before_message_id)
+        except (TypeError, ValueError):
+            return Response({"error": "before_message_id must be an integer"}, status=400)
+
     report = _select_session_report(session_id, ca_number=ca_number)
-    return Response(_session_context_payload(session_id, report))
+    return Response(
+        _session_context_payload(
+            session_id,
+            report,
+            before_message_id=before_message_id,
+        )
+    )
 
 
 @api_view(["POST"])
@@ -1013,12 +1163,19 @@ def oms_event_callback(request):
         merged_count = _mark_superseded_cases_as_merged(
             case, case.affected_ca_numbers or []
         )
+        single_ca_anchor = _merge_single_ca_oms_case_into_active_anchor(
+            case,
+            case.affected_ca_numbers or [],
+        )
+        if single_ca_anchor:
+            case = single_ca_anchor
+            merged_count += 1
 
     _attach_reports_for_case(case)
     case.sync_affected_ca_numbers()
     etr_timer_scheduled = _schedule_initial_oms_etr(case) if created else False
     sla_timer_scheduled = _schedule_initial_sla(case)
-    notified_sessions = set()
+    notified_sessions = set(getattr(case, "_etr_update_session_ids", set()))
     if (
         event_type == "case_opened"
         and (created or merged_count)

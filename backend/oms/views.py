@@ -1,9 +1,8 @@
 import json
 from datetime import timedelta
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from django.conf import settings
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.http import JsonResponse
 from django.shortcuts import render
@@ -12,7 +11,6 @@ from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
-import requests
 
 from .case_logic import (
     CASE_LINK_RADIUS_KM,
@@ -21,7 +19,15 @@ from .case_logic import (
     STATUS_RESTORED,
 )
 from .csv_exports import csv_response, write_csv
-from .models import CustomerLocation, CustomerReport, OutageCase
+from .models import AgentJob, ChatMessage, CustomerLocation, CustomerReport, OutageCase
+from .tasks import process_agent_job
+from .timeline import (
+    acknowledge_notifications,
+    active_case_report_for_session,
+    active_report_for_session,
+    pending_closed_loop_report_for_session,
+    serialize_notification,
+)
 
 
 def login_page(request):
@@ -29,41 +35,147 @@ def login_page(request):
 
 
 def chat_page(request):
-    return render(
-        request,
-        "oms/chat.html",
-        {"agent_base_url": settings.DSPY_AGENT_PUBLIC_URL},
-    )
-
-
-def _agent_url(path):
-    return f"{settings.DSPY_AGENT_INTERNAL_URL.rstrip('/')}/{path.lstrip('/')}"
-
-
-def _proxy_agent_response(response):
-    try:
-        payload = response.json()
-    except ValueError:
-        payload = {"detail": response.text or "Agent returned an invalid response."}
-    return JsonResponse(payload, status=response.status_code, safe=False)
+    return render(request, "oms/chat.html")
 
 
 @csrf_exempt
 @require_POST
 def agent_ask_proxy(request):
     try:
-        response = requests.post(
-            _agent_url("/ask"),
-            data=request.body,
-            headers={"Content-Type": request.headers.get("Content-Type", "application/json")},
-            timeout=60,
-        )
-        return _proxy_agent_response(response)
-    except requests.exceptions.RequestException as exc:
+        data = _load_json_body(request)
+    except ValueError as exc:
+        return JsonResponse({"detail": str(exc)}, status=400)
+
+    session_id = str(data.get("session_id") or "").strip()
+    question = str(data.get("question") or "").strip()
+    ca_number = str(data.get("ca_number") or "").strip()
+    if not session_id or len(session_id) > 255 or not question:
+        return JsonResponse({"detail": "session_id and question are required"}, status=400)
+    if len(question) > 10000:
+        return JsonResponse({"detail": "question is too long"}, status=400)
+    if not ca_number or len(ca_number) != 12 or not ca_number.isdigit():
+        return JsonResponse({"detail": "ca_number must contain 12 digits"}, status=400)
+
+    report = active_report_for_session(session_id, ca_number)
+    if not report:
+        report = active_case_report_for_session(session_id, ca_number)
+        if report and report.is_resolved:
+            CustomerReport.objects.filter(pk=report.pk, is_resolved=True).update(
+                is_resolved=False,
+                updated_at=timezone.now(),
+            )
+            report.is_resolved = False
+    if not report:
+        report = pending_closed_loop_report_for_session(session_id, ca_number)
+        
+    # หากไม่พบ Report ที่ Active หรือ Pending อยู่เลย ให้สร้าง Report ใหม่
+    if not report:
+        try:
+            report = CustomerReport.objects.create(
+                session_id=session_id,
+                ca_number=ca_number,
+                pdpa_consent=bool(data.get("pdpa_consent")),
+                is_resolved=False  # บังคับให้เป็น False เพื่อให้เป็นเคสที่กำลัง Active
+            )
+        except Exception as exc:
+            return JsonResponse({"detail": f"failed_to_create_report: {str(exc)}"}, status=500)
+
+    existing = AgentJob.objects.filter(
+        session_id=session_id,
+        status__in=AgentJob.ACTIVE_STATUSES,
+    ).first()
+    if existing:
         return JsonResponse(
-            {"detail": f"Cannot connect to DSPy agent: {exc}"},
-            status=502,
+            {
+                "detail": "agent_job_in_progress",
+                "job_id": str(existing.id),
+            },
+            status=409,
         )
+
+    celery_task_id = str(uuid4())
+    try:
+        with transaction.atomic():
+            user_message = ChatMessage.objects.create(
+                session_id=session_id,
+                report=report,
+                case=report.related_case,
+                role=ChatMessage.ROLE_USER,
+                content=question,
+                ca_number=ca_number,
+            )
+            job = AgentJob.objects.create(
+                session_id=session_id,
+                ca_number=ca_number,
+                pdpa_consent=bool(data.get("pdpa_consent")),
+                user_message=user_message,
+                celery_task_id=celery_task_id,
+            )
+    except IntegrityError:
+        existing = AgentJob.objects.filter(
+            session_id=session_id,
+            status__in=AgentJob.ACTIVE_STATUSES,
+        ).first()
+        return JsonResponse(
+            {
+                "detail": "agent_job_in_progress",
+                "job_id": str(existing.id) if existing else None,
+            },
+            status=409,
+        )
+
+    try:
+        process_agent_job.apply_async(
+            args=[str(job.id)],
+            task_id=celery_task_id,
+            queue="agent",
+        )
+    except Exception as exc:
+        AgentJob.objects.filter(pk=job.pk, status=AgentJob.STATUS_QUEUED).update(
+            status=AgentJob.STATUS_FAILED,
+            error_code="enqueue_failed",
+            error_message=str(exc)[:2000],
+            completed_at=timezone.now(),
+        )
+        return JsonResponse(
+            {"detail": "agent_queue_unavailable", "job_id": str(job.id)},
+            status=503,
+        )
+
+    return JsonResponse(
+        {
+            "job_id": str(job.id),
+            "status": AgentJob.STATUS_QUEUED,
+            "user_message_id": user_message.id,
+        },
+        status=202,
+    )
+
+
+@require_GET
+def agent_job_status(request, job_id):
+    session_id = str(request.GET.get("session_id") or "").strip()
+    job = AgentJob.objects.select_related("response_message").filter(pk=job_id).first()
+    if not job or not session_id or job.session_id != session_id:
+        return JsonResponse({"detail": "job_not_found"}, status=404)
+
+    payload = {"job_id": str(job.id), "status": job.status}
+    if job.status == AgentJob.STATUS_SUCCEEDED and job.response_message:
+        payload.update(
+            {
+                "answer": job.response_message.content,
+                "state": job.response_state,
+                "response_message_id": job.response_message_id,
+            }
+        )
+    elif job.status == AgentJob.STATUS_FAILED:
+        payload.update(
+            {
+                "error_code": job.error_code or "agent_failed",
+                "message": "ระบบยังไม่สามารถตอบกลับได้ในขณะนี้ กรุณาลองใหม่อีกครั้งค่ะ",
+            }
+        )
+    return JsonResponse(payload)
 
 
 def ops_webhook_page(request):
@@ -610,47 +722,48 @@ def ops_cases_action_api(request):
 
 @require_GET
 def agent_notifications_proxy(request, session_id):
-    try:
-        response = requests.get(
-            _agent_url(f"/notifications/{session_id}"),
-            timeout=10,
-        )
-        return _proxy_agent_response(response)
-    except requests.exceptions.RequestException as exc:
-        return JsonResponse(
-            {"detail": f"Cannot connect to DSPy agent: {exc}"},
-            status=502,
-        )
+    ca_number = str(request.GET.get("ca_number") or "").strip()
+    notifications = ChatMessage.objects.filter(
+        session_id=session_id,
+        role=ChatMessage.ROLE_SYSTEM,
+        acknowledged_at__isnull=True,
+    ).exclude(notification_key__isnull=True).order_by("created_at", "id")
+    if ca_number:
+        notifications = notifications.filter(ca_number=ca_number)
+    return JsonResponse(
+        {"notifications": [serialize_notification(item) for item in notifications]}
+    )
 
 
 @csrf_exempt
 @require_POST
 def agent_notifications_ack_proxy(request, session_id):
     try:
-        response = requests.post(
-            _agent_url(f"/notifications/{session_id}/ack"),
-            data=request.body,
-            headers={"Content-Type": request.headers.get("Content-Type", "application/json")},
-            timeout=10,
-        )
-        return _proxy_agent_response(response)
-    except requests.exceptions.RequestException as exc:
-        return JsonResponse(
-            {"detail": f"Cannot connect to DSPy agent: {exc}"},
-            status=502,
-        )
+        data = _load_json_body(request)
+    except ValueError as exc:
+        return JsonResponse({"detail": str(exc)}, status=400)
+    keys = data.get("notification_keys") or []
+    if not isinstance(keys, list):
+        return JsonResponse({"detail": "notification_keys must be a list"}, status=400)
+    if data.get("notification_key"):
+        keys.append(data["notification_key"])
+    if not keys:
+        return JsonResponse({"status": "noop", "acked": 0})
+    acknowledged = acknowledge_notifications(session_id, keys)
+    return JsonResponse({"status": "success", "acked": acknowledged})
 
 
 @require_GET
 def agent_latest_closed_loop_proxy(request, session_id):
-    try:
-        response = requests.get(
-            _agent_url(f"/notifications/{session_id}/latest-closed-loop"),
-            timeout=10,
-        )
-        return _proxy_agent_response(response)
-    except requests.exceptions.RequestException as exc:
-        return JsonResponse(
-            {"detail": f"Cannot connect to DSPy agent: {exc}"},
-            status=502,
-        )
+    ca_number = str(request.GET.get("ca_number") or "").strip()
+    messages = ChatMessage.objects.filter(session_id=session_id)
+    if ca_number:
+        messages = messages.filter(ca_number=ca_number)
+    latest = messages.order_by(
+        "-created_at", "-id"
+    ).first()
+    if not latest or latest.event_type != "closed_loop_prompt":
+        return JsonResponse({"notifications": []})
+    return JsonResponse(
+        {"notifications": [serialize_notification(latest, source="chat_history")]}
+    )

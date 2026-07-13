@@ -296,6 +296,110 @@ class CustomerReport(models.Model):
         return f"Report {self.ca_number} (Session: {session_label}...)"
 
 
+class ChatMessage(models.Model):
+    ROLE_USER = "user"
+    ROLE_AGENT = "agent"
+    ROLE_SYSTEM = "system"
+    ROLE_CHOICES = [
+        (ROLE_USER, "User"),
+        (ROLE_AGENT, "Agent"),
+        (ROLE_SYSTEM, "System notification"),
+    ]
+
+    session_id = models.CharField(max_length=255, db_index=True)
+    report = models.ForeignKey(
+        CustomerReport,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="messages",
+    )
+    case = models.ForeignKey(
+        OutageCase,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="chat_messages",
+    )
+    role = models.CharField(max_length=20, choices=ROLE_CHOICES)
+    content = models.TextField()
+    ca_number = models.CharField(max_length=12, blank=True, default="")
+    event_type = models.CharField(max_length=50, blank=True, default="")
+    notification_key = models.TextField(unique=True, null=True, blank=True)
+    closed_loop_kind = models.CharField(max_length=50, blank=True, default="")
+    acknowledged_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(default=timezone.now, db_index=True)
+
+    class Meta:
+        ordering = ["created_at", "id"]
+        indexes = [
+            models.Index(fields=["session_id", "created_at", "id"]),
+            models.Index(fields=["session_id", "acknowledged_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.role} message for {self.session_id}"
+
+
+class AgentJob(models.Model):
+    STATUS_QUEUED = "queued"
+    STATUS_RUNNING = "running"
+    STATUS_SUCCEEDED = "succeeded"
+    STATUS_FAILED = "failed"
+    ACTIVE_STATUSES = (STATUS_QUEUED, STATUS_RUNNING)
+    STATUS_CHOICES = [
+        (STATUS_QUEUED, "Queued"),
+        (STATUS_RUNNING, "Running"),
+        (STATUS_SUCCEEDED, "Succeeded"),
+        (STATUS_FAILED, "Failed"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    session_id = models.CharField(max_length=255, db_index=True)
+    ca_number = models.CharField(max_length=12)
+    pdpa_consent = models.BooleanField(default=False)
+    user_message = models.OneToOneField(
+        ChatMessage,
+        on_delete=models.PROTECT,
+        related_name="agent_job",
+    )
+    response_message = models.OneToOneField(
+        ChatMessage,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="completed_agent_job",
+    )
+    response_state = models.JSONField(default=dict, blank=True)
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default=STATUS_QUEUED,
+        db_index=True,
+    )
+    celery_task_id = models.CharField(max_length=255, unique=True)
+    attempts = models.PositiveSmallIntegerField(default=0)
+    error_code = models.CharField(max_length=100, blank=True, default="")
+    error_message = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["session_id"],
+                condition=models.Q(status__in=["queued", "running"]),
+                name="unique_active_agent_job_per_session",
+            )
+        ]
+
+    def __str__(self):
+        return f"Agent job {self.id} ({self.status})"
+
+
 class OutageRestorationLog(models.Model):
     case = models.OneToOneField(
         OutageCase,

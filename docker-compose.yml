@@ -25,14 +25,14 @@ services:
     env_file:
       - .env
     environment:
-      CA_CSV_PATH: /app/ca_lat_lon_2.csv
+      CA_CSV_PATH: /data/ca.csv
       DJANGO_OMS_EVENT_URL: http://backend:8000/api/oms/events/
       OMS_API_TOKEN: ${OMS_API_TOKEN:-}
     ports:
       - "8002:8000"
     volumes:
       - ./oms_api:/app
-      - ./backend/ca_lat_lon_2.csv:/app/ca_lat_lon_2.csv:ro
+      - ./backend:/data:ro
     depends_on:
       backend:
         condition: service_started
@@ -84,7 +84,28 @@ services:
       dspy-agent:
         condition: service_healthy
     # รันคำสั่ง celery แทนการรันเซิร์ฟเวอร์ django
-    command: celery -A pea_project worker -l info
+    command: celery -A pea_project worker -l info -Q celery --concurrency=2
+    restart: always
+
+  agent_job_worker:
+    build:
+      context: ./backend
+      dockerfile: dockerfile
+    container_name: agent_job_worker
+    volumes:
+      - ./backend:/app
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_started
+      redis:
+        condition: service_started
+      backend:
+        condition: service_started
+      dspy-agent:
+        condition: service_healthy
+    command: celery -A pea_project worker -l info -Q agent --concurrency=4
     restart: always
 
   dspy-agent:
@@ -96,6 +117,7 @@ services:
       - ./dspy:/app        
     env_file:
       - .env
+    command: uvicorn webhook_server:app --host 0.0.0.0 --port 8000 --workers 2
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).read()"]
       interval: 5s

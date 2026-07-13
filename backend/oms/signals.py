@@ -72,7 +72,7 @@ def _closed_loop_recipient_reports(case):
             is_resolved=False,
         )
         .select_related("related_case")
-        .order_by("created_at", "id")
+        .order_by("-updated_at", "-id")
     )
 
 

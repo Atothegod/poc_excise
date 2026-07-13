@@ -1,7 +1,7 @@
 import csv
 import io
 from datetime import timedelta
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from django.contrib.auth.models import User
 from django.contrib.admin.sites import AdminSite
@@ -23,13 +23,21 @@ from .case_logic import (
     CASE_TYPE_NORMAL,
     STATUS_MERGED,
 )
-from .models import CustomerLocation, CustomerReport, OutageCase, OutageRestorationLog
+from .models import (
+    AgentJob,
+    ChatMessage,
+    CustomerLocation,
+    CustomerReport,
+    OutageCase,
+    OutageRestorationLog,
+)
 from .tasks import (
     SLA_EXPIRED_CLOSED_LOOP_KIND,
     SLA_EXPIRED_CLOSED_LOOP_MESSAGE,
     check_eta_timeout,
     check_etr_timeout,
     check_sla_timeout,
+    process_agent_job,
     send_proactive_alert,
 )
 
@@ -642,6 +650,107 @@ class SyncAgentReportTests(TestCase):
         for report in reports:
             report.refresh_from_db()
             self.assertEqual(report.related_case, anchor)
+
+    @patch("oms.views_api.check_sla_timeout.apply_async")
+    @patch("oms.views_api.send_proactive_alert.delay")
+    def test_oms_group_event_revives_resolved_affected_ca_report_for_notification(
+        self, mock_send_alert, mock_sla_apply_async
+    ):
+        active_ca = "020001291771"
+        resolved_ca = "020025790865"
+        active_report = CustomerReport.objects.create(
+            session_id="active-ca-session",
+            ca_number=active_ca,
+        )
+        resolved_report = CustomerReport.objects.create(
+            session_id="resolved-ca-session",
+            ca_number=resolved_ca,
+            is_resolved=True,
+        )
+
+        response = self.client.post(
+            "/api/oms/events/",
+            {
+                "event_type": "case_opened",
+                "case": {
+                    "case_id": "44444444-4444-4444-4444-444444444444",
+                    "status": "reported",
+                    "affected_ca_numbers": [active_ca, resolved_ca],
+                    "oms_etr": (timezone.now() + timedelta(hours=2)).isoformat(),
+                },
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        anchor = OutageCase.objects.get(case_id="44444444-4444-4444-4444-444444444444")
+        active_report.refresh_from_db()
+        resolved_report.refresh_from_db()
+        self.assertEqual(active_report.related_case, anchor)
+        self.assertEqual(resolved_report.related_case, anchor)
+        self.assertFalse(resolved_report.is_resolved)
+        calls_by_report_id = {
+            call.kwargs["report_id"]: call.kwargs["event_type"]
+            for call in mock_send_alert.call_args_list
+        }
+        self.assertEqual(
+            calls_by_report_id,
+            {
+                active_report.id: "mass_outage",
+                resolved_report.id: "mass_outage",
+            },
+        )
+
+    @patch("oms.views_api.check_sla_timeout.apply_async")
+    @patch("oms.signals.check_etr_timeout.apply_async")
+    @patch("oms.signals.send_proactive_alert.delay")
+    def test_single_ca_oms_case_merges_into_active_case_and_notifies_etr(
+        self, mock_send_alert, mock_etr_apply_async, mock_sla_apply_async
+    ):
+        mock_etr_apply_async.return_value.id = "single-ca-etr-task-id"
+        ca_number = "123456789012"
+        anchor = OutageCase.objects.create(
+            title="Local active single CA",
+            affected_ca_numbers=[ca_number],
+            eta_target_time=timezone.now() + timedelta(minutes=25),
+            pluem_etr_minutes=67,
+            pluem_etr_target_time=timezone.now() + timedelta(minutes=67),
+        )
+        report = CustomerReport.objects.create(
+            session_id="single-ca-oms-session",
+            ca_number=ca_number,
+            related_case=anchor,
+        )
+        oms_etr = timezone.now() + timedelta(hours=2)
+
+        response = self.client.post(
+            "/api/oms/events/",
+            {
+                "event_type": "case_opened",
+                "case": {
+                    "case_id": "33333333-3333-3333-3333-333333333333",
+                    "external_event_id": "OMS-SINGLE-CA",
+                    "status": "reported",
+                    "affected_ca_numbers": [ca_number],
+                    "oms_etr": oms_etr.isoformat(),
+                },
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["merged_count"], 1)
+        child = OutageCase.objects.get(external_event_id="OMS-SINGLE-CA")
+        anchor.refresh_from_db()
+        report.refresh_from_db()
+        self.assertEqual(child.status, STATUS_MERGED)
+        self.assertEqual(child.merged_into, anchor)
+        self.assertEqual(anchor.oms_etr, oms_etr)
+        self.assertIsNotNone(anchor.celery_etr_task_id)
+        self.assertEqual(report.related_case, anchor)
+        mock_send_alert.assert_called_once()
+        self.assertEqual(mock_send_alert.call_args.kwargs["report_id"], report.id)
+        self.assertEqual(mock_send_alert.call_args.kwargs["event_type"], "etr_update")
 
     @patch("oms.signals.check_etr_timeout.apply_async")
     @patch("oms.signals.send_proactive_alert.delay")
@@ -1424,7 +1533,13 @@ class CheckEtaTimeoutTests(TestCase):
 
         case.refresh_from_db()
         self.assertIsNone(case.celery_eta_task_id)
-        self.assertEqual(mock_post.call_count, 1)
+        self.assertEqual(
+            ChatMessage.objects.filter(
+                session_id=report.session_id,
+                event_type="eta_timeout",
+            ).count(),
+            1,
+        )
 
     @patch("oms.tasks.requests.post")
     def test_eta_timeout_sends_oms_etr_when_available(self, mock_post):
@@ -1444,21 +1559,15 @@ class CheckEtaTimeoutTests(TestCase):
 
         check_eta_timeout(case.case_id, report.id)
 
-        payload = mock_post.call_args.kwargs["json"]
-        self.assertEqual(payload["event_type"], "eta_timeout")
-        self.assertIn("ขออัปเดตสถานะ", payload["message"])
-        self.assertIn("ทีมงานกำลังดำเนินการอยู่", payload["message"])
-        self.assertIn("คาดว่าจะจ่ายไฟคืน", payload["message"])
-        self.assertNotIn("ครบเวลาประเมินการเข้าหน้างาน", payload["message"])
-        self.assertIn(timezone.localtime(etr).strftime("%H:%M น."), payload["message"])
-        self.assertNotIn("ภายในประมาณ", payload["message"])
-        self.assertNotIn("ETA", payload["message"])
-        self.assertNotIn("ETR", payload["message"])
-        self.assertNotIn("SLA", payload["message"])
-        self.assertNotIn("ช้ากว่ากำหนด", payload["message"])
-        self.assertNotIn("ช่างช้า", payload["message"])
-        self.assertNotIn("พี่ปลื้ม", payload["message"])
-        self.assertNotIn("OMS", payload["message"])
+        notification = ChatMessage.objects.get(session_id=report.session_id)
+        self.assertEqual(notification.event_type, "eta_timeout")
+        self.assertIn("ขออัปเดตสถานะ", notification.content)
+        self.assertIn("ทีมงานกำลังดำเนินการอยู่", notification.content)
+        self.assertIn("คาดว่าจะจ่ายไฟคืน", notification.content)
+        self.assertNotIn("ครบเวลาประเมินการเข้าหน้างาน", notification.content)
+        self.assertIn(timezone.localtime(etr).strftime("%H:%M น."), notification.content)
+        for forbidden in ["ภายในประมาณ", "ETA", "ETR", "SLA", "ช้ากว่ากำหนด", "ช่างช้า", "พี่ปลื้ม", "OMS"]:
+            self.assertNotIn(forbidden, notification.content)
 
     @patch("oms.tasks.requests.post")
     def test_eta_timeout_sends_pluem_etr_when_oms_etr_missing(self, mock_post):
@@ -1479,23 +1588,17 @@ class CheckEtaTimeoutTests(TestCase):
 
         check_eta_timeout(case.case_id, report.id)
 
-        payload = mock_post.call_args.kwargs["json"]
-        self.assertEqual(payload["event_type"], "eta_timeout")
-        self.assertIn("ขออัปเดตสถานะ", payload["message"])
-        self.assertIn("ทีมงานกำลังดำเนินการอยู่", payload["message"])
-        self.assertIn("คาดว่าจะจ่ายไฟคืน", payload["message"])
-        self.assertNotIn("ครบเวลาประเมินการเข้าหน้างาน", payload["message"])
+        notification = ChatMessage.objects.get(session_id=report.session_id)
+        self.assertEqual(notification.event_type, "eta_timeout")
+        self.assertIn("ขออัปเดตสถานะ", notification.content)
+        self.assertIn("ทีมงานกำลังดำเนินการอยู่", notification.content)
+        self.assertIn("คาดว่าจะจ่ายไฟคืน", notification.content)
+        self.assertNotIn("ครบเวลาประเมินการเข้าหน้างาน", notification.content)
         self.assertIn(
-            timezone.localtime(pluem_etr).strftime("%H:%M น."), payload["message"]
+            timezone.localtime(pluem_etr).strftime("%H:%M น."), notification.content
         )
-        self.assertNotIn("ภายในประมาณ", payload["message"])
-        self.assertNotIn("ETA", payload["message"])
-        self.assertNotIn("ETR", payload["message"])
-        self.assertNotIn("SLA", payload["message"])
-        self.assertNotIn("ช้ากว่ากำหนด", payload["message"])
-        self.assertNotIn("ช่างช้า", payload["message"])
-        self.assertNotIn("พี่ปลื้ม", payload["message"])
-        self.assertNotIn("OMS", payload["message"])
+        for forbidden in ["ภายในประมาณ", "ETA", "ETR", "SLA", "ช้ากว่ากำหนด", "ช่างช้า", "พี่ปลื้ม", "OMS"]:
+            self.assertNotIn(forbidden, notification.content)
 
     @patch("oms.tasks.get_pea_assessment")
     @patch("oms.tasks.requests.post")
@@ -1521,21 +1624,15 @@ class CheckEtaTimeoutTests(TestCase):
 
         check_eta_timeout(case.case_id, report.id)
 
-        payload = mock_post.call_args.kwargs["json"]
-        self.assertEqual(payload["event_type"], "eta_timeout")
-        self.assertIn("ขออัปเดตสถานะ", payload["message"])
-        self.assertIn("ทีมงานกำลังดำเนินการอยู่", payload["message"])
-        self.assertIn("คาดว่าจะจ่ายไฟคืน", payload["message"])
-        self.assertNotIn("ครบเวลาประเมินการเข้าหน้างาน", payload["message"])
-        self.assertRegex(payload["message"], r"\d{2}:\d{2} น\.")
-        self.assertNotIn("ภายในประมาณ", payload["message"])
-        self.assertNotIn("ETA", payload["message"])
-        self.assertNotIn("ETR", payload["message"])
-        self.assertNotIn("SLA", payload["message"])
-        self.assertNotIn("ช้ากว่ากำหนด", payload["message"])
-        self.assertNotIn("ช่างช้า", payload["message"])
-        self.assertNotIn("พี่ปลื้ม", payload["message"])
-        self.assertNotIn("OMS", payload["message"])
+        notification = ChatMessage.objects.get(session_id=report.session_id)
+        self.assertEqual(notification.event_type, "eta_timeout")
+        self.assertIn("ขออัปเดตสถานะ", notification.content)
+        self.assertIn("ทีมงานกำลังดำเนินการอยู่", notification.content)
+        self.assertIn("คาดว่าจะจ่ายไฟคืน", notification.content)
+        self.assertNotIn("ครบเวลาประเมินการเข้าหน้างาน", notification.content)
+        self.assertRegex(notification.content, r"\d{2}:\d{2} น\.")
+        for forbidden in ["ภายในประมาณ", "ETA", "ETR", "SLA", "ช้ากว่ากำหนด", "ช่างช้า", "พี่ปลื้ม", "OMS"]:
+            self.assertNotIn(forbidden, notification.content)
         case.refresh_from_db()
         self.assertEqual(case.pluem_etr_minutes, 69.0)
         self.assertIsNotNone(case.pluem_etr_target_time)
@@ -1567,19 +1664,14 @@ class CheckEtaTimeoutTests(TestCase):
 
         check_eta_timeout(case.case_id, report.id)
 
-        payload = mock_post.call_args.kwargs["json"]
-        self.assertEqual(payload["event_type"], "eta_timeout")
-        self.assertIn("ขออัปเดตสถานะ", payload["message"])
-        self.assertIn("ทีมงานกำลังดำเนินการอยู่", payload["message"])
-        self.assertIn("กำลังประเมินเวลาไฟกลับล่าสุด", payload["message"])
-        self.assertNotIn("ครบเวลาประเมินการเข้าหน้างาน", payload["message"])
-        self.assertNotIn("ETA", payload["message"])
-        self.assertNotIn("ETR", payload["message"])
-        self.assertNotIn("SLA", payload["message"])
-        self.assertNotIn("ช้ากว่ากำหนด", payload["message"])
-        self.assertNotIn("ช่างช้า", payload["message"])
-        self.assertNotIn("พี่ปลื้ม", payload["message"])
-        self.assertNotIn("OMS", payload["message"])
+        notification = ChatMessage.objects.get(session_id=report.session_id)
+        self.assertEqual(notification.event_type, "eta_timeout")
+        self.assertIn("ขออัปเดตสถานะ", notification.content)
+        self.assertIn("ทีมงานกำลังดำเนินการอยู่", notification.content)
+        self.assertIn("กำลังประเมินเวลาไฟกลับล่าสุด", notification.content)
+        self.assertNotIn("ครบเวลาประเมินการเข้าหน้างาน", notification.content)
+        for forbidden in ["ETA", "ETR", "SLA", "ช้ากว่ากำหนด", "ช่างช้า", "พี่ปลื้ม", "OMS"]:
+            self.assertNotIn(forbidden, notification.content)
 
     @patch("oms.tasks.requests.post")
     def test_eta_timeout_notifies_repairing_status(self, mock_post):
@@ -1599,14 +1691,14 @@ class CheckEtaTimeoutTests(TestCase):
 
         check_eta_timeout(case.case_id, report.id)
 
-        payload = mock_post.call_args.kwargs["json"]
-        self.assertEqual(payload["event_type"], "eta_timeout")
-        self.assertIn("ขออัปเดตสถานะ", payload["message"])
-        self.assertIn("ทีมงานกำลังดำเนินการอยู่", payload["message"])
-        self.assertNotIn("ครบเวลาประเมินการเข้าหน้างาน", payload["message"])
-        self.assertNotIn("ETA", payload["message"])
-        self.assertNotIn("ETR", payload["message"])
-        self.assertNotIn("SLA", payload["message"])
+        notification = ChatMessage.objects.get(session_id=report.session_id)
+        self.assertEqual(notification.event_type, "eta_timeout")
+        self.assertIn("ขออัปเดตสถานะ", notification.content)
+        self.assertIn("ทีมงานกำลังดำเนินการอยู่", notification.content)
+        self.assertNotIn("ครบเวลาประเมินการเข้าหน้างาน", notification.content)
+        self.assertNotIn("ETA", notification.content)
+        self.assertNotIn("ETR", notification.content)
+        self.assertNotIn("SLA", notification.content)
 
     @patch("oms.tasks.requests.post")
     def test_eta_timeout_skips_restored_status(self, mock_post):
@@ -1661,12 +1753,11 @@ class CheckEtaTimeoutTests(TestCase):
 
         check_eta_timeout(case.case_id, first_report.id)
 
-        payloads = [call.kwargs["json"] for call in mock_post.call_args_list]
         self.assertEqual(
-            {payload["session_id"] for payload in payloads},
+            set(ChatMessage.objects.values_list("session_id", flat=True)),
             {"session-a", "session-b"},
         )
-        self.assertEqual(mock_post.call_count, 2)
+        self.assertEqual(ChatMessage.objects.count(), 2)
 
     @patch("oms.signals.check_sla_timeout.apply_async")
     @patch("oms.tasks.requests.post")
@@ -1698,25 +1789,20 @@ class CheckEtaTimeoutTests(TestCase):
         case.refresh_from_db()
         expected_sla_target = case.created_at + timedelta(hours=OutageCase.SLA_HOURS)
 
-        payload = mock_post.call_args.kwargs["json"]
-        self.assertEqual(payload["event_type"], "etr_timeout_sla")
-        self.assertIn("ขออัปเดต", payload["message"])
-        self.assertIn("การจ่ายไฟจะไม่เกินเวลา", payload["message"])
+        notification = ChatMessage.objects.get(session_id="session-etr-timeout")
+        self.assertEqual(notification.event_type, "etr_timeout_sla")
+        self.assertIn("ขออัปเดต", notification.content)
+        self.assertIn("การจ่ายไฟจะไม่เกินเวลา", notification.content)
         self.assertEqual(case.sla_reference_time, case.created_at)
         self.assertEqual(case.sla_target_time, expected_sla_target)
         self.assertEqual(case.sla_reason, "case_created")
         self.assertIsNotNone(case.celery_sla_task_id)
         self.assertIn(
             timezone.localtime(expected_sla_target).strftime("%H:%M น."),
-            payload["message"],
+            notification.content,
         )
-        self.assertNotIn("เหลือเวลา", payload["message"])
-        self.assertNotIn("เร่งดำเนินการให้ไม่เกิน", payload["message"])
-        self.assertNotIn("เวลาไฟกลับที่ประเมินไว้เลยกำหนด", payload["message"])
-        self.assertNotIn("ภายในประมาณ", payload["message"])
-        self.assertNotIn("ETA", payload["message"])
-        self.assertNotIn("ETR", payload["message"])
-        self.assertNotIn("SLA", payload["message"])
+        for forbidden in ["เหลือเวลา", "เร่งดำเนินการให้ไม่เกิน", "เวลาไฟกลับที่ประเมินไว้เลยกำหนด", "ภายในประมาณ", "ETA", "ETR", "SLA"]:
+            self.assertNotIn(forbidden, notification.content)
 
 
 class CheckSlaTimeoutTests(TestCase):
@@ -1814,20 +1900,331 @@ class ProactiveAlertTaskTests(TestCase):
 
         send_proactive_alert(report.id, message, "closed_loop_prompt")
 
-        mock_post.assert_called_once()
-        payload = mock_post.call_args.kwargs["json"]
-        self.assertEqual(payload["session_id"], report.session_id)
-        self.assertEqual(payload["ca_number"], report.ca_number)
-        self.assertEqual(payload["message"], message)
-        self.assertEqual(payload["event_type"], "closed_loop_prompt")
-        self.assertEqual(payload["report_id"], report.id)
-        self.assertEqual(payload["case_id"], str(case.case_id))
+        notification = ChatMessage.objects.get(session_id=report.session_id)
+        self.assertEqual(notification.ca_number, report.ca_number)
+        self.assertEqual(notification.content, message)
+        self.assertEqual(notification.event_type, "closed_loop_prompt")
+        self.assertEqual(notification.report_id, report.id)
+        self.assertEqual(notification.case_id, case.case_id)
         self.assertEqual(
-            payload["notification_key"],
+            notification.notification_key,
             (
                 f"closed_loop_prompt|123456789012|{report.id}|"
                 f"{case.case_id}|{message}"
             ),
+        )
+
+        send_proactive_alert(report.id, message, "closed_loop_prompt")
+        self.assertEqual(ChatMessage.objects.count(), 1)
+
+
+class DurableAgentJobTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.report = CustomerReport.objects.create(
+            session_id="durable-agent-session",
+            ca_number="123456789012",
+            pdpa_consent=True,
+        )
+
+    def _submit(self, question="ไฟดับครับ"):
+        return self.client.post(
+            "/agent/ask/",
+            {
+                "session_id": self.report.session_id,
+                "ca_number": self.report.ca_number,
+                "pdpa_consent": True,
+                "question": question,
+            },
+            format="json",
+        )
+
+    @patch("oms.views.process_agent_job.apply_async")
+    def test_submit_persists_task_identity_before_publish_and_returns_202(
+        self, mock_apply_async
+    ):
+        response = self._submit()
+
+        self.assertEqual(response.status_code, 202)
+        job = AgentJob.objects.get(pk=response.json()["job_id"])
+        self.assertEqual(job.status, AgentJob.STATUS_QUEUED)
+        self.assertEqual(job.user_message.content, "ไฟดับครับ")
+        self.assertEqual(response.json()["user_message_id"], job.user_message_id)
+        mock_apply_async.assert_called_once_with(
+            args=[str(job.id)],
+            task_id=job.celery_task_id,
+            queue="agent",
+        )
+
+    @patch("oms.views.process_agent_job.apply_async")
+    def test_one_active_job_per_session_returns_existing_job(self, mock_apply_async):
+        first = self._submit("ข้อความแรก")
+        second = self._submit("ข้อความที่สอง")
+
+        self.assertEqual(first.status_code, 202)
+        self.assertEqual(second.status_code, 409)
+        self.assertEqual(second.json()["detail"], "agent_job_in_progress")
+        self.assertEqual(second.json()["job_id"], first.json()["job_id"])
+        self.assertEqual(ChatMessage.objects.filter(role="user").count(), 1)
+
+    @patch("oms.views.process_agent_job.apply_async")
+    def test_submit_uses_pending_closed_loop_report_when_active_report_is_resolved(
+        self, mock_apply_async
+    ):
+        self.report.is_resolved = True
+        self.report.save(update_fields=["is_resolved", "updated_at"])
+        ChatMessage.objects.create(
+            session_id=self.report.session_id,
+            report=self.report,
+            role=ChatMessage.ROLE_SYSTEM,
+            content="ไฟฟ้ากลับมาใช้งานได้หรือยังคะ",
+            ca_number=self.report.ca_number,
+            event_type="closed_loop_prompt",
+        )
+
+        response = self._submit("ไฟมาแล้ว")
+
+        self.assertEqual(response.status_code, 202)
+        job = AgentJob.objects.get(pk=response.json()["job_id"])
+        self.assertEqual(job.user_message.report_id, self.report.id)
+        self.assertEqual(job.user_message.content, "ไฟมาแล้ว")
+        mock_apply_async.assert_called_once()
+
+    @patch("oms.views.process_agent_job.apply_async")
+    def test_submit_reopens_resolved_report_when_related_case_is_still_active(
+        self, mock_apply_async
+    ):
+        case = OutageCase.objects.create(
+            title="Still active follow-up case",
+            affected_ca_numbers=[self.report.ca_number],
+        )
+        self.report.related_case = case
+        self.report.is_resolved = True
+        self.report.save(update_fields=["related_case", "is_resolved", "updated_at"])
+
+        response = self._submit("จะมายังครับ")
+
+        self.assertEqual(response.status_code, 202)
+        self.report.refresh_from_db()
+        self.assertFalse(self.report.is_resolved)
+        job = AgentJob.objects.get(pk=response.json()["job_id"])
+        self.assertEqual(job.user_message.report_id, self.report.id)
+        self.assertEqual(job.user_message.content, "จะมายังครับ")
+        mock_apply_async.assert_called_once()
+
+    @patch("oms.views.process_agent_job.apply_async")
+    def test_submit_without_active_report_or_pending_closed_loop_returns_409(
+        self, mock_apply_async
+    ):
+        self.report.is_resolved = True
+        self.report.save(update_fields=["is_resolved", "updated_at"])
+
+        response = self._submit("ไฟดับครับ")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["detail"], "active_session_report_not_found")
+        self.assertFalse(AgentJob.objects.exists())
+        self.assertFalse(ChatMessage.objects.filter(role=ChatMessage.ROLE_USER).exists())
+        mock_apply_async.assert_not_called()
+
+    @patch("oms.views.process_agent_job.apply_async", side_effect=RuntimeError("redis down"))
+    def test_enqueue_failure_marks_job_failed(self, mock_apply_async):
+        response = self._submit()
+
+        self.assertEqual(response.status_code, 503)
+        job = AgentJob.objects.get(pk=response.json()["job_id"])
+        self.assertEqual(job.status, AgentJob.STATUS_FAILED)
+        self.assertEqual(job.error_code, "enqueue_failed")
+
+    @patch("oms.tasks.requests.post")
+    def test_worker_success_is_transactional_and_duplicate_delivery_is_noop(
+        self, mock_post
+    ):
+        user_message = ChatMessage.objects.create(
+            session_id=self.report.session_id,
+            report=self.report,
+            role=ChatMessage.ROLE_USER,
+            content="ไฟดับครับ",
+            ca_number=self.report.ca_number,
+        )
+        job = AgentJob.objects.create(
+            session_id=self.report.session_id,
+            ca_number=self.report.ca_number,
+            pdpa_consent=True,
+            user_message=user_message,
+            celery_task_id="agent-task-id",
+        )
+        agent_response = Mock()
+        agent_response.raise_for_status.return_value = None
+        agent_response.json.return_value = {
+            "answer": "รับทราบค่ะ",
+            "state": {"flow_step": "checking_outage"},
+        }
+        mock_post.return_value = agent_response
+
+        process_agent_job.apply(args=[str(job.id)], task_id="agent-task-id").get()
+        process_agent_job.apply(args=[str(job.id)], task_id="agent-task-id").get()
+
+        job.refresh_from_db()
+        self.assertEqual(job.status, AgentJob.STATUS_SUCCEEDED)
+        self.assertEqual(job.response_message.content, "รับทราบค่ะ")
+        self.assertEqual(job.response_state["flow_step"], "checking_outage")
+        self.assertEqual(mock_post.call_count, 1)
+        self.assertEqual(
+            ChatMessage.objects.filter(session_id=self.report.session_id).count(),
+            2,
+        )
+        self.assertEqual(
+            mock_post.call_args.kwargs["json"]["user_message_id"],
+            user_message.id,
+        )
+        self.assertIn("X-Internal-Token", mock_post.call_args.kwargs["headers"])
+
+        status_response = self.client.get(
+            f"/agent/jobs/{job.id}/",
+            {"session_id": self.report.session_id},
+        )
+        self.assertEqual(status_response.status_code, 200)
+        self.assertEqual(status_response.json()["answer"], "รับทราบค่ะ")
+        self.assertEqual(
+            status_response.json()["response_message_id"], job.response_message_id
+        )
+
+
+class DurableNotificationEndpointTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.report = CustomerReport.objects.create(
+            session_id="durable-notification-session",
+            ca_number="123456789012",
+        )
+
+    def test_notification_ack_and_latest_closed_loop_contract(self):
+        message = "ไฟฟ้ากลับมาใช้งานได้หรือยังคะ"
+        send_proactive_alert(
+            self.report.id,
+            message,
+            "closed_loop_prompt",
+            closed_loop_kind="sla_expired",
+        )
+        notification = ChatMessage.objects.get()
+
+        response = self.client.get(
+            f"/agent/notifications/{self.report.session_id}/"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["notifications"][0]["message"], message)
+
+        ack = self.client.post(
+            f"/agent/notifications/{self.report.session_id}/ack/",
+            {"notification_key": notification.notification_key},
+            format="json",
+        )
+        self.assertEqual(ack.status_code, 200)
+        self.assertEqual(ack.json()["acked"], 1)
+        self.assertEqual(
+            self.client.get(
+                f"/agent/notifications/{self.report.session_id}/"
+            ).json()["notifications"],
+            [],
+        )
+
+        latest = self.client.get(
+            f"/agent/notifications/{self.report.session_id}/latest-closed-loop/"
+        )
+        self.assertEqual(len(latest.json()["notifications"]), 1)
+        self.assertEqual(
+            latest.json()["notifications"][0]["closed_loop_kind"], "sla_expired"
+        )
+
+        ChatMessage.objects.create(
+            session_id=self.report.session_id,
+            report=self.report,
+            role=ChatMessage.ROLE_USER,
+            content="ไฟมาแล้ว",
+            ca_number=self.report.ca_number,
+        )
+        latest = self.client.get(
+            f"/agent/notifications/{self.report.session_id}/latest-closed-loop/"
+        )
+        self.assertEqual(latest.json()["notifications"], [])
+
+    def test_session_context_cutoff_excludes_current_user_message(self):
+        first = ChatMessage.objects.create(
+            session_id=self.report.session_id,
+            report=self.report,
+            role=ChatMessage.ROLE_AGENT,
+            content="ก่อนหน้า",
+            ca_number=self.report.ca_number,
+        )
+        current = ChatMessage.objects.create(
+            session_id=self.report.session_id,
+            report=self.report,
+            role=ChatMessage.ROLE_USER,
+            content="ข้อความปัจจุบัน",
+            ca_number=self.report.ca_number,
+        )
+
+        response = self.client.get(
+            f"/api/reports/session-context/{self.report.session_id}/",
+            {"before_message_id": current.id},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [item["message_id"] for item in response.data["chat_history"]],
+            [first.id],
+        )
+
+    def test_session_context_and_latest_closed_loop_are_scoped_to_ca_number(self):
+        old_report = CustomerReport.objects.create(
+            session_id="ca-scoped-session",
+            ca_number="020025790865",
+            is_resolved=True,
+        )
+        current_report = CustomerReport.objects.create(
+            session_id="ca-scoped-session",
+            ca_number="020001291771",
+        )
+        old_prompt = ChatMessage.objects.create(
+            session_id="ca-scoped-session",
+            report=old_report,
+            role=ChatMessage.ROLE_SYSTEM,
+            content="เรียนผู้ใช้ไฟฟ้าหมายเลข CA 020025790865 ขณะนี้ไฟฟ้ากลับมาใช้งานได้หรือยังคะ",
+            ca_number=old_report.ca_number,
+            event_type="closed_loop_prompt",
+            notification_key="old-ca-prompt",
+        )
+        current_message = ChatMessage.objects.create(
+            session_id="ca-scoped-session",
+            report=current_report,
+            role=ChatMessage.ROLE_AGENT,
+            content="ข้อความของ CA ปัจจุบัน",
+            ca_number=current_report.ca_number,
+        )
+
+        context = self.client.get(
+            "/api/reports/session-context/ca-scoped-session/",
+            {"ca_number": current_report.ca_number},
+        )
+        self.assertEqual(context.status_code, 200)
+        self.assertEqual(
+            [item["message_id"] for item in context.data["chat_history"]],
+            [current_message.id],
+        )
+
+        latest = self.client.get(
+            "/agent/notifications/ca-scoped-session/latest-closed-loop/",
+            {"ca_number": current_report.ca_number},
+        )
+        self.assertEqual(latest.json()["notifications"], [])
+
+        old_latest = self.client.get(
+            "/agent/notifications/ca-scoped-session/latest-closed-loop/",
+            {"ca_number": old_report.ca_number},
+        )
+        self.assertEqual(
+            old_latest.json()["notifications"][0]["message_id"],
+            old_prompt.id,
         )
 
 
@@ -2104,6 +2501,40 @@ class OutageCaseSignalTests(TestCase):
         )
 
     @patch("oms.signals.send_proactive_alert.delay")
+    def test_restored_status_uses_latest_report_ca_for_duplicate_session(
+        self, mock_send_alert
+    ):
+        case = OutageCase.objects.create(
+            title="Restored duplicate session current CA",
+            latitude=9.2917,
+            longitude=100.926296,
+        )
+        old_report = CustomerReport.objects.create(
+            session_id="session-ca-changed",
+            ca_number="020025790865",
+            related_case=case,
+            is_resolved=True,
+        )
+        latest_report = CustomerReport.objects.create(
+            session_id="session-ca-changed",
+            ca_number="020001291771",
+            related_case=case,
+        )
+
+        case.status = "restored"
+        case.save(update_fields=["status"])
+
+        self.assertEqual(mock_send_alert.call_count, 1)
+        call = mock_send_alert.call_args
+        self.assertEqual(call.kwargs["report_id"], latest_report.id)
+        self.assertIn(latest_report.ca_number, call.kwargs["message"])
+        self.assertNotIn(old_report.ca_number, call.kwargs["message"])
+        old_report.refresh_from_db()
+        latest_report.refresh_from_db()
+        self.assertTrue(old_report.is_resolved)
+        self.assertTrue(latest_report.is_resolved)
+
+    @patch("oms.signals.send_proactive_alert.delay")
     def test_restored_mass_outage_includes_reports_on_merged_children(
         self, mock_send_alert
     ):
@@ -2180,6 +2611,9 @@ class OpsWebhookConsoleTests(TestCase):
         self.assertIn('notificationUrl("/latest-closed-loop")', content)
         self.assertIn("acknowledgeNotification(key)", content)
         self.assertIn("recoverLatestClosedLoopPrompt", content)
+        self.assertIn("agentErrorMessage(data.detail)", content)
+        self.assertIn("ไม่พบรายการแจ้งเหตุที่กำลังดำเนินการอยู่ค่ะ", content)
+        self.assertNotIn("appendBotMessage(`Error:", content)
         self.assertIn("if (document.hidden) return;", content)
         self.assertNotIn("<select", content)
         self.assertNotIn("ระบบ OMS", content)

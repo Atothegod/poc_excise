@@ -1,17 +1,14 @@
 from celery import shared_task
-from django.db import transaction
+from django.conf import settings
+from django.db import DatabaseError, transaction
 from django.utils import timezone
 from datetime import timedelta
 from uuid import uuid4
 from .case_logic import INACTIVE_CASE_STATUSES
-from .models import OutageCase, CustomerReport
+from .models import AgentJob, ChatMessage, OutageCase, CustomerReport
 from .services import get_pea_assessment
+from .timeline import active_report_for_session, create_system_message
 import requests
-import os
-
-AGENT_WEBHOOK_URL = os.getenv(
-    "AGENT_WEBHOOK_URL", "http://dspy-agent:8000/webhook/notify"
-)
 SLA_EXPIRED_CLOSED_LOOP_KIND = "sla_expired"
 SLA_EXPIRED_CLOSED_LOOP_MESSAGE = (
     "ขออภัยที่การดำเนินการเกินเวลาที่แจ้งไว้ค่ะ "
@@ -119,37 +116,6 @@ def _format_time_label(target_time):
     return timezone.localtime(target_time).strftime("%H:%M น.")
 
 
-def _notification_key(event_type, ca_number, report_id, case_id, message):
-    return "|".join(
-        [
-            str(event_type or ""),
-            str(ca_number or ""),
-            str(report_id or ""),
-            str(case_id or ""),
-            str(message or ""),
-        ]
-    )
-
-
-def _notification_payload(report, message, event_type, closed_loop_kind=None):
-    case_id = str(report.related_case_id) if report.related_case_id else None
-    report_id = report.id
-    payload = {
-        "session_id": report.session_id,
-        "ca_number": report.ca_number,
-        "message": message,
-        "event_type": event_type,
-        "report_id": report_id,
-        "case_id": case_id,
-        "notification_key": _notification_key(
-            event_type, report.ca_number, report_id, case_id, message
-        ),
-    }
-    if closed_loop_kind:
-        payload["closed_loop_kind"] = closed_loop_kind
-    return payload
-
-
 def _sla_case_start_time(case):
     case_start_times = [
         value for value in [case.sla_reference_time, case.created_at] if value
@@ -191,29 +157,16 @@ def _notify_active_case_sessions(case, message, event_type, closed_loop_kind=Non
     )
 
     sent_session_ids = set()
-    last_error = None
     for report in reports:
         if report.session_id in sent_session_ids:
             continue
-
-        payload = _notification_payload(
-            report, message, event_type, closed_loop_kind=closed_loop_kind
+        create_system_message(
+            report,
+            message,
+            event_type,
+            closed_loop_kind=closed_loop_kind,
         )
-
-        try:
-            response = requests.post(AGENT_WEBHOOK_URL, json=payload, timeout=5)
-            response.raise_for_status()
-            sent_session_ids.add(report.session_id)
-            print(
-                f"[{event_type}] ยิง Webhook แจ้งเตือน CA: {report.ca_number} "
-                f"session: {report.session_id} สำเร็จ"
-            )
-        except requests.exceptions.RequestException as e:
-            last_error = e
-            print(f"[{event_type}] ยิง Webhook ล้มเหลว: {e}")
-
-    if last_error:
-        raise last_error
+        sent_session_ids.add(report.session_id)
     return sent_session_ids
 
 
@@ -260,7 +213,7 @@ def _ensure_pluem_etr(case, report_id=None):
 
 @shared_task(
     bind=True,
-    autoretry_for=(requests.exceptions.RequestException,),
+    autoretry_for=(DatabaseError,),
     retry_kwargs={"max_retries": 3, "countdown": 2},
     retry_backoff=True,
 )
@@ -296,7 +249,7 @@ def check_eta_timeout(self, case_id, report_id):
             sent_session_ids = _notify_active_case_sessions(
                 case, message, "eta_timeout"
             )
-        except requests.exceptions.RequestException:
+        except DatabaseError:
             _restore_failed_timer_claim(
                 case,
                 self.request.id,
@@ -313,7 +266,7 @@ def check_eta_timeout(self, case_id, report_id):
 
 @shared_task(
     bind=True,
-    autoretry_for=(requests.exceptions.RequestException,),
+    autoretry_for=(DatabaseError,),
     retry_kwargs={"max_retries": 3, "countdown": 2},
     retry_backoff=True,
 )
@@ -347,7 +300,7 @@ def check_etr_timeout(self, case_id):
             sent_session_ids = _notify_active_case_sessions(
                 case, message, "etr_timeout_sla"
             )
-        except requests.exceptions.RequestException:
+        except DatabaseError:
             _restore_failed_timer_claim(
                 case,
                 self.request.id,
@@ -368,7 +321,7 @@ def check_sla_timeout(self, case_id):
 
 
 @shared_task(
-    autoretry_for=(requests.exceptions.RequestException,),
+    autoretry_for=(DatabaseError,),
     retry_kwargs={"max_retries": 3, "countdown": 2},
     retry_backoff=True,
 )
@@ -377,11 +330,152 @@ def send_proactive_alert(report_id, message, event_type, closed_loop_kind=None):
     ฟังก์ชันกลางสำหรับส่งแจ้งเตือนเชิงรุก (เช่น ช่างปิดงานไฟมาแล้ว, หรือส่ง ETR ครั้งที่ 2)
     """
     try:
-        report = CustomerReport.objects.get(id=report_id)
-        payload = _notification_payload(
-            report, message, event_type, closed_loop_kind=closed_loop_kind
+        report = CustomerReport.objects.select_related("related_case").get(id=report_id)
+        create_system_message(
+            report,
+            message,
+            event_type,
+            closed_loop_kind=closed_loop_kind,
         )
-        response = requests.post(AGENT_WEBHOOK_URL, json=payload, timeout=10)
-        response.raise_for_status()
     except CustomerReport.DoesNotExist:
         pass
+
+
+@shared_task(
+    bind=True,
+    max_retries=3,
+    autoretry_for=(DatabaseError,),
+    retry_backoff=True,
+)
+def process_agent_job(self, job_id):
+    """Run one stateless inference job and persist its answer exactly once."""
+    with transaction.atomic():
+        try:
+            job = (
+                AgentJob.objects.select_for_update()
+                .select_related("user_message")
+                .get(pk=job_id)
+            )
+        except AgentJob.DoesNotExist:
+            return
+
+        if job.celery_task_id != self.request.id:
+            return
+        if job.status in (AgentJob.STATUS_SUCCEEDED, AgentJob.STATUS_FAILED):
+            return
+        # A duplicate delivery of the same retry generation must not call the LLM twice.
+        if job.status == AgentJob.STATUS_RUNNING and job.attempts > self.request.retries:
+            return
+
+        job.status = AgentJob.STATUS_RUNNING
+        job.attempts = self.request.retries + 1
+        job.started_at = job.started_at or timezone.now()
+        job.error_code = ""
+        job.error_message = ""
+        job.save(
+            update_fields=[
+                "status",
+                "attempts",
+                "started_at",
+                "error_code",
+                "error_message",
+                "updated_at",
+            ]
+        )
+        request_payload = {
+            "job_id": str(job.id),
+            "user_message_id": job.user_message_id,
+            "question": job.user_message.content,
+            "session_id": job.session_id,
+            "ca_number": job.ca_number,
+            "pdpa_consent": job.pdpa_consent,
+        }
+
+    try:
+        response = requests.post(
+            f"{settings.DSPY_AGENT_INTERNAL_URL.rstrip('/')}/ask",
+            json=request_payload,
+            headers={"X-Internal-Token": settings.AGENT_INTERNAL_TOKEN},
+            timeout=settings.AGENT_REQUEST_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        result = response.json()
+        if not isinstance(result, dict):
+            raise ValueError("Agent returned an invalid JSON payload")
+        answer = str(result.get("answer") or "").strip()
+        if not answer:
+            raise ValueError("Agent returned an empty answer")
+    except (requests.RequestException, ValueError) as exc:
+        final_attempt = self.request.retries >= self.max_retries
+        with transaction.atomic():
+            job = AgentJob.objects.select_for_update().filter(pk=job_id).first()
+            if (
+                not job
+                or job.status == AgentJob.STATUS_SUCCEEDED
+                or job.celery_task_id != self.request.id
+            ):
+                return
+            job.error_code = "agent_unavailable"
+            job.error_message = str(exc)[:2000]
+            if final_attempt:
+                job.status = AgentJob.STATUS_FAILED
+                job.completed_at = timezone.now()
+                update_fields = [
+                    "status",
+                    "error_code",
+                    "error_message",
+                    "completed_at",
+                    "updated_at",
+                ]
+            else:
+                update_fields = [
+                    "error_code",
+                    "error_message",
+                    "updated_at",
+                ]
+            job.save(update_fields=update_fields)
+        if final_attempt:
+            return
+        raise self.retry(exc=exc, countdown=min(30, 2 ** (self.request.retries + 1)))
+
+    with transaction.atomic():
+        job = (
+            AgentJob.objects.select_for_update()
+            .select_related("user_message")
+            .get(pk=job_id)
+        )
+        if job.celery_task_id != self.request.id:
+            return
+        if job.status == AgentJob.STATUS_SUCCEEDED:
+            return
+        if job.status == AgentJob.STATUS_FAILED:
+            return
+
+        report = active_report_for_session(job.session_id, job.ca_number)
+        if not report:
+            report = job.user_message.report
+        response_message = ChatMessage.objects.create(
+            session_id=job.session_id,
+            report=report,
+            case=(report.related_case if report else job.user_message.case),
+            role=ChatMessage.ROLE_AGENT,
+            content=answer,
+            ca_number=job.ca_number,
+        )
+        job.response_message = response_message
+        job.response_state = result.get("state") or {}
+        job.status = AgentJob.STATUS_SUCCEEDED
+        job.completed_at = timezone.now()
+        job.error_code = ""
+        job.error_message = ""
+        job.save(
+            update_fields=[
+                "response_message",
+                "response_state",
+                "status",
+                "completed_at",
+                "error_code",
+                "error_message",
+                "updated_at",
+            ]
+        )

@@ -384,10 +384,9 @@
     </main>
 
     <script>
-        const configuredAgentBaseUrl = "{{ agent_base_url|escapejs }}";
-        const agentBaseUrl = configuredAgentBaseUrl || "";
-        const API_URL = agentBaseUrl ? `${agentBaseUrl}/ask` : "/agent/ask/";
-        const NOTIFICATIONS_URL = agentBaseUrl ? `${agentBaseUrl}/notifications` : "/agent/notifications";
+        const API_URL = "/agent/ask/";
+        const JOBS_URL = "/agent/jobs";
+        const NOTIFICATIONS_URL = "/agent/notifications";
         const SESSION_LOGIN_URL = "/api/reports/session-login/";
 
         const chatContainer = document.getElementById("chat-container");
@@ -406,7 +405,7 @@
         const saveSessionButton = document.getElementById("save-session-btn");
         const cancelSessionButton = document.getElementById("cancel-session-btn");
 
-        endpointLabel.textContent = agentBaseUrl || "Django agent proxy";
+        endpointLabel.textContent = "Django durable agent queue";
 
         const loggedInCaNumber = localStorage.getItem("pea_chat_ca_number") || "";
         let loggedInCustomerName = localStorage.getItem("pea_chat_customer_name") || "";
@@ -438,11 +437,15 @@
 
         let currentSessionId = getOrCreateSessionId();
         const displayedNotificationKeys = new Set();
+        const displayedResponseMessageIds = new Set();
+        let activeJobId = null;
 
         function setSessionId(sessionId) {
             currentSessionId = sessionId;
             localStorage.setItem("pea_chat_session_id", sessionId);
             displayedNotificationKeys.clear();
+            displayedResponseMessageIds.clear();
+            activeJobId = null;
             displaySessionId.textContent = sessionId;
         }
 
@@ -506,8 +509,9 @@
 
         function notificationUrl(pathSuffix = "") {
             const baseUrl = `${NOTIFICATIONS_URL}/${encodeURIComponent(currentSessionId)}`;
-            if (!pathSuffix) return baseUrl;
-            return agentBaseUrl ? `${baseUrl}${pathSuffix}` : `${baseUrl}${pathSuffix}/`;
+            const query = loggedInCaNumber ? `?ca_number=${encodeURIComponent(loggedInCaNumber)}` : "";
+            if (!pathSuffix) return `${baseUrl}/${query}`;
+            return `${baseUrl}${pathSuffix}/${query}`;
         }
 
         function greetingMessage() {
@@ -790,6 +794,9 @@
                 if (item.role === "user") {
                     appendUserMessage(message);
                 } else {
+                    if (item.role === "agent" && item.message_id) {
+                        displayedResponseMessageIds.add(String(item.message_id));
+                    }
                     appendBotMessage(message, {
                         label: "ศูนย์รับแจ้งปัญหา",
                         eventType: item.event_type,
@@ -831,6 +838,9 @@
                 null,
                 2
             );
+            if (data.active_agent_job && data.active_agent_job.job_id) {
+                resumeAgentJob(data.active_agent_job.job_id);
+            }
         }
 
         async function registerCurrentSession() {
@@ -934,10 +944,76 @@
             }
         }
 
+        function agentErrorMessage(detail) {
+            if (detail === "active_session_report_not_found") {
+                return "ไม่พบรายการแจ้งเหตุที่กำลังดำเนินการอยู่ค่ะ หากยังไม่มีไฟ กรุณาแจ้งเหตุใหม่อีกครั้งค่ะ";
+            }
+            if (detail === "agent_queue_unavailable") {
+                return "ระบบกำลังมีผู้ใช้งานจำนวนมาก กรุณาลองใหม่อีกครั้งค่ะ";
+            }
+            return "ไม่สามารถดำเนินการได้ในขณะนี้ กรุณาลองใหม่อีกครั้งค่ะ";
+        }
+
+        function jobUrl(jobId) {
+            return `${JOBS_URL}/${encodeURIComponent(jobId)}/?session_id=${encodeURIComponent(currentSessionId)}`;
+        }
+
+        function wait(milliseconds) {
+            return new Promise((resolve) => setTimeout(resolve, milliseconds));
+        }
+
+        async function pollAgentJob(jobId, loadingMessage) {
+            const deadline = Date.now() + 120000;
+            activeJobId = jobId;
+            setInputBusy(true);
+            try {
+                while (Date.now() < deadline && activeJobId === jobId) {
+                    const response = await fetch(jobUrl(jobId));
+                    const data = await response.json();
+                    if (!response.ok) {
+                        throw new Error(data.detail || "job_status_unavailable");
+                    }
+                    if (data.status === "succeeded") {
+                        const responseId = String(data.response_message_id || "");
+                        if (!responseId || !displayedResponseMessageIds.has(responseId)) {
+                            appendBotMessage(data.answer || "ระบบตอบกลับว่างเปล่าค่ะ");
+                            if (responseId) displayedResponseMessageIds.add(responseId);
+                        }
+                        stateBox.textContent = data.state
+                            ? JSON.stringify(data.state, null, 2)
+                            : "ไม่พบข้อมูล State";
+                        return;
+                    }
+                    if (data.status === "failed") {
+                        appendBotMessage(data.message || "ระบบยังไม่สามารถตอบกลับได้ กรุณาลองใหม่อีกครั้งค่ะ");
+                        return;
+                    }
+                    await wait(1000);
+                }
+                if (activeJobId === jobId) {
+                    appendBotMessage("ระบบกำลังใช้เวลาประมวลผลนานกว่าปกติ กรุณารีเฟรชเพื่อตรวจสอบผลอีกครั้งค่ะ");
+                }
+            } catch (error) {
+                appendBotMessage("ไม่สามารถตรวจสอบผลจากระบบได้ กรุณาลองใหม่อีกครั้งค่ะ");
+                stateBox.textContent = String(error);
+            } finally {
+                removeLoadingMessage(loadingMessage);
+                if (activeJobId === jobId) activeJobId = null;
+                setInputBusy(false);
+                messageInput.focus();
+            }
+        }
+
+        function resumeAgentJob(jobId) {
+            if (!jobId || activeJobId === jobId) return;
+            const loadingMessage = appendLoadingMessage();
+            pollAgentJob(jobId, loadingMessage);
+        }
+
         async function sendMessage(textOverride) {
             const hasPresetText = typeof textOverride === "string";
             const text = (hasPresetText ? textOverride : messageInput.value).trim();
-            if (!text) return;
+            if (!text || activeJobId) return;
 
             appendUserMessage(text);
             const loadingMessage = appendLoadingMessage();
@@ -958,20 +1034,25 @@
                 });
 
                 const data = await response.json();
-                removeLoadingMessage(loadingMessage);
 
                 if (response.ok) {
-                    appendBotMessage(data.answer || "ระบบตอบกลับว่างเปล่าค่ะ");
-                    stateBox.textContent = data.state ? JSON.stringify(data.state, null, 2) : "ไม่พบข้อมูล State";
+                    await pollAgentJob(data.job_id, loadingMessage);
+                    return;
+                } else if (response.status === 409 && data.job_id) {
+                    await pollAgentJob(data.job_id, loadingMessage);
+                    return;
                 } else {
-                    appendBotMessage(`Error: ${data.detail || "ไม่สามารถติดต่อระบบได้"}`);
+                    removeLoadingMessage(loadingMessage);
+                    appendBotMessage(agentErrorMessage(data.detail));
                 }
             } catch (error) {
                 removeLoadingMessage(loadingMessage);
                 appendBotMessage("เกิดข้อผิดพลาดในการเชื่อมต่อ");
             } finally {
-                setInputBusy(false);
-                messageInput.focus();
+                if (!activeJobId) {
+                    setInputBusy(false);
+                    messageInput.focus();
+                }
             }
         }
 
@@ -1012,7 +1093,7 @@
         if (loginReady) {
             initChat();
             registerCurrentSession().then(recoverLatestClosedLoopPrompt);
-            setInterval(pollNotifications, 2000);
+            setInterval(pollNotifications, 1000);
         }
     </script>
 </body>

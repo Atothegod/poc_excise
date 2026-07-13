@@ -1,5 +1,6 @@
 import csv
 import os
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -64,25 +65,100 @@ def load_customers():
         return
 
     with CA_CSV_PATH.open(encoding="utf-8-sig", newline="") as csv_file:
-        reader = csv.DictReader(csv_file)
-        required_columns = {"ca_number", "lat", "lon"}
-        missing_columns = required_columns - set(reader.fieldnames or [])
-        if missing_columns:
+        fieldnames, rows = read_customer_rows(csv_file)
+        if not has_customer_columns(fieldnames):
             raise RuntimeError(
-                f"Missing required CA CSV columns: {', '.join(sorted(missing_columns))}"
+                "Missing required CA CSV columns: ca_number/lat/lon or Thai spreadsheet columns"
             )
 
-        for row in reader:
-            ca_number = clean_ca(row.get("ca_number"))
+        for row in rows:
+            ca_number = clean_ca(
+                row_value(
+                    row,
+                    "ca_number",
+                    "หมายเลขผู้ใช้ไฟฟ้า (CA 12 หลัก)",
+                    "หมายเลขผู้ใช้ไฟฟ้า",
+                    "CA",
+                )
+            )
             if not ca_number:
                 continue
+            lat, lon = coordinates_for_row(row)
+            if lat is None or lon is None:
+                continue
+            prefix, fullname = name_fields(row)
             CUSTOMERS[ca_number] = {
                 "ca_number": ca_number,
-                "lat": parse_float(row.get("lat")),
-                "lon": parse_float(row.get("lon")),
-                "address": (row.get("address") or "").strip(),
-                "fullname": (row.get("fullname") or "").strip(),
+                "lat": lat,
+                "lon": lon,
+                "address": row_value(row, "address", "หน่วยงาน"),
+                "fullname": fullname,
+                "prefix": prefix,
             }
+
+
+def read_customer_rows(csv_file):
+    raw_rows = list(csv.reader(csv_file))
+    header_index = None
+    for index, raw_row in enumerate(raw_rows):
+        columns = {str(value or "").strip() for value in raw_row}
+        if "ca_number" in columns or "หมายเลขผู้ใช้ไฟฟ้า (CA 12 หลัก)" in columns:
+            header_index = index
+            break
+    if header_index is None:
+        return [], []
+
+    fieldnames = [str(value or "").strip() for value in raw_rows[header_index]]
+    rows = []
+    for values in raw_rows[header_index + 1 :]:
+        if not any(str(value or "").strip() for value in values):
+            continue
+        padded_values = [*values, *[""] * max(0, len(fieldnames) - len(values))]
+        rows.append(dict(zip(fieldnames, padded_values)))
+    return fieldnames, rows
+
+
+def has_customer_columns(fieldnames):
+    columns = set(fieldnames or [])
+    has_ca = (
+        "ca_number" in columns
+        or "หมายเลขผู้ใช้ไฟฟ้า (CA 12 หลัก)" in columns
+        or "หมายเลขผู้ใช้ไฟฟ้า" in columns
+    )
+    has_coordinates = ("lat" in columns and "lon" in columns) or "หมายเหตุ" in columns
+    return has_ca and has_coordinates
+
+
+def row_value(row, *keys):
+    for key in keys:
+        value = str(row.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def coordinates_for_row(row):
+    lat = parse_float(row.get("lat"))
+    lon = parse_float(row.get("lon"))
+    if lat is not None and lon is not None:
+        return lat, lon
+
+    coordinate_text = row_value(row, "หมายเหตุ", "coordinates")
+    match = re.fullmatch(
+        r"\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*",
+        coordinate_text,
+    )
+    if not match:
+        return None, None
+    return parse_float(match.group(1)), parse_float(match.group(2))
+
+
+def name_fields(row):
+    prefix = row_value(row, "prefix")
+    fullname = row_value(row, "fullname", "ชื่อ - สกุล", "name")
+    if not prefix and fullname.startswith("คุณ"):
+        return "คุณ", fullname[len("คุณ") :].strip()
+    return prefix, fullname
 
 
 def clean_ca(value):
@@ -91,6 +167,9 @@ def clean_ca(value):
 
 
 def parse_float(value):
+    value = str(value or "").strip()
+    if not value:
+        return None
     try:
         return float(value)
     except (TypeError, ValueError):

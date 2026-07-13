@@ -15,8 +15,8 @@ sys.modules["config"] = fake_config
 sys.modules["dspy"] = fake_dspy
 
 import agent as agent_module
-from agent import MemoryAgent
-from session_state import latest_outage_by_session
+from agent import StatelessAgent
+from session_state import restore_latest_outage
 from signature import PEA_Conversation_State, PEA_Intent_Router
 
 
@@ -35,17 +35,15 @@ class ExplodingAgent:
         raise AssertionError("ReAct agent should not be called")
 
 
-class MemoryAgentIntentRouterTests(unittest.TestCase):
+class StatelessAgentIntentRouterTests(unittest.TestCase):
     def setUp(self):
-        latest_outage_by_session.clear()
+        restore_latest_outage("test", None)
 
     def tearDown(self):
-        latest_outage_by_session.clear()
+        restore_latest_outage("test", None)
 
     def _chat(self, memory_agent, message, session_id="session-router"):
-        with patch.object(agent_module, "fetch_session_context", return_value=None), patch.object(
-            agent_module, "sync_chat_history_to_db"
-        ):
+        with patch.object(agent_module, "fetch_session_context", return_value=None):
             return memory_agent.chat(
                 message,
                 session_id=session_id,
@@ -56,7 +54,7 @@ class MemoryAgentIntentRouterTests(unittest.TestCase):
 
     def test_out_of_scope_route_short_circuits_before_react_agent(self):
         router = RouteStub("out_of_scope")
-        memory_agent = MemoryAgent(ExplodingAgent(), intent_router_module=router)
+        memory_agent = StatelessAgent(ExplodingAgent(), intent_router_module=router)
 
         response = self._chat(memory_agent, "ขอดูบิลค่าไฟ")
 
@@ -71,7 +69,7 @@ class MemoryAgentIntentRouterTests(unittest.TestCase):
 
     def test_generic_fire_route_short_circuits_as_out_of_scope(self):
         router = RouteStub("out_of_scope")
-        memory_agent = MemoryAgent(ExplodingAgent(), intent_router_module=router)
+        memory_agent = StatelessAgent(ExplodingAgent(), intent_router_module=router)
 
         response = self._chat(memory_agent, "ไฟไหม้ครับ")
 
@@ -80,18 +78,25 @@ class MemoryAgentIntentRouterTests(unittest.TestCase):
         self.assertNotIn("จ่ายไฟคืน", response.answer)
 
     def test_out_of_scope_route_is_not_overridden_by_mass_outage_context(self):
-        latest_outage_by_session["session-mass-outage"] = {
+        latest_outage = {
             "event_type": "mass_outage",
             "etr_target_time": "2026-07-09T13:00:00+07:00",
         }
         router = RouteStub("out_of_scope")
-        memory_agent = MemoryAgent(ExplodingAgent(), intent_router_module=router)
+        memory_agent = StatelessAgent(ExplodingAgent(), intent_router_module=router)
 
-        response = self._chat(
-            memory_agent,
-            "ขอดูบิลค่าไฟ",
-            session_id="session-mass-outage",
-        )
+        with patch.object(
+            agent_module,
+            "fetch_session_context",
+            return_value={"chat_history": [], "latest_outage": latest_outage},
+        ):
+            response = memory_agent.chat(
+                "ขอดูบิลค่าไฟ",
+                session_id="session-mass-outage",
+                time_stamp="2026-07-09T12:00:00+07:00",
+                ca_number="123456789012",
+                pdpa_consent=True,
+            )
 
         self.assertEqual(response.current_state.flow_step, "out_of_scope")
         self.assertNotIn("ไฟดับวงกว้าง", response.answer)
@@ -109,7 +114,7 @@ class MemoryAgentIntentRouterTests(unittest.TestCase):
                 ),
             )
         )
-        memory_agent = MemoryAgent(react_agent, intent_router_module=router)
+        memory_agent = StatelessAgent(react_agent, intent_router_module=router)
 
         response = self._chat(memory_agent, "ไฟดับทั้งบ้าน")
 
@@ -118,19 +123,20 @@ class MemoryAgentIntentRouterTests(unittest.TestCase):
 
     def test_closed_loop_resolved_route_records_resolution(self):
         router = RouteStub("closed_loop_resolved")
-        memory_agent = MemoryAgent(ExplodingAgent(), intent_router_module=router)
-        memory_agent.sessions["session-closed-loop-resolved"] = [
-            {
+        memory_agent = StatelessAgent(ExplodingAgent(), intent_router_module=router)
+        context = {
+            "latest_outage": None,
+            "chat_history": [{
                 "role": "System Alert (OMS)",
-                "content": "ระบบแจ้งว่าจ่ายไฟคืนแล้ว ไฟฟ้ากลับมาใช้งานได้หรือยังคะ",
+                "message": "ระบบแจ้งว่าจ่ายไฟคืนแล้ว ไฟฟ้ากลับมาใช้งานได้หรือยังคะ",
                 "event_type": "closed_loop_prompt",
                 "report_id": 7,
-            }
-        ]
+            }],
+        }
 
-        with patch.object(agent_module, "fetch_session_context", return_value=None), patch.object(
-            agent_module, "sync_chat_history_to_db"
-        ), patch.object(agent_module, "record_closed_loop_response") as mock_record:
+        with patch.object(agent_module, "fetch_session_context", return_value=context), patch.object(
+            agent_module, "record_closed_loop_response"
+        ) as mock_record:
             response = memory_agent.chat(
                 "กลับมาใช้งานได้ตามปกติ",
                 session_id="session-closed-loop-resolved",
@@ -149,19 +155,20 @@ class MemoryAgentIntentRouterTests(unittest.TestCase):
 
     def test_closed_loop_still_out_route_calls_force_new_case_tool(self):
         router = RouteStub("closed_loop_still_out")
-        memory_agent = MemoryAgent(Mock(), intent_router_module=router)
-        memory_agent.sessions["session-closed-loop-still-out"] = [
-            {
+        memory_agent = StatelessAgent(Mock(), intent_router_module=router)
+        context = {
+            "latest_outage": None,
+            "chat_history": [{
                 "role": "System Alert (OMS)",
-                "content": "ระบบแจ้งว่าจ่ายไฟคืนแล้ว ไฟฟ้ากลับมาใช้งานได้หรือยังคะ",
+                "message": "ระบบแจ้งว่าจ่ายไฟคืนแล้ว ไฟฟ้ากลับมาใช้งานได้หรือยังคะ",
                 "event_type": "closed_loop_prompt",
                 "report_id": 9,
-            }
-        ]
+            }],
+        }
 
-        with patch.object(agent_module, "fetch_session_context", return_value=None), patch.object(
-            agent_module, "sync_chat_history_to_db"
-        ), patch.object(agent_module, "record_closed_loop_response"), patch.object(
+        with patch.object(agent_module, "fetch_session_context", return_value=context), patch.object(
+            agent_module, "record_closed_loop_response"
+        ), patch.object(
             agent_module,
             "Check_Outage_Tool",
             return_value="[เหตุแจ้งใหม่] เปิดใบงานแล้ว แจ้งว่า ช่างจะถึงหน้างานประมาณ 12:30 น.",
@@ -183,7 +190,7 @@ class MemoryAgentIntentRouterTests(unittest.TestCase):
 
     def test_router_failure_fails_closed_as_out_of_scope(self):
         router = Mock(side_effect=RuntimeError("router unavailable"))
-        memory_agent = MemoryAgent(ExplodingAgent(), intent_router_module=router)
+        memory_agent = StatelessAgent(ExplodingAgent(), intent_router_module=router)
 
         response = self._chat(memory_agent, "สอบถามเรื่องทั่วไป")
 
