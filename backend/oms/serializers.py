@@ -22,9 +22,6 @@ class AgentReportSerializer(serializers.Serializer):
     ca_number = serializers.CharField(max_length=12, min_length=12)
     latitude = serializers.FloatField(required=False, allow_null=True)
     longitude = serializers.FloatField(required=False, allow_null=True)
-    chat_history = serializers.CharField(
-        required=False, allow_blank=True, allow_null=True
-    )
     tool_used = serializers.CharField(
         max_length=50, required=False, allow_blank=True, allow_null=True
     )
@@ -60,19 +57,6 @@ class ActionStatusResponseSerializer(serializers.Serializer):
     etr_target_time = serializers.DateTimeField(allow_null=True, required=False)
     etr_source = serializers.CharField(allow_null=True, required=False)
     pluem_etr_minutes = serializers.FloatField(allow_null=True, required=False)
-
-
-class ChatHistorySyncSerializer(serializers.Serializer):
-    session_id = serializers.CharField(max_length=255)
-    ca_number = serializers.CharField(
-        max_length=12, min_length=12, required=False, allow_blank=True, allow_null=True
-    )
-    chat_history = serializers.ListField(child=serializers.DictField(), default=list)
-
-    def validate_ca_number(self, value):
-        if not value:
-            return value
-        return validate_ca_number_format(value)
 
 
 class ClosedLoopResponseSerializer(serializers.Serializer):

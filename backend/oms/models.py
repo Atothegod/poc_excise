@@ -1,5 +1,7 @@
 from django.db import models
 from django.db import transaction
+from django.contrib.postgres.indexes import GinIndex
+from django.db.models.expressions import RawSQL
 from django.utils import timezone
 from datetime import timedelta
 import uuid
@@ -35,7 +37,7 @@ class OutageCase(models.Model):
         unique=True,
         null=True,
         blank=True,
-        db_index=True,
+        db_default=RawSQL("nextval('oms_outagecase_lv_group_id_seq')", []),
         help_text="เลขกลุ่มเคสแบบรัน 1-n สำหรับ filter/readability",
     )
     title = models.CharField(max_length=255, default="ไฟดับบริเวณใกล้เคียง")
@@ -142,12 +144,21 @@ class OutageCase(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    class Meta:
+        indexes = [
+            GinIndex(fields=["affected_ca_numbers"], name="oms_case_ca_gin"),
+            models.Index(
+                fields=["status", "-updated_at"],
+                name="oms_case_status_upd_idx",
+            ),
+        ]
+
     def __str__(self):
         return f"Case {self.case_id} - [{self.get_status_display()}]"
 
     def save(self, *args, **kwargs):
         with transaction.atomic():
-            if self.pk:
+            if not self._state.adding:
                 persisted = (
                     OutageCase.objects.select_for_update()
                     .filter(pk=self.pk)
@@ -159,14 +170,6 @@ class OutageCase(models.Model):
                 ):
                     self.oms_etr = persisted.oms_etr
 
-            if self.lv_group_id is None:
-                latest_id = (
-                    OutageCase.objects.exclude(lv_group_id__isnull=True).aggregate(
-                        models.Max("lv_group_id")
-                    )["lv_group_id__max"]
-                    or 0
-                )
-                self.lv_group_id = latest_id + 1
             self._defer_timer_publish_until_commit = True
             try:
                 super().save(*args, **kwargs)
@@ -222,7 +225,7 @@ class CustomerLocation(models.Model):
     prefix = models.CharField(max_length=50, blank=True)
     fullname = models.CharField(max_length=255, blank=True)
     address = models.TextField(blank=True)
-    ca_number = models.CharField(max_length=12, unique=True, db_index=True)
+    ca_number = models.CharField(max_length=12, unique=True)
     phone_number = models.CharField(max_length=50, blank=True)
     pea_area = models.CharField(max_length=255, blank=True)
     user_type = models.CharField(max_length=255, blank=True)
@@ -259,9 +262,6 @@ class CustomerReport(models.Model):
         related_name="affected_customers",
     )
 
-    chat_history = models.JSONField(
-        default=list, blank=True, help_text="เก็บประวัติสนทนาแบบ dialog"
-    )
     pdpa_consent = models.BooleanField(
         default=False, help_text="ลูกค้าให้ความยินยอมให้ตรวจสอบข้อมูลด้วยหมายเลข CA"
     )
@@ -279,6 +279,20 @@ class CustomerReport(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
+        indexes = [
+            models.Index(
+                fields=["session_id", "is_resolved", "-updated_at", "-id"],
+                name="oms_report_session_idx",
+            ),
+            models.Index(
+                fields=["ca_number", "is_resolved", "-updated_at"],
+                name="oms_report_ca_active_idx",
+            ),
+            models.Index(
+                fields=["related_case", "is_resolved"],
+                name="oms_report_case_active_idx",
+            ),
+        ]
         constraints = [
             models.UniqueConstraint(
                 fields=["session_id"],
@@ -335,6 +349,19 @@ class ChatMessage(models.Model):
         indexes = [
             models.Index(fields=["session_id", "created_at", "id"]),
             models.Index(fields=["session_id", "acknowledged_at"]),
+            models.Index(
+                fields=["session_id", "ca_number", "created_at", "id"],
+                name="oms_msg_session_ca_idx",
+            ),
+            models.Index(
+                fields=["session_id", "created_at", "id"],
+                condition=(
+                    models.Q(role="system")
+                    & models.Q(acknowledged_at__isnull=True)
+                    & models.Q(notification_key__isnull=False)
+                ),
+                name="oms_msg_pending_idx",
+            ),
         ]
 
     def __str__(self):
@@ -388,6 +415,20 @@ class AgentJob(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
+        indexes = [
+            models.Index(
+                fields=["session_id", "ca_number", "-response_message"],
+                condition=(
+                    models.Q(status="succeeded")
+                    & models.Q(response_message__isnull=False)
+                ),
+                name="oms_job_state_lookup_idx",
+            ),
+            models.Index(
+                fields=["status", "-created_at"],
+                name="oms_job_status_created_idx",
+            ),
+        ]
         constraints = [
             models.UniqueConstraint(
                 fields=["session_id"],

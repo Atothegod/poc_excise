@@ -291,8 +291,31 @@ def django_event(event_type: str, case_payload: dict[str, Any]):
 
 def proxy_case_event(event_type: str, case_payload: dict[str, Any]):
     django_response = django_event(event_type, case_payload)
+    requested_case_id = case_payload.get("case_id")
+    canonical_case_id = (
+        django_response.get("case_id")
+        if isinstance(django_response, dict)
+        else None
+    ) or requested_case_id
+    if canonical_case_id is not None:
+        canonical_case_id = str(canonical_case_id)
+    if requested_case_id is not None:
+        requested_case_id = str(requested_case_id)
+
+    case_id_changed = bool(
+        requested_case_id
+        and canonical_case_id
+        and requested_case_id != canonical_case_id
+    )
+    requires_retry = bool(case_id_changed and event_type != "case_opened")
     return {
         **case_payload,
+        "case_id": canonical_case_id,
+        "requested_case_id": requested_case_id,
+        "canonical_case_id": canonical_case_id,
+        "case_id_changed": case_id_changed,
+        "action_applied": not requires_retry,
+        "requires_retry_with_canonical_case_id": requires_retry,
         "event_type": event_type,
         "case": case_payload,
         "django": django_response,
@@ -597,6 +620,17 @@ def ui():
         body: JSON.stringify(payload)
       });
       const data = await response.json();
+      const canonicalCaseId = data.canonical_case_id;
+      if (response.ok && canonicalCaseId) {
+        caseId.value = canonicalCaseId;
+      }
+      if (response.ok && data.case_id_changed) {
+        if (data.requires_retry_with_canonical_case_id) {
+          data.warning = `เคส ${id} ถูกรวมไปที่เคส ${canonicalCaseId} คำสั่งครั้งนี้ยังไม่ถูกนำไปใช้ กรุณาตรวจสอบ Case ID แล้วกด ${action === "update" ? "Update ETR" : "Close Case"} อีกครั้ง`;
+        } else {
+          data.notice = `เคสถูกนำไปรวมกับเคสหลัก ${canonicalCaseId} ระบบเปลี่ยน Case ID สำหรับคำสั่งถัดไปให้แล้ว`;
+        }
+      }
       show(data);
     }
 

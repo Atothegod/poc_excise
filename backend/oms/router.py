@@ -9,7 +9,6 @@ urlpatterns = [
         views_api.register_session_login,
         name="session_login",
     ),
-    path("reports/chat-history/", views_api.sync_chat_history, name="sync_chat_history"),
     path(
         "reports/closed-loop-response/",
         views_api.record_closed_loop_response,

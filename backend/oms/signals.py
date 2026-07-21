@@ -289,9 +289,3 @@ def process_outage_case_updates(sender, instance, created, **kwargs):
             celery_eta_task_id=None, celery_etr_task_id=None, celery_sla_task_id=None
         )
         instance._is_just_inactive = False
-
-
-@receiver(post_save, sender=CustomerReport)
-def sync_case_affected_ca(sender, instance, **kwargs):
-    if instance.related_case_id:
-        instance.related_case.sync_affected_ca_numbers()

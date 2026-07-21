@@ -27,7 +27,6 @@ from .serializers import (
     ActionStatusRequestSerializer,
     ActionStatusResponseSerializer,
     CaValidationSerializer,
-    ChatHistorySyncSerializer,
     ClosedLoopResponseSerializer,
     SessionLoginSerializer,
     validate_ca_number_format,
@@ -249,14 +248,16 @@ def _attach_active_ca_case(report):
         report.related_case = active_report.related_case
         return True
 
-    for case in (
+    case = (
         OutageCase.objects.exclude(status__in=INACTIVE_CASE_STATUSES)
+        .filter(affected_ca_numbers__contains=[report.ca_number])
         .order_by("-updated_at", "-created_at")
-        .only("case_id", "affected_ca_numbers", "status")
-    ):
-        if report.ca_number in (case.affected_ca_numbers or []):
-            report.related_case = case
-            return True
+        .only("case_id", "status")
+        .first()
+    )
+    if case:
+        report.related_case = case
+        return True
     return False
 
 
@@ -800,6 +801,25 @@ def _latest_outage_for_report(report):
     }
 
 
+def _latest_agent_state(session_id, ca_number=None, before_message_id=None):
+    jobs = AgentJob.objects.filter(
+        session_id=session_id,
+        status=AgentJob.STATUS_SUCCEEDED,
+        response_message__isnull=False,
+    )
+    if ca_number:
+        jobs = jobs.filter(ca_number=ca_number)
+    if before_message_id is not None:
+        jobs = jobs.filter(response_message_id__lt=before_message_id)
+
+    state = (
+        jobs.order_by("-response_message_id")
+        .values_list("response_state", flat=True)
+        .first()
+    )
+    return dict(state) if isinstance(state, dict) else None
+
+
 def _session_context_payload(session_id, report, before_message_id=None):
     # Read the active job first. If it completes between these queries, the
     # timeline read below includes its response and polling safely deduplicates it.
@@ -813,6 +833,11 @@ def _session_context_payload(session_id, report, before_message_id=None):
     if before_message_id is not None:
         messages = messages.filter(id__lt=before_message_id)
     messages = list(messages.order_by("created_at", "id"))
+    current_state = _latest_agent_state(
+        session_id,
+        ca_number=(report.ca_number if report else None),
+        before_message_id=before_message_id,
+    )
 
     if not report:
         return {
@@ -820,6 +845,7 @@ def _session_context_payload(session_id, report, before_message_id=None):
             "session_id": session_id,
             "chat_history": [serialize_chat_message(item) for item in messages],
             "latest_outage": None,
+            "current_state": current_state,
             "active_agent_job": (
                 {"job_id": str(active_job.id), "status": active_job.status}
                 if active_job
@@ -833,12 +859,9 @@ def _session_context_payload(session_id, report, before_message_id=None):
         "report_id": report.id,
         "ca_number": report.ca_number,
         "customer_name": report.customer_name,
-        "chat_history": (
-            [serialize_chat_message(item) for item in messages]
-            if messages
-            else report.chat_history or []
-        ),
+        "chat_history": [serialize_chat_message(item) for item in messages],
         "latest_outage": _latest_outage_for_report(report),
+        "current_state": current_state,
         "active_agent_job": (
             {"job_id": str(active_job.id), "status": active_job.status}
             if active_job
@@ -1051,33 +1074,6 @@ def register_session_login(request):
         report.related_case.sync_affected_ca_numbers()
 
     return Response(_session_context_payload(data["session_id"], report))
-
-
-@api_view(["POST"])
-def sync_chat_history(request):
-    serializer = ChatHistorySyncSerializer(data=request.data)
-    if not serializer.is_valid():
-        return Response(serializer.errors, status=400)
-
-    data = serializer.validated_data
-    session_id = data["session_id"]
-    ca_number = data.get("ca_number")
-    chat_history = data.get("chat_history") or []
-
-    reports = CustomerReport.objects.filter(session_id=session_id)
-    if ca_number:
-        reports = reports.filter(ca_number=ca_number)
-
-    report = reports.filter(is_resolved=False).order_by("-updated_at").first()
-    if not report:
-        report = reports.order_by("-updated_at").first()
-
-    if not report:
-        return Response({"status": "no_report"})
-
-    report.chat_history = chat_history
-    report.save(update_fields=["chat_history", "updated_at"])
-    return Response({"status": "success", "report_id": report.id})
 
 
 @api_view(["POST"])

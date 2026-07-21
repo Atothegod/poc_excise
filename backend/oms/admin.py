@@ -1,4 +1,5 @@
 from django.contrib import admin
+from django.db.models import Count
 from django.urls import reverse
 from django.utils import timezone
 from django.utils.html import format_html, format_html_join
@@ -49,7 +50,8 @@ class OutageCaseAdmin(CsvExportAdminMixin, admin.ModelAdmin):
         "pluem_etr_minutes_display",
         "created_at_display",
     )
-    list_filter = ("status", "case_type", "lv_group_id")
+    list_filter = ("status", "case_type")
+    list_select_related = ("merged_into",)
     search_fields = ("case_id", "title", "affected_customers__ca_number")
     autocomplete_fields = ("merged_into",)
     csv_fields = (
@@ -344,6 +346,7 @@ class CustomerReportAdmin(CsvExportAdminMixin, admin.ModelAdmin):
         "updated_at",
     )
     search_fields = ("ca_number", "customer_name", "session_id")
+    list_select_related = ("related_case",)
     readonly_fields = ("chat_dialog",)
     csv_fields = (
         "id",
@@ -353,7 +356,6 @@ class CustomerReportAdmin(CsvExportAdminMixin, admin.ModelAdmin):
         "latitude",
         "longitude",
         "related_case_id",
-        "chat_history",
         "pdpa_consent",
         "pdpa_consent_at",
         "is_resolved",
@@ -362,31 +364,27 @@ class CustomerReportAdmin(CsvExportAdminMixin, admin.ModelAdmin):
         "updated_at",
     )
 
+    def get_queryset(self, request):
+        return super().get_queryset(request).annotate(_message_count=Count("messages"))
+
     def chat_dialog_preview(self, obj):
-        message_count = obj.messages.count()
+        message_count = getattr(obj, "_message_count", 0)
         if message_count:
             return f"{message_count} messages"
-        history = obj.chat_history or []
-        if not history:
-            return format_html('<span style="color: gray;">ยังไม่มีบทสนทนา</span>')
-        return f"{len(history)} messages"
+        return format_html('<span style="color: gray;">ยังไม่มีบทสนทนา</span>')
 
     chat_dialog_preview.short_description = "Chat History"
 
     def chat_dialog(self, obj):
         timeline = list(obj.messages.order_by("created_at", "id"))
-        history = (
-            [
-                {
-                    "role": message.role,
-                    "timestamp": message.created_at.isoformat(),
-                    "message": message.content,
-                }
-                for message in timeline
-            ]
-            if timeline
-            else obj.chat_history or []
-        )
+        history = [
+            {
+                "role": message.role,
+                "timestamp": message.created_at.isoformat(),
+                "message": message.content,
+            }
+            for message in timeline
+        ]
         if not history:
             return format_html('<span style="color: gray;">ยังไม่มีบทสนทนา</span>')
 
@@ -424,7 +422,8 @@ class OutageRestorationLogAdmin(CsvExportAdminMixin, admin.ModelAdmin):
         "etr_delta_minutes",
         "affected_CA",
     )
-    list_filter = ("etr_source", "lv_group_id")
+    list_filter = ("etr_source",)
+    list_select_related = ("case",)
     search_fields = ("case__case_id",)
     readonly_fields = (
         "case",

@@ -1,11 +1,14 @@
 import csv
 import io
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from unittest.mock import Mock, patch
 
+from django.contrib.postgres.indexes import GinIndex
 from django.contrib.auth.models import User
 from django.contrib.admin.sites import AdminSite
-from django.test import TestCase
+from django.db import close_old_connections, connections
+from django.test import TestCase, TransactionTestCase
 from django.test.client import RequestFactory
 from django.utils.dateparse import parse_datetime
 from django.utils import timezone
@@ -130,7 +133,8 @@ class SyncAgentReportTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["event_type"], "new_event")
-        self.assertEqual(response.data["lv_group_id"], 1)
+        self.assertIsInstance(response.data["lv_group_id"], int)
+        self.assertGreater(response.data["lv_group_id"], 0)
         self.assertEqual(response.data["affected_ca_numbers"], ["123456789012"])
         self.assertIsNotNone(response.data["eta_target_time"])
         self.assertEqual(response.data["eta_formatted"], "~ 8 min")
@@ -740,6 +744,7 @@ class SyncAgentReportTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["merged_count"], 1)
+        self.assertEqual(str(response.data["case_id"]), str(anchor.case_id))
         child = OutageCase.objects.get(external_event_id="OMS-SINGLE-CA")
         anchor.refresh_from_db()
         report.refresh_from_db()
@@ -967,38 +972,37 @@ class SyncAgentReportTests(TestCase):
         self.assertEqual(OutageCase.objects.count(), 2)
         mock_assessment.assert_called_once()
 
-    def test_sync_chat_history_stores_dialog_on_latest_report(self):
+    def test_chat_messages_are_the_canonical_session_history(self):
         report = CustomerReport.objects.create(
             session_id="session-dialog",
             ca_number="123456789012",
         )
+        first = ChatMessage.objects.create(
+            session_id=report.session_id,
+            report=report,
+            role=ChatMessage.ROLE_USER,
+            content="ไฟดับครับ",
+            ca_number=report.ca_number,
+        )
+        second = ChatMessage.objects.create(
+            session_id=report.session_id,
+            report=report,
+            role=ChatMessage.ROLE_AGENT,
+            content="รับเรื่องตรวจสอบค่ะ",
+            ca_number=report.ca_number,
+        )
 
-        response = self.client.post(
-            "/api/reports/chat-history/",
-            {
-                "session_id": "session-dialog",
-                "ca_number": "123456789012",
-                "chat_history": [
-                    {
-                        "role": "user",
-                        "message": "ไฟดับครับ",
-                        "timestamp": "2026-06-26T12:00:00+07:00",
-                    },
-                    {
-                        "role": "agent",
-                        "message": "รบกวนแจ้ง CA ครับ",
-                        "timestamp": "2026-06-26T12:00:01+07:00",
-                    },
-                ],
-            },
-            format="json",
+        response = self.client.get(
+            "/api/reports/session-context/session-dialog/",
+            {"ca_number": report.ca_number},
         )
 
         self.assertEqual(response.status_code, 200)
-        report.refresh_from_db()
-        self.assertEqual(len(report.chat_history), 2)
-        self.assertEqual(report.chat_history[0]["role"], "user")
-        self.assertEqual(report.chat_history[1]["role"], "agent")
+        self.assertEqual(
+            [item["message_id"] for item in response.data["chat_history"]],
+            [first.id, second.id],
+        )
+        self.assertEqual(self.client.post("/api/reports/chat-history/").status_code, 404)
 
     def test_session_context_returns_chat_history_and_latest_outage(self):
         eta = timezone.now() + timedelta(minutes=15)
@@ -1012,13 +1016,14 @@ class SyncAgentReportTests(TestCase):
             session_id="session-restore",
             ca_number="123456789012",
             related_case=case,
-            chat_history=[
-                {
-                    "role": "user",
-                    "message": "ไฟดับครับ",
-                    "timestamp": "2026-06-26T12:00:00+07:00",
-                }
-            ],
+        )
+        ChatMessage.objects.create(
+            session_id=report.session_id,
+            report=report,
+            case=case,
+            role=ChatMessage.ROLE_USER,
+            content="ไฟดับครับ",
+            ca_number=report.ca_number,
         )
         case.sync_affected_ca_numbers()
 
@@ -2013,7 +2018,7 @@ class DurableAgentJobTests(TestCase):
         mock_apply_async.assert_called_once()
 
     @patch("oms.views.process_agent_job.apply_async")
-    def test_submit_without_active_report_or_pending_closed_loop_returns_409(
+    def test_submit_without_active_report_creates_a_new_active_report(
         self, mock_apply_async
     ):
         self.report.is_resolved = True
@@ -2021,11 +2026,12 @@ class DurableAgentJobTests(TestCase):
 
         response = self._submit("ไฟดับครับ")
 
-        self.assertEqual(response.status_code, 409)
-        self.assertEqual(response.json()["detail"], "active_session_report_not_found")
-        self.assertFalse(AgentJob.objects.exists())
-        self.assertFalse(ChatMessage.objects.filter(role=ChatMessage.ROLE_USER).exists())
-        mock_apply_async.assert_not_called()
+        self.assertEqual(response.status_code, 202)
+        job = AgentJob.objects.get(pk=response.json()["job_id"])
+        self.assertNotEqual(job.user_message.report_id, self.report.id)
+        self.assertFalse(job.user_message.report.is_resolved)
+        self.assertEqual(job.user_message.content, "ไฟดับครับ")
+        mock_apply_async.assert_called_once()
 
     @patch("oms.views.process_agent_job.apply_async", side_effect=RuntimeError("redis down"))
     def test_enqueue_failure_marks_job_failed(self, mock_apply_async):
@@ -2173,6 +2179,77 @@ class DurableNotificationEndpointTests(TestCase):
         self.assertEqual(
             [item["message_id"] for item in response.data["chat_history"]],
             [first.id],
+        )
+
+    def test_session_context_returns_latest_completed_state_before_cutoff(self):
+        prior_user = ChatMessage.objects.create(
+            session_id=self.report.session_id,
+            report=self.report,
+            role=ChatMessage.ROLE_USER,
+            content="เรื่องก่อนหน้า",
+            ca_number=self.report.ca_number,
+        )
+        prior_response = ChatMessage.objects.create(
+            session_id=self.report.session_id,
+            report=self.report,
+            role=ChatMessage.ROLE_AGENT,
+            content="คำตอบก่อนหน้า",
+            ca_number=self.report.ca_number,
+        )
+        AgentJob.objects.create(
+            session_id=self.report.session_id,
+            ca_number=self.report.ca_number,
+            pdpa_consent=True,
+            user_message=prior_user,
+            response_message=prior_response,
+            response_state={"flow_step": "out_of_scope"},
+            status=AgentJob.STATUS_SUCCEEDED,
+            celery_task_id="prior-state-task",
+        )
+        current = ChatMessage.objects.create(
+            session_id=self.report.session_id,
+            report=self.report,
+            role=ChatMessage.ROLE_USER,
+            content="ข้อความปัจจุบัน",
+            ca_number=self.report.ca_number,
+        )
+        future_user = ChatMessage.objects.create(
+            session_id=self.report.session_id,
+            report=self.report,
+            role=ChatMessage.ROLE_USER,
+            content="ข้อความหลัง cutoff",
+            ca_number=self.report.ca_number,
+        )
+        future_response = ChatMessage.objects.create(
+            session_id=self.report.session_id,
+            report=self.report,
+            role=ChatMessage.ROLE_AGENT,
+            content="คำตอบหลัง cutoff",
+            ca_number=self.report.ca_number,
+        )
+        AgentJob.objects.create(
+            session_id=self.report.session_id,
+            ca_number=self.report.ca_number,
+            pdpa_consent=True,
+            user_message=future_user,
+            response_message=future_response,
+            response_state={
+                "flow_step": "heart_mode",
+                "heart_persona": "calm_commander",
+            },
+            status=AgentJob.STATUS_SUCCEEDED,
+            celery_task_id="future-state-task",
+        )
+
+        response = self.client.get(
+            f"/api/reports/session-context/{self.report.session_id}/",
+            {"before_message_id": current.id},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.data["current_state"],
+            {"flow_step": "out_of_scope"},
         )
 
     def test_session_context_and_latest_closed_loop_are_scoped_to_ca_number(self):
@@ -3156,6 +3233,45 @@ class CsvExportAdminTests(TestCase):
         for model_admin in admins:
             self.assertIn("export_selected_csv", model_admin.actions)
 
+    def test_admin_relations_and_message_count_do_not_use_per_row_queries(self):
+        site = AdminSite()
+        outage_admin = OutageCaseAdmin(OutageCase, site)
+        report_admin = CustomerReportAdmin(CustomerReport, site)
+        restoration_admin = OutageRestorationLogAdmin(OutageRestorationLog, site)
+
+        self.assertEqual(outage_admin.list_select_related, ("merged_into",))
+        self.assertEqual(report_admin.list_select_related, ("related_case",))
+        self.assertEqual(restoration_admin.list_select_related, ("case",))
+        self.assertNotIn("lv_group_id", outage_admin.list_filter)
+        self.assertNotIn("lv_group_id", restoration_admin.list_filter)
+
+        case = OutageCase.objects.create(title="Admin query case")
+        report = CustomerReport.objects.create(
+            session_id="admin-query-session",
+            ca_number="123456789012",
+            related_case=case,
+        )
+        ChatMessage.objects.bulk_create(
+            [
+                ChatMessage(
+                    session_id=report.session_id,
+                    report=report,
+                    case=case,
+                    role=ChatMessage.ROLE_USER,
+                    content=f"message {index}",
+                    ca_number=report.ca_number,
+                )
+                for index in range(3)
+            ]
+        )
+        request = RequestFactory().get("/admin/oms/customerreport/")
+
+        with self.assertNumQueries(1):
+            rows = list(report_admin.get_queryset(request).filter(pk=report.pk))
+            preview = report_admin.chat_dialog_preview(rows[0])
+
+        self.assertEqual(preview, "3 messages")
+
     def test_outage_admin_countdown_sla_states(self):
         model_admin = OutageCaseAdmin(OutageCase, AdminSite())
         future_case = OutageCase.objects.create(
@@ -3243,3 +3359,86 @@ class CsvExportAdminTests(TestCase):
         self.assertEqual(rows[0][:6], ["id", "timestamp", "prefix", "fullname", "address", "ca_number"])
         self.assertEqual(rows[1][3], "CSV User")
         self.assertEqual(rows[1][5], "123456789012")
+
+
+class DataModelQueryTests(TestCase):
+    def test_query_indexes_match_the_hot_paths(self):
+        self.assertTrue(
+            any(
+                isinstance(index, GinIndex) and index.name == "oms_case_ca_gin"
+                for index in OutageCase._meta.indexes
+            )
+        )
+        self.assertEqual(
+            {index.name for index in CustomerReport._meta.indexes},
+            {
+                "oms_report_session_idx",
+                "oms_report_ca_active_idx",
+                "oms_report_case_active_idx",
+            },
+        )
+        self.assertIn(
+            "oms_msg_session_ca_idx",
+            {index.name for index in ChatMessage._meta.indexes},
+        )
+        self.assertIn(
+            "oms_msg_pending_idx",
+            {index.name for index in ChatMessage._meta.indexes},
+        )
+        self.assertIn(
+            "oms_job_state_lookup_idx",
+            {index.name for index in AgentJob._meta.indexes},
+        )
+
+    def test_active_case_lookup_uses_the_affected_ca_snapshot(self):
+        from .views_api import _attach_active_ca_case
+
+        case = OutageCase.objects.create(
+            title="GIN lookup case",
+            affected_ca_numbers=["123456789012"],
+        )
+        report = CustomerReport.objects.create(
+            session_id="gin-lookup-session",
+            ca_number="123456789012",
+        )
+
+        with self.assertNumQueries(2):
+            attached = _attach_active_ca_case(report)
+
+        self.assertTrue(attached)
+        self.assertEqual(report.related_case_id, case.pk)
+
+    @patch.object(OutageCase, "sync_affected_ca_numbers")
+    def test_unrelated_report_save_does_not_resync_case_ca_snapshot(self, sync_ca):
+        case = OutageCase.objects.create(title="No implicit sync case")
+        report = CustomerReport.objects.create(
+            session_id="no-implicit-sync",
+            ca_number="123456789012",
+            related_case=case,
+        )
+        sync_ca.reset_mock()
+
+        report.pdpa_consent = True
+        report.save(update_fields=["pdpa_consent", "updated_at"])
+
+        sync_ca.assert_not_called()
+
+
+class OutageCaseSequenceTests(TransactionTestCase):
+    reset_sequences = True
+
+    @staticmethod
+    def _create_case(index):
+        close_old_connections()
+        try:
+            case = OutageCase.objects.create(title=f"Concurrent case {index}")
+            return case.lv_group_id
+        finally:
+            connections["default"].close()
+
+    def test_lv_group_sequence_is_unique_under_concurrent_creates(self):
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            values = list(executor.map(self._create_case, range(8)))
+
+        self.assertTrue(all(isinstance(value, int) for value in values))
+        self.assertEqual(len(set(values)), len(values))

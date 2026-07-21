@@ -13,7 +13,7 @@
 ### Source of truth
 
 - Django OMS backend เป็น source of truth ของ `CustomerReport` และ `OutageCase`
-- Agent ฝั่ง DSPy ไม่ตัดสินใจสร้างหรือผูกเคสเอง แต่เรียก `Check_Outage_Tool(...)` ซึ่งส่งข้อมูลไปที่ `POST /api/reports/sync/`
+- Agent ฝั่ง DSPy ไม่ตัดสินใจสร้างหรือผูกเคสเอง ข้อความแรกที่อาจเป็นเหตุไฟดับต้องถามยืนยันก่อน และเรียก `Check_Outage_Tool(...)` ซึ่งส่งข้อมูลไปที่ `POST /api/reports/sync/` ได้เฉพาะ turn ถัดมาที่ลูกค้ายืนยันแล้ว
 - OMS หรือระบบภายนอกส่ง event เข้า Django ผ่าน `POST /api/oms/events/`
 - `oms_api` เป็น service สำหรับรับคำสั่งจาก OMS/operator แล้ว forward event เข้า Django
 
@@ -85,7 +85,8 @@ Closed-loop ใช้ event เดียวกันคือ `event_type="close
 ### Entry points
 
 - ลูกค้า login ด้วย CA ผ่านหน้า chat
-- Agent เรียก `Check_Outage_Tool(ca_number, pdpa_consent=True)`
+- Agent ถามยืนยันว่าไฟดับอยู่และต้องการให้การไฟฟ้าตรวจสอบ
+- เมื่อลูกค้าตอบยืนยันใน turn ถัดไป Agent จึงเรียก `Check_Outage_Tool(ca_number, pdpa_consent=True)`
 - Tool ส่งข้อมูลไปที่ `POST /api/reports/sync/`
 
 ### Flow หลัก
@@ -94,20 +95,21 @@ Closed-loop ใช้ event เดียวกันคือ `event_type="close
 2. ระบบ validate CA กับ `CustomerLocation`
 3. ถ้า CA ถูกต้อง ระบบสร้างหรือ reuse `CustomerReport` ที่ยังไม่ resolved สำหรับ `session_id + ca_number`
 4. ระบบบันทึก customer location, PDPA consent และ session context ลง report
-5. เมื่อลูกค้าแจ้งไฟดับ Agent เรียก `Check_Outage_Tool`
-6. `/api/reports/sync/` ตรวจว่า report นี้ยังผูกกับ active case หรือไม่
-7. ถ้าไม่พบ active case สำหรับ CA นี้ ระบบเรียก assessment เพื่อหา ETA, branch, และข้อมูล ETR จาก model/บริการประเมิน
-8. ถ้า assessment สำเร็จ ระบบสร้าง `OutageCase` ใหม่:
+5. เมื่อลูกค้าแจ้งหรืออาจกำลังถามถึงไฟดับ Agent ถามยืนยันก่อนโดยไม่เรียก outage API
+6. เมื่อลูกค้าตอบยืนยันในข้อความถัดไป Agent เรียก `Check_Outage_Tool`; ตัว tool ปฏิเสธการทำงานหากไม่มี confirmation state เพื่อกันการเปิดใบงานจาก routing ที่ผิด
+7. `/api/reports/sync/` ตรวจว่า report นี้ยังผูกกับ active case หรือไม่
+8. ถ้าไม่พบ active case สำหรับ CA นี้ ระบบเรียก assessment เพื่อหา ETA, branch, และข้อมูล ETR จาก model/บริการประเมิน
+9. ถ้า assessment สำเร็จ ระบบสร้าง `OutageCase` ใหม่:
    - `case_type="normal"`
    - `status="reported"`
    - `affected_ca_numbers=[ca_number]`
    - พิกัดจาก `CustomerLocation`
-9. ระบบผูก `CustomerReport.related_case` เข้ากับเคสใหม่
-10. ระบบ attach waiting reports ของ CA เดียวกันที่ยังไม่มีเคสเข้ากับเคสนี้
-11. ระบบ sync `affected_ca_numbers`
-12. ระบบตั้ง ETA timer และ SLA timer
-13. API ตอบ `event_type="new_event"` กลับให้ Agent
-14. Agent แจ้งลูกค้าว่าเปิดใบงานแล้ว พร้อม branch/ETA/ETR เท่าที่มี
+10. ระบบผูก `CustomerReport.related_case` เข้ากับเคสใหม่
+11. ระบบ attach waiting reports ของ CA เดียวกันที่ยังไม่มีเคสเข้ากับเคสนี้
+12. ระบบ sync `affected_ca_numbers`
+13. ระบบตั้ง ETA timer และ SLA timer
+14. API ตอบ `event_type="new_event"` กลับให้ Agent
+15. Agent แจ้งลูกค้าว่าเปิดใบงานแล้ว พร้อม branch/ETA/ETR เท่าที่มี
 
 ### Decision table
 
@@ -260,6 +262,7 @@ Closed-loop ใช้ event เดียวกันคือ `event_type="close
 - OMS sync outage ผ่าน `/api/v1/oms/outage/sync`
 - `oms_api` ส่ง callback เข้า Django ที่ `POST /api/oms/events/`
 - Django upsert case ผ่าน `_upsert_oms_case(...)`
+- ถ้า Django merge case id ที่ OMS สร้างเข้ากับ active anchor, response จะคืน `canonical_case_id`; หน้า console ต้องใช้ id นี้สำหรับ Update ETR และ Close ครั้งต่อไป
 
 ### Flow เปิด mass outage
 
@@ -315,6 +318,8 @@ OMS อาจส่ง event เดิมซ้ำได้ ระบบจึ�
 6. ระบบส่ง proactive `etr_update` ไปยัง unresolved reports ของเคสนั้น โดย dedupe ต่อ session
 
 ถ้าเคสเป็น `restored` หรือ `merged` แล้ว จะไม่ตั้ง timer ใหม่
+
+สำหรับหน้า console ที่พอร์ต `8002` หาก callback ชี้ว่า case id ถูก merge ระบบจะเปลี่ยนช่อง Case ID ไปเป็น canonical anchor อัตโนมัติหลัง Open ส่วน Update/Close ที่ยิงด้วย merged child เก่าจะถูกหยุดไว้และให้ผู้ใช้ตรวจสอบ canonical id ก่อนกดคำสั่งอีกครั้ง
 
 ### Flow OMS close/restored mass outage
 
@@ -439,6 +444,8 @@ mass_outage reported/investigating/repairing
 ```text
 ลูกค้า CA A login
   -> แจ้งไฟดับ
+  -> Agent ถามยืนยันโดยยังไม่เปิดใบงาน
+  -> ลูกค้าตอบยืนยันใน turn ถัดไป
   -> ไม่พบ active case
   -> assessment สำเร็จ
   -> create normal case N1
@@ -493,6 +500,8 @@ OMS close M1 เป็น restored
 ## Acceptance Checklist
 
 - Chat-created case เป็น `normal` เสมอ
+- ข้อความแรกที่แจ้งหรืออาจหมายถึงไฟดับต้องถามยืนยัน และยังไม่สร้าง/ผูกเคส
+- `Check_Outage_Tool` เปิดทางให้ sync ได้หลัง confirmation state หรือ closed-loop prompt เท่านั้น
 - Mass/group case สร้างจาก OMS เท่านั้น
 - CA ซ้ำ attach เข้า active case เดิมถ้าไม่ใช่ closed-loop still-out
 - `restored` และ `merged` ไม่ถูกใช้เป็น active case สำหรับ report ใหม่

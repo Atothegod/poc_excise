@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
 
+import dspy
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
@@ -14,6 +15,11 @@ app = FastAPI(title="Stateless DSPy Agent")
 INTERNAL_TOKEN = os.getenv(
     "AGENT_INTERNAL_TOKEN", "development-agent-internal-token"
 )
+
+
+def _lm_history_size():
+    lm = getattr(getattr(dspy, "settings", None), "lm", None)
+    return len(getattr(lm, "history", []) or [])
 
 
 @app.get("/health")
@@ -56,6 +62,7 @@ def ask_agent(
         raise HTTPException(status_code=401, detail="invalid_internal_token")
 
     try:
+        history_size_before = _lm_history_size()
         final_time_stamp = datetime.now(ZoneInfo("Asia/Bangkok")).isoformat()
         response = chatbot.chat(
             user_input=data.question,
@@ -65,6 +72,8 @@ def ask_agent(
             pdpa_consent=data.pdpa_consent,
             user_message_id=data.user_message_id,
         )
+        if _lm_history_size() > history_size_before:
+            dspy.inspect_history(n=1)
         return {
             "answer": getattr(response, "answer", str(response)),
             "state": _state_payload(

@@ -26,12 +26,12 @@ class OmsApiTests(unittest.TestCase):
         load_customers()
         self.client = TestClient(app)
 
-    def _django_ok(self):
+    def _django_ok(self, case_id="11111111-1111-1111-1111-111111111111"):
         response = Mock()
         response.status_code = 200
         response.json.return_value = {
             "status": "success",
-            "case_id": "11111111-1111-1111-1111-111111111111",
+            "case_id": case_id,
         }
         response.text = '{"status": "success"}'
         return response
@@ -47,18 +47,24 @@ class OmsApiTests(unittest.TestCase):
 
     def test_customer_list_returns_all_loaded_customers_by_default(self):
         response = self.client.get("/customers")
+        expected_count = len(app_module.CUSTOMERS)
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["total"], 160)
-        self.assertEqual(response.json()["returned"], 160)
-        self.assertEqual(len(response.json()["customers"]), 160)
+        self.assertGreater(expected_count, 0)
+        self.assertEqual(response.json()["total"], expected_count)
+        self.assertEqual(response.json()["returned"], expected_count)
+        self.assertEqual(len(response.json()["customers"]), expected_count)
 
     def test_health_exposes_csv_debug_counts(self):
         response = self.client.get("/health")
+        expected_count = len(app_module.CUSTOMERS)
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["customers_loaded"], 160)
-        self.assertEqual(response.json()["customers_with_coordinates"], 157)
+        self.assertGreater(expected_count, 0)
+        self.assertEqual(response.json()["customers_loaded"], expected_count)
+        self.assertEqual(
+            response.json()["customers_with_coordinates"], expected_count
+        )
         self.assertTrue(response.json()["csv_exists"])
 
     def test_nearby_radius_endpoint_is_removed(self):
@@ -82,6 +88,8 @@ class OmsApiTests(unittest.TestCase):
         self.assertIn('<option value="update">', html)
         self.assertIn('<option value="close">', html)
         self.assertIn('fetch("/customers")', html)
+        self.assertIn("caseId.value = canonicalCaseId", html)
+        self.assertIn("requires_retry_with_canonical_case_id", html)
         self.assertNotIn("/customers/nearby", html)
 
     def test_cases_report_is_removed_from_merge_lifecycle(self):
@@ -115,6 +123,78 @@ class OmsApiTests(unittest.TestCase):
             payload["case"]["affected_ca_numbers"],
             [FIRST_CA, SECOND_CA],
         )
+        self.assertEqual(
+            response.json()["canonical_case_id"],
+            "11111111-1111-1111-1111-111111111111",
+        )
+        self.assertFalse(response.json()["case_id_changed"])
+        self.assertTrue(response.json()["action_applied"])
+
+    def test_open_case_returns_canonical_id_when_django_merges_the_case(self):
+        app_module.DJANGO_OMS_EVENT_URL = "http://backend.test/api/oms/events/"
+        requested_case_id = "11111111-1111-1111-1111-111111111111"
+        canonical_case_id = "22222222-2222-2222-2222-222222222222"
+        with patch(
+            "app.requests.post",
+            return_value=self._django_ok(case_id=canonical_case_id),
+        ) as mock_post:
+            response = self.client.post(
+                "/cases/open",
+                json={
+                    "case_id": requested_case_id,
+                    "affected_ca_numbers": [FIRST_CA],
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(mock_post.call_count, 1)
+        body = response.json()
+        self.assertEqual(body["requested_case_id"], requested_case_id)
+        self.assertEqual(body["canonical_case_id"], canonical_case_id)
+        self.assertEqual(body["case_id"], canonical_case_id)
+        self.assertTrue(body["case_id_changed"])
+        self.assertTrue(body["action_applied"])
+        self.assertFalse(body["requires_retry_with_canonical_case_id"])
+
+    def test_update_to_merged_child_surfaces_canonical_id_without_auto_retry(self):
+        app_module.DJANGO_OMS_EVENT_URL = "http://backend.test/api/oms/events/"
+        merged_child_id = "11111111-1111-1111-1111-111111111111"
+        canonical_case_id = "22222222-2222-2222-2222-222222222222"
+        with patch(
+            "app.requests.post",
+            return_value=self._django_ok(case_id=canonical_case_id),
+        ) as mock_post:
+            response = self.client.patch(
+                f"/cases/{merged_child_id}",
+                json={"oms_etr": "2026-07-09T11:00:00+00:00"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(mock_post.call_count, 1)
+        body = response.json()
+        self.assertEqual(body["requested_case_id"], merged_child_id)
+        self.assertEqual(body["canonical_case_id"], canonical_case_id)
+        self.assertTrue(body["case_id_changed"])
+        self.assertFalse(body["action_applied"])
+        self.assertTrue(body["requires_retry_with_canonical_case_id"])
+
+    def test_close_to_merged_child_surfaces_canonical_id_without_auto_retry(self):
+        app_module.DJANGO_OMS_EVENT_URL = "http://backend.test/api/oms/events/"
+        merged_child_id = "11111111-1111-1111-1111-111111111111"
+        canonical_case_id = "22222222-2222-2222-2222-222222222222"
+        with patch(
+            "app.requests.post",
+            return_value=self._django_ok(case_id=canonical_case_id),
+        ) as mock_post:
+            response = self.client.post(f"/cases/{merged_child_id}/close")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(mock_post.call_count, 1)
+        body = response.json()
+        self.assertEqual(body["canonical_case_id"], canonical_case_id)
+        self.assertTrue(body["case_id_changed"])
+        self.assertFalse(body["action_applied"])
+        self.assertTrue(body["requires_retry_with_canonical_case_id"])
 
     def test_update_etr_and_close_case_proxy_to_django(self):
         app_module.DJANGO_OMS_EVENT_URL = "http://backend.test/api/oms/events/"
